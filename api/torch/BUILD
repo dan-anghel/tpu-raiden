@@ -100,3 +100,85 @@ py_test(
         "@numpy//numpy",
     ],
 )
+
+cc_library(
+    name = "weight_synchronizer_torch",
+    srcs = [
+        "weight_synchronizer.cc",
+    ],
+    hdrs = [
+        "weight_synchronizer.h",
+    ],
+    copts = [
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//third_party/py/torch:aten_headers",
+        "//third_party/py/torch:torch_headers",
+        "//third_party/py/torch/c10/core:base_headers",
+        "//third_party/py/torch/torch/headeronly:torch_headeronly",
+        "//third_party/py/torch_tpu/eager:device_buffer",
+        "//third_party/py/torch_tpu/eager:materialize",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+)
+
+nanobind_extension(
+    name = "_weight_synchronizer",
+    srcs = [
+        "weight_synchronizer_module.cc",
+    ],
+    copts = [
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":weight_synchronizer_torch",
+        "//raiden_lib/raw_transfer:raw_transfer_impl",
+        "//third_party/py/torch:torch_headers",
+        "//third_party/pybind11",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+py_library(
+    name = "weight_synchronizer_torch_py",
+    srcs = ["weight_synchronizer.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":_weight_synchronizer",
+        "//third_party/py/torch:pytorch",
+        "//third_party/py/torch_tpu",
+    ],
+)
+
+py_test(
+    name = "weight_synchronizer_test",
+    srcs = ["weight_synchronizer_test.py"],
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostlite:8",
+        "requires-net:external",
+    ],
+    deps = [
+        ":weight_synchronizer_torch_py",
+        "//third_party/py/torch:pytorch",
+        "//third_party/py/torch_tpu",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@numpy//numpy",
+    ],
+)
