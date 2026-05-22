@@ -14,7 +14,7 @@
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -185,13 +185,70 @@ py_test(
         "requires-ghostfish:4",
         "requires-net:external",
     ],
+)
+
+cc_library(
+    name = "kv_cache_manager_ffi",
+    srcs = [
+        "kv_cache_manager_ffi.cc",
+    ],
+    hdrs = [
+        "kv_cache_manager_ffi.h",
+    ],
+    copts = [
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
     deps = [
-        ":kv_cache_manager",
-        "//learning/brain/research/jax:tpu_support",
-        "//raiden_lib/raw_transfer/jax:raw_transfer",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
+        ":kv_cache_manager_cc_lib",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@xla//xla/ffi",
+        "@xla//xla/ffi/api:c_api",
+        "@xla//xla/ffi/api:ffi",
+        "@xla//xla/stream_executor:device_address",
+        "@xla//xla/stream_executor:platform",
+        "@xla//xla/stream_executor:platform_manager",
+        "@xla//xla/stream_executor:stream",
+        "@xla//xla/stream_executor:stream_executor_h",
+        "@xla//xla/stream_executor/tpu:tpu_executor",
+    ],
+    alwayslink = 1,
+)
+
+nanobind_extension(
+    name = "_kv_cache_manager_ffi",
+    srcs = [
+        "kv_cache_manager_ffi_module.cc",
+    ],
+    copts = [
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_ffi",
+        "//kv_cache:kv_cache_manager_cc_lib",
+        "@nanobind",
+    ],
+)
+
+py_library(
+    name = "kv_cache_manager_ffi_py",
+    srcs = ["kv_cache_manager_ffi.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":_kv_cache_manager_ffi",
         "@jax//jax",
+        "@jax//jax/experimental:compute_on",
         "@numpy//numpy",
     ],
 )
