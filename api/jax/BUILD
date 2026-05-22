@@ -177,3 +177,70 @@ py_test(
         "@numpy//numpy",
     ],
 )
+
+cc_library(
+    name = "weight_synchronizer_jax",
+    srcs = [
+        "weight_synchronizer.cc",
+    ],
+    hdrs = [
+        "weight_synchronizer.h",
+    ],
+    copts = [
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//raiden_lib/raw_transfer:raw_transfer_impl",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@nanobind",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+    alwayslink = 1,
+)
+
+nanobind_extension(
+    name = "_weight_synchronizer",
+    srcs = [
+        "weight_synchronizer_module.cc",
+    ],
+    copts = [
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":weight_synchronizer_jax",
+        "//raiden_lib/raw_transfer:raw_transfer_impl",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status:statusor",
+        "@nanobind",
+    ],
+)
+
+py_library(
+    name = "weight_synchronizer_jax_py",
+    srcs = ["weight_synchronizer.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":_weight_synchronizer",
+    ],
+)
+
+py_test(
+    name = "weight_synchronizer_test",
+    srcs = ["weight_synchronizer_test.py"],
+    deps = [
+        ":weight_synchronizer_jax_py",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@jax//jax",
+        "@numpy//numpy",
+    ],
+)

@@ -46,16 +46,16 @@ TEST_F(WeightSynchronizerTest, PushAndPullWeightsCorrectnessE2e) {
   // 1. Instantiate three independent CPU-only synchronizers locally E2E!
   // ws_source represents the active RL Trainer
   auto ws_source = std::make_unique<WeightSynchronizerBase>(
-      num_layers_, num_shards_, slice_byte_size_, /*block_size=*/1,
+      num_layers_, num_shards_, slice_byte_size_,
       /*local_port=*/0, /*host_blocks_to_allocate=*/1);
 
   // ws_dest1 and ws_dest2 represent inference server peers
   auto ws_dest1 = std::make_unique<WeightSynchronizerBase>(
-      num_layers_, num_shards_, slice_byte_size_, /*block_size=*/1,
+      num_layers_, num_shards_, slice_byte_size_,
       /*local_port=*/0, /*host_blocks_to_allocate=*/1);
 
   auto ws_dest2 = std::make_unique<WeightSynchronizerBase>(
-      num_layers_, num_shards_, slice_byte_size_, /*block_size=*/1,
+      num_layers_, num_shards_, slice_byte_size_,
       /*local_port=*/0, /*host_blocks_to_allocate=*/1);
 
   ASSERT_TRUE(ws_source->local_port().has_value());

@@ -55,8 +55,10 @@ cc_test(
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
+    linkopts = ["-Wl,--allow-shlib-undefined"],
     deps = [
         ":weight_synchronizer_base",
+        "//third_party/python_runtime:embedded_interpreter",  # keep
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
