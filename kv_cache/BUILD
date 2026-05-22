@@ -14,7 +14,6 @@
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -43,9 +42,13 @@ cc_test(
 )
 
 cc_library(
-    name = "kv_cache_manager_cc_lib",
-    srcs = ["kv_cache_manager.cc"],
-    hdrs = ["kv_cache_manager.h"],
+    name = "kv_cache_manager_base",
+    srcs = [
+        "kv_cache_manager_base.cc",
+    ],
+    hdrs = [
+        "kv_cache_manager_base.h",
+    ],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
@@ -63,48 +66,13 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@nanobind",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         "@xla//xla/stream_executor:stream",
         "@xla//xla/tsl/platform:errors",
         "@xla//xla/tsl/platform:statusor",
     ],
-)
-
-cc_library(
-    name = "kv_cache_manager_lib",
-    srcs = [
-        "kv_cache_manager.cc",
-    ],
-    hdrs = [
-        "kv_cache_manager.h",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        ":logical_block_manager",
-        "//raiden_lib/raw_transfer:raw_transfer_impl",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/cleanup",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/synchronization",
-        "@nanobind",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:status_casters",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/stream_executor:stream",
-        "@xla//xla/tsl/platform:errors",
-        "@xla//xla/tsl/platform:statusor",
-    ],
+    alwayslink = 1,
 )
 
 nanobind_extension(
@@ -150,105 +118,4 @@ nanobind_extension(
     ],
 )
 
-py_test(
-    name = "kv_cache_manager_test_gl",
-    timeout = "long",
-    srcs = ["kv_cache_manager_test.py"],
-    main = "kv_cache_manager_test.py",
-    tags = [
-        "cpu:8",
-        "notap",
-        "requires-accel-hbm",
-        "requires-ghostlite:8",
-        "requires-net:external",
-    ],
-    deps = [
-        ":kv_cache_manager",
-        "//learning/brain/research/jax:tpu_support",
-        "//raiden_lib/raw_transfer/jax:raw_transfer",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
-        "@numpy//numpy",
-    ],
-)
-
-py_test(
-    name = "kv_cache_manager_test_gf",
-    timeout = "long",
-    srcs = ["kv_cache_manager_test.py"],
-    main = "kv_cache_manager_test.py",
-    tags = [
-        "cpu:8",
-        "notap",
-        "requires-accel-hbm",
-        "requires-ghostfish:4",
-        "requires-net:external",
-    ],
-)
-
-cc_library(
-    name = "kv_cache_manager_ffi",
-    srcs = [
-        "kv_cache_manager_ffi.cc",
-    ],
-    hdrs = [
-        "kv_cache_manager_ffi.h",
-    ],
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_cc_lib",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@xla//xla/ffi",
-        "@xla//xla/ffi/api:c_api",
-        "@xla//xla/ffi/api:ffi",
-        "@xla//xla/stream_executor:device_address",
-        "@xla//xla/stream_executor:platform",
-        "@xla//xla/stream_executor:platform_manager",
-        "@xla//xla/stream_executor:stream",
-        "@xla//xla/stream_executor:stream_executor_h",
-        "@xla//xla/stream_executor/tpu:tpu_executor",
-    ],
-    alwayslink = 1,
-)
-
-nanobind_extension(
-    name = "_kv_cache_manager_ffi",
-    srcs = [
-        "kv_cache_manager_ffi_module.cc",
-    ],
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_ffi",
-        "//kv_cache:kv_cache_manager_cc_lib",
-        "@nanobind",
-    ],
-)
-
-py_library(
-    name = "kv_cache_manager_ffi_py",
-    srcs = ["kv_cache_manager_ffi.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":_kv_cache_manager_ffi",
-        "@jax//jax",
-        "@jax//jax/experimental:compute_on",
-        "@numpy//numpy",
-    ],
-)
+# JAX test targets successfully relocated to api/jax/BUILD.

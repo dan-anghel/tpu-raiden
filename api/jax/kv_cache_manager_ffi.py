@@ -27,7 +27,7 @@ from jax.experimental import compute_on
 import jax.numpy as jnp
 import numpy as np
 
-from kv_cache import _kv_cache_manager_ffi
+from api.jax import _kv_cache_manager_ffi
 
 
 def init(

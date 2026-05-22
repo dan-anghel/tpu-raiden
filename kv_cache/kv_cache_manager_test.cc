@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "kv_cache/kv_cache_manager.h"
-
 #include <gtest/gtest.h>
+#include "kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {
 namespace kv_cache {

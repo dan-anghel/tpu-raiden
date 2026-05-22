@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from kv_cache import kv_cache_manager
+from api.jax import kv_cache_manager
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 

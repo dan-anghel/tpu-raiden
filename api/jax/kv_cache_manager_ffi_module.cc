@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_MANAGER_FFI_H_
-#define THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_MANAGER_FFI_H_
+#include "api/jax/kv_cache_manager.h"
+#include "api/jax/kv_cache_manager_ffi.h"
 
-namespace tpu_raiden {
-namespace kv_cache {
+namespace nb = nanobind;
 
-class KVCacheManager;
+NB_MODULE(_kv_cache_manager_ffi, m) {
+  m.def("destroy_kv_cache", []() {
+    for (int i = 0; i < 32; ++i) {
+      if (tpu_raiden::kv_cache::g_kv_cache_managers[i] != nullptr) {
+        delete tpu_raiden::kv_cache::g_kv_cache_managers[i];
+        tpu_raiden::kv_cache::g_kv_cache_managers[i] = nullptr;
+      }
+    }
+  });
 
-// Global registry map for distributed JAX meshes multi-device support
-extern KVCacheManager* g_kv_cache_managers[32];
-
-void SyncCopies();
-
-}  // namespace kv_cache
-}  // namespace tpu_raiden
-
-#endif  // THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_MANAGER_FFI_H_
+  m.def("sync_copies", &tpu_raiden::kv_cache::SyncCopies);
+}
