@@ -110,7 +110,8 @@ class BlockTransport {
 
   void H2hReadWorker(int stream_idx, const std::string& peer,
                      size_t blocks_per_stream, size_t remote_blocks_per_stream,
-                     int base_remote_id, const std::vector<int>& allocated_ids,
+                     const std::vector<int>& src_block_ids,
+                     const std::vector<int>& allocated_ids,
                      const std::vector<uint8_t*>& explicit_dst_ptrs,
                      std::vector<absl::Status>& statuses);
 
