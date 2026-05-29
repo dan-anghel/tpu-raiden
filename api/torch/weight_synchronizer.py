@@ -19,7 +19,7 @@ from typing import List, Optional
 import torch
 
 # Import Pybind11 dynamic binary extension E2E!
-from api.torch import _weight_synchronizer
+from frameworks.torch import _weight_synchronizer
 
 
 class WeightSynchronizer:

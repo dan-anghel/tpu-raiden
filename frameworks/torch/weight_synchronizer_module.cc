@@ -22,8 +22,8 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "absl/status/status.h"
-#include "api/torch/weight_synchronizer.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/torch/weight_synchronizer.h"
 #include "torch/extension.h"
 
 namespace py = pybind11;

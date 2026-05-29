@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_API_TORCH_WEIGHT_SYNCHRONIZER_H_
-#define THIRD_PARTY_TPU_RAIDEN_API_TORCH_WEIGHT_SYNCHRONIZER_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_WEIGHT_SYNCHRONIZER_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_WEIGHT_SYNCHRONIZER_H_
 
 #include <cstddef>
 #include <memory>
@@ -41,4 +41,4 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
 }  // namespace torch
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_API_TORCH_WEIGHT_SYNCHRONIZER_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_WEIGHT_SYNCHRONIZER_H_

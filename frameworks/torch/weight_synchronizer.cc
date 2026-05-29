@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "api/torch/weight_synchronizer.h"
+#include "frameworks/torch/weight_synchronizer.h"
 
 #include <cstddef>
 #include <memory>
@@ -27,7 +27,6 @@
 #include "weight_sync/weight_synchronizer_base.h"
 #include "torch_tpu/eager/device_buffer.h"
 #include "torch_tpu/eager/materialize.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {

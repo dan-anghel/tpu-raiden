@@ -104,6 +104,7 @@ py_test(
     ],
     deps = [
         ":kv_cache_manager_torch_py",
+        ":weight_synchronizer_torch_py",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@pypi//numpy",
@@ -112,66 +113,12 @@ py_test(
     ],
 )
 
-cc_library(
-    name = "weight_synchronizer_torch",
-    srcs = ["weight_synchronizer.cc"],
-    hdrs = ["weight_synchronizer.h"],
-    copts = [
-        "-std=c++20",
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//weight_sync:weight_synchronizer_base",
-        "@com_google_absl//absl/status",
-        "@stablehlo//:attr_type_builder_util",
-        "@stablehlo//:chlo_builder",
-        "@stablehlo//:chlo_ops",
-        "@stablehlo//:func_builder",
-        "@stablehlo//:mlir_builder",
-        "@stablehlo//:stablehlo_builder",
-        "@stablehlo//:stablehlo_ops",
-        "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/c10/core:base_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:materialize",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
-        "@xla//xla/pjrt:pjrt_client",
-    ],
-)
-
-nanobind_extension(
-    name = "_weight_synchronizer",
-    srcs = ["weight_synchronizer_module.cc"],
-    copts = [
-        "-fexceptions",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":weight_synchronizer_torch",
-        "//core:raw_transfer_core",
-        "//weight_sync:weight_synchronizer_base",
-        "@com_google_absl//absl/status",
-        "@pybind11",
-        "@torch_tpu//shims/torch:torch_headers",
-    ],
-)
-
 py_library(
     name = "weight_synchronizer_torch_py",
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":_weight_synchronizer",
+        "//frameworks/torch:_weight_synchronizer",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
     ],
