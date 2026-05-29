@@ -21,28 +21,40 @@ licenses(["notice"])
 
 py_library(
     name = "utils",
-    srcs = ["utils.py"],
-    deps = [
-        "@com_google_absl_py//absl/flags",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
+    srcs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": ["utils.py"],
+    }),
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "@com_google_absl_py//absl/flags",
+            "@jax//jax",
+            "@pypi//numpy",
+        ],
+    }),
 )
 
 nanobind_extension(
     name = "raw_transfer",
-    srcs = [
-        "raw_transfer.cc",
-    ],
+    srcs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "raw_transfer.cc",
+        ],
+    }),
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
-    deps = [
-        "//api/jax:jax_utils",
-        "//core:raw_transfer_impl",
-        "@com_google_absl//absl/status",
-        "@xla//xla/pjrt:status_casters",
-    ],
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "//api/jax:jax_utils",
+            "//core:raw_transfer_impl",
+            "@com_google_absl//absl/status",
+            "@xla//xla/pjrt:status_casters",
+        ],
+    }),
 )

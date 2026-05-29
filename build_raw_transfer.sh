@@ -44,31 +44,106 @@ fi
 
 "${BAZEL_BIN}" --version
 
-echo "=== Building raw_transfer and kv_cache_manager with Bazel ==="
-"${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx512m" --host_jvm_args="-Xms128m" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
+# Default behavior based on auto-detection
+BUILD_JAX=true
+BUILD_TORCH=true
+
+if [ ! -d "../torch_tpu" ]; then
+  echo "Sibling torch_tpu checkout not found. Defaulting to JAX-only build."
+  BUILD_TORCH=false
+fi
+
+# Parse command line arguments
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    jax)
+      BUILD_JAX=true
+      BUILD_TORCH=false
+      ;;
+    torch)
+      BUILD_JAX=false
+      BUILD_TORCH=true
+      ;;
+    both)
+      BUILD_JAX=true
+      BUILD_TORCH=true
+      ;;
+    *)
+      echo "Usage: $0 [jax|torch|both]"
+      exit 1
+      ;;
+  esac
+fi
+
+BAZEL_TARGETS=()
+DEFINE_FLAGS=""
+
+if [ "$BUILD_JAX" = true ]; then
+  echo "Configuring build for JAX..."
+  BAZEL_TARGETS+=(
+    "//raiden_lib/raw_transfer/jax:raw_transfer"
+    "//api/jax:_kv_cache_manager"
+    "//api/jax:_kv_cache_manager_ffi"
+    "//api/jax:_weight_synchronizer"
+  )
+else
+  DEFINE_FLAGS+=" --define with_jax=false"
+fi
+
+if [ "$BUILD_TORCH" = true ]; then
+  echo "Configuring build for Torch..."
+  BAZEL_TARGETS+=(
+    "//raiden_lib/raw_transfer/torch:_torch_raw_transfer"
+    "//api/torch:_kv_cache_manager"
+    "//api/torch:_weight_synchronizer"
+  )
+else
+  DEFINE_FLAGS+=" --define with_torch=false"
+fi
+
+if [ ${#BAZEL_TARGETS[@]} -eq 0 ]; then
+  echo "No targets selected to build!"
+  exit 1
+fi
+
+echo "=== Building targets with Bazel ==="
+"${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx32g" --host_jvm_args="-Xms2g" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
   --repo_env=PIP_INDEX_URL="https://pypi.org/simple" \
   --repo_env=PIP_EXTRA_INDEX_URL="" \
   --repo_env=PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
   --repo_env=PIP_CONFIG_FILE="/dev/null" \
-  //raiden_lib/raw_transfer/jax:raw_transfer \
-  //api/jax:_kv_cache_manager \
-  //api/jax:_kv_cache_manager_ffi \
-  //api/jax:_weight_synchronizer \
+  "${BAZEL_TARGETS[@]}" \
+  ${DEFINE_FLAGS} \
   --disk_cache=${BAZEL_DISK_CACHE} \
   --repository_cache=${BAZEL_REPO_CACHE} \
   "$@"
 
 
 echo "=== Copying compiled shared libraries to source directory ==="
-cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax/"
-cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/jax/"
-cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/api/jax/"
-cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/jax/"
+if [ "$BUILD_JAX" = true ]; then
+  echo "Copying JAX artifacts..."
+  cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/api/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/jax/"
+fi
+
+if [ "$BUILD_TORCH" = true ]; then
+  echo "Copying Torch artifacts..."
+  cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/torch/"
+fi
 
 
 echo "=== Build Complete! ==="
-echo "Artifacts are located in: ${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/"
+if [ "$BUILD_JAX" = true ]; then
+  echo "JAX Artifacts are located in: ${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/"
+fi
+if [ "$BUILD_TORCH" = true ]; then
+  echo "Torch Artifacts are located in: ${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/"
+fi
 
 echo "=== Install Python Dependencies! ==="
 pip install -r requirements.txt

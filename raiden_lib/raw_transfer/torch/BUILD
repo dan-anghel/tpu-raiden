@@ -21,51 +21,67 @@ licenses(["notice"])
 
 nanobind_extension(
     name = "_torch_raw_transfer",
-    srcs = [
-        "torch_raw_transfer.cc",
-    ],
+    srcs = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            "torch_raw_transfer.cc",
+        ],
+    }),
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
-    deps = [
-        "//core:raw_transfer_core",
-        "//third_party/py/torch:aten_headers",
-        "//third_party/py/torch:torch_headers",
-        "//third_party/py/torch/c10/core:base_headers",
-        "//third_party/py/torch/torch/headeronly:torch_headeronly",
-        "//third_party/py/torch_tpu/eager:device_buffer",
-        "//third_party/py/torch_tpu/eager:materialize",
-        "//third_party/py/torch_tpu/eager:tensor_to_buffer",
-        "//third_party/pybind11",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:common_pjrt_client",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:pjrt_layout",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/concurrency:ref_count",
-    ],
+    deps = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            "//core:raw_transfer_core",
+            "//third_party/py/torch:aten_headers",
+            "//third_party/py/torch:torch_headers",
+            "//third_party/py/torch/c10/core:base_headers",
+            "//third_party/py/torch/torch/headeronly:torch_headeronly",
+            "//third_party/pybind11",
+            "@com_google_absl//absl/status",
+            "@com_google_absl//absl/status:statusor",
+            "@torch_tpu//eager:device_buffer",
+            "@torch_tpu//eager:materialize",
+            "@torch_tpu//eager:tensor_to_buffer",
+            "@xla//xla:future",
+            "@xla//xla:shape_util",
+            "@xla//xla/pjrt:common_pjrt_client",
+            "@xla//xla/pjrt:pjrt_client",
+            "@xla//xla/pjrt:pjrt_layout",
+            "@xla//xla/pjrt:raw_buffer",
+            "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+            "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+            "@xla//xla/tsl/concurrency:ref_count",
+        ],
+    }),
 )
 
 py_library(
     name = "torch_raw_transfer",
-    srcs = ["torch_raw_transfer.py"],
-    deps = [
-        "//third_party/py/torch:pytorch",
-        "//third_party/py/torch_tpu",
-    ],
+    srcs = select({
+        "//:torch_disabled": [],
+        "//conditions:default": ["torch_raw_transfer.py"],
+    }),
+    deps = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            ":_torch_raw_transfer",
+            "//third_party/py/torch:pytorch",
+            "@torch_tpu",
+        ],
+    }),
 )
 
 py_test(
     name = "torch_raw_transfer_perf_test_gl",
     timeout = "long",
-    srcs = ["torch_raw_transfer_perf_test.py"],
+    srcs = select({
+        "//:torch_disabled": [],
+        "//conditions:default": ["torch_raw_transfer_perf_test.py"],
+    }),
     main = "torch_raw_transfer_perf_test.py",
     tags = [
         "cpu:8",
@@ -74,21 +90,27 @@ py_test(
         "requires-ghostlite:8",
         "requires-net:external",
     ],
-    deps = [
-        ":torch_raw_transfer",
-        "//pyglib/contrib/g3_multiprocessing",
-        "//third_party/py/torch:pytorch",
-        "//third_party/py/torch_tpu",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@pypi//numpy",
-    ],
+    deps = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            ":torch_raw_transfer",
+            "//pyglib/contrib/g3_multiprocessing",
+            "//third_party/py/torch:pytorch",
+            "@com_google_absl_py//absl/testing:absltest",
+            "@com_google_absl_py//absl/testing:parameterized",
+            "@pypi//numpy",
+            "@torch_tpu",
+        ],
+    }),
 )
 
 py_test(
     name = "torch_raw_transfer_perf_test_gf",
     timeout = "long",
-    srcs = ["torch_raw_transfer_perf_test.py"],
+    srcs = select({
+        "//:torch_disabled": [],
+        "//conditions:default": ["torch_raw_transfer_perf_test.py"],
+    }),
     main = "torch_raw_transfer_perf_test.py",
     tags = [
         "cpu:8",
@@ -97,15 +119,18 @@ py_test(
         "requires-ghostfish:4",
         "requires-net:external",
     ],
-    deps = [
-        ":torch_raw_transfer",
-        "//pyglib/contrib/g3_multiprocessing",
-        "//third_party/py/torch:pytorch",
-        "//third_party/py/torch_tpu",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@pypi//numpy",
-    ],
+    deps = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            ":torch_raw_transfer",
+            "//pyglib/contrib/g3_multiprocessing",
+            "//third_party/py/torch:pytorch",
+            "@com_google_absl_py//absl/testing:absltest",
+            "@com_google_absl_py//absl/testing:parameterized",
+            "@pypi//numpy",
+            "@torch_tpu",
+        ],
+    }),
 )
 
 test_suite(
@@ -119,7 +144,10 @@ test_suite(
 py_test(
     name = "torch_raw_transfer_test_gl",
     timeout = "long",
-    srcs = ["torch_raw_transfer_test.py"],
+    srcs = select({
+        "//:torch_disabled": [],
+        "//conditions:default": ["torch_raw_transfer_test.py"],
+    }),
     main = "torch_raw_transfer_test.py",
     tags = [
         "cpu:8",
@@ -128,20 +156,26 @@ py_test(
         "requires-ghostlite:8",
         "requires-net:external",
     ],
-    deps = [
-        ":torch_raw_transfer",
-        "//third_party/py/torch:pytorch",
-        "//third_party/py/torch_tpu",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@pypi//numpy",
-    ],
+    deps = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            ":torch_raw_transfer",
+            "//third_party/py/torch:pytorch",
+            "@com_google_absl_py//absl/testing:absltest",
+            "@com_google_absl_py//absl/testing:parameterized",
+            "@pypi//numpy",
+            "@torch_tpu",
+        ],
+    }),
 )
 
 py_test(
     name = "torch_raw_transfer_test_gf",
     timeout = "long",
-    srcs = ["torch_raw_transfer_test.py"],
+    srcs = select({
+        "//:torch_disabled": [],
+        "//conditions:default": ["torch_raw_transfer_test.py"],
+    }),
     main = "torch_raw_transfer_test.py",
     tags = [
         "cpu:8",
@@ -150,14 +184,17 @@ py_test(
         "requires-ghostfish:4",
         "requires-net:external",
     ],
-    deps = [
-        ":torch_raw_transfer",
-        "//third_party/py/torch:pytorch",
-        "//third_party/py/torch_tpu",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@pypi//numpy",
-    ],
+    deps = select({
+        "//:torch_disabled": [],
+        "//conditions:default": [
+            ":torch_raw_transfer",
+            "//third_party/py/torch:pytorch",
+            "@com_google_absl_py//absl/testing:absltest",
+            "@com_google_absl_py//absl/testing:parameterized",
+            "@pypi//numpy",
+            "@torch_tpu",
+        ],
+    }),
 )
 
 test_suite(

@@ -187,7 +187,7 @@ void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
 torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
   return ValueOrThrow(
       "Failed to materialize TPU tensor",
-      torch_tpu::GetMaterialized(
+      torch_tpu::MaterializeAndReturn(
           tensor, torch_tpu::MaterializationReason::kCpuTransfer));
 }
 

@@ -12,17 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//third_party/bazel_rules/rules_cc/cc/common:cc_info.bzl", "CcInfo", "merge_cc_infos")
-load("//third_party/bazel_rules/rules_cc/cc/private:cc_info.bzl", "create_linking_context")
+# Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
+# =============================================================================
+
+"""Rule to create a CcInfo containing only headers from dependencies."""
 
 def _header_only_cc_info_impl(ctx):
-    merged = merge_cc_infos(
-        direct_cc_infos = [dep[CcInfo] for dep in ctx.attr.deps],
-    )
+    compilation_contexts = [dep[CcInfo].compilation_context for dep in ctx.attr.deps]
     return [
         CcInfo(
-            compilation_context = merged.compilation_context,
-            linking_context = create_linking_context(
+            compilation_context = cc_common.merge_compilation_contexts(
+                compilation_contexts = compilation_contexts,
+            ),
+            linking_context = cc_common.create_linking_context(
                 linker_inputs = depset(),
             ),
         ),

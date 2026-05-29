@@ -20,12 +20,18 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "kv_cache_manager_jax",
-    srcs = [
-        "kv_cache_manager.cc",
-    ],
-    hdrs = [
-        "kv_cache_manager.h",
-    ],
+    srcs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "kv_cache_manager.cc",
+        ],
+    }),
+    hdrs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "kv_cache_manager.h",
+        ],
+    }),
     copts = [
         "-fexceptions",
         "-march=x86-64-v2",
@@ -34,18 +40,24 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = [
-        ":jax_utils",
-        "//kv_cache:kv_cache_manager_base",
-        "@nanobind",
-    ],
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            ":jax_utils",
+            "//kv_cache:kv_cache_manager_base",
+            "@nanobind",
+        ],
+    }),
 )
 
 cc_library(
     name = "jax_utils",
-    hdrs = [
-        "jax_utils.h",
-    ],
+    hdrs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "jax_utils.h",
+        ],
+    }),
     copts = [
         "-fexceptions",
     ],
@@ -53,14 +65,17 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = [
-        "@jax//jaxlib:py_client",
-        "@nanobind",
-        "@rules_python//python/cc:current_py_cc_headers",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/python/ifrt",
-        "@xla//xla/python/pjrt_ifrt",
-    ],
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "@jax//jaxlib:py_client",
+            "@nanobind",
+            "@rules_python//python/cc:current_py_cc_headers",
+            "@xla//xla/pjrt:pjrt_client",
+            "@xla//xla/python/ifrt",
+            "@xla//xla/python/pjrt_ifrt",
+        ],
+    }),
 )
 
 cc_library(
@@ -148,12 +163,18 @@ py_test(
 
 cc_library(
     name = "kv_cache_manager_ffi",
-    srcs = [
-        "kv_cache_manager_ffi.cc",
-    ],
-    hdrs = [
-        "kv_cache_manager_ffi.h",
-    ],
+    srcs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "kv_cache_manager_ffi.cc",
+        ],
+    }),
+    hdrs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "kv_cache_manager_ffi.h",
+        ],
+    }),
     copts = [
         "-fexceptions",
         "-march=x86-64-v2",
@@ -162,18 +183,21 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_jax",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@xla//xla/ffi/api:c_api",
-        "@xla//xla/ffi/api:ffi",
-        "@xla//xla/stream_executor:platform",
-        "@xla//xla/stream_executor:platform_manager",
-        "@xla//xla/stream_executor:stream",
-        "@xla//xla/stream_executor:stream_executor_h",
-        "@xla//xla/stream_executor/tpu:tpu_executor",
-    ],
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            ":kv_cache_manager_jax",
+            "@com_google_absl//absl/log",
+            "@com_google_absl//absl/status",
+            "@xla//xla/ffi/api:c_api",
+            "@xla//xla/ffi/api:ffi",
+            "@xla//xla/stream_executor:platform",
+            "@xla//xla/stream_executor:platform_manager",
+            "@xla//xla/stream_executor:stream",
+            "@xla//xla/stream_executor:stream_executor_h",
+            "@xla//xla/stream_executor/tpu:tpu_executor",
+        ],
+    }),
     alwayslink = 1,
 )
 
@@ -210,12 +234,18 @@ py_library(
 
 cc_library(
     name = "weight_synchronizer_ffi",
-    srcs = [
-        "weight_synchronizer_ffi.cc",
-    ],
-    hdrs = [
-        "weight_synchronizer_ffi.h",
-    ],
+    srcs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "weight_synchronizer_ffi.cc",
+        ],
+    }),
+    hdrs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "weight_synchronizer_ffi.h",
+        ],
+    }),
     copts = [
         "-fexceptions",
         "-march=x86-64-v2",
@@ -224,16 +254,19 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = [
-        ":weight_synchronizer_jax",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@xla//xla/ffi/api:ffi",
-        "@xla//xla/stream_executor:platform",
-        "@xla//xla/stream_executor:platform_manager",
-        "@xla//xla/stream_executor:stream",
-        "@xla//xla/stream_executor:stream_executor_h",
-    ],
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            ":weight_synchronizer_jax",
+            "@com_google_absl//absl/log",
+            "@com_google_absl//absl/status",
+            "@xla//xla/ffi/api:ffi",
+            "@xla//xla/stream_executor:platform",
+            "@xla//xla/stream_executor:platform_manager",
+            "@xla//xla/stream_executor:stream",
+            "@xla//xla/stream_executor:stream_executor_h",
+        ],
+    }),
     alwayslink = 1,
 )
 
@@ -291,12 +324,18 @@ py_test(
 
 cc_library(
     name = "weight_synchronizer_jax",
-    srcs = [
-        "weight_synchronizer.cc",
-    ],
-    hdrs = [
-        "weight_synchronizer.h",
-    ],
+    srcs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "weight_synchronizer.cc",
+        ],
+    }),
+    hdrs = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            "weight_synchronizer.h",
+        ],
+    }),
     copts = [
         "-fexceptions",
     ],
@@ -304,14 +343,17 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = [
-        ":jax_utils",
-        "//weight_sync:weight_synchronizer_base",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
-        "@xla//xla/pjrt:pjrt_client",
-    ],
+    deps = select({
+        "//:jax_disabled": [],
+        "//conditions:default": [
+            ":jax_utils",
+            "//weight_sync:weight_synchronizer_base",
+            "@com_google_absl//absl/status",
+            "@com_google_absl//absl/status:statusor",
+            "@nanobind",
+            "@xla//xla/pjrt:pjrt_client",
+        ],
+    }),
     alwayslink = 1,
 )
 

@@ -12,12 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TODO: sixiang - Write module docstring."""
+# Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
+# ==============================================================================
 
 def _torch_tpu_headers_repository_impl(repository_ctx):
     workspace_file = str(repository_ctx.path(repository_ctx.attr.workspace_file))
     workspace_root = workspace_file[:workspace_file.rfind("/")]
-    source = repository_ctx.path(workspace_root + "/" + repository_ctx.attr.path)
+    source_path = workspace_root + "/" + repository_ctx.attr.path
+
+    enable_torch = repository_ctx.os.environ.get("WITH_TORCH", "1")
+    if enable_torch == "0":
+        _create_dummy_headers(repository_ctx)
+        return
+
+    result = repository_ctx.execute(["test", "-d", source_path])
+    if result.return_code != 0:
+        _create_dummy_headers(repository_ctx)
+        return
+
+    source = repository_ctx.path(source_path)
     result = repository_ctx.execute(
         [
             "bash",
@@ -51,6 +64,21 @@ cc_library(
 """,
     )
 
+def _create_dummy_headers(repository_ctx):
+    repository_ctx.file(
+        "BUILD.bazel",
+        """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "headers",
+    hdrs = [],
+    strip_include_prefix = ".",
+    include_prefix = "torch_tpu",
+)
+""",
+    )
+
 torch_tpu_headers_repository = repository_rule(
     implementation = _torch_tpu_headers_repository_impl,
     attrs = {
@@ -60,5 +88,6 @@ torch_tpu_headers_repository = repository_rule(
             default = Label("//:MODULE.bazel"),
         ),
     },
+    environ = ["WITH_TORCH"],
     local = True,
 )

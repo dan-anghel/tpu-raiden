@@ -27,7 +27,7 @@
 # limitations under the License.
 """High-performance worker-to-worker resharding engine for TPU Raiden."""
 
-from typing import Tuple
+from typing import Optional, Tuple
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -36,7 +36,7 @@ from api.jax import resharding_planner
 from api.jax import weight_synchronizer_ffi as raiden_ffi
 from rpc import coordination_helper
 
-_COORDINATION_SERVER = None
+_COORDINATION_SERVER: Optional[coordination_helper.CoordinationServer] = None
 
 DEFAULT_IPV4_ADDRESS = "10.255.255.255"
 DEFAULT_IPV6_ADDRESS = "2001:4860:4860::8888"

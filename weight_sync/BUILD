@@ -40,6 +40,7 @@ cc_library(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
         "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         "@xla//xla/tsl/platform:errors",
         "@xla//xla/tsl/platform:statusor",
