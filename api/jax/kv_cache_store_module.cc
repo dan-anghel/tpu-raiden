@@ -30,8 +30,6 @@
 
 namespace nb = nanobind;
 
-
-
 NB_MODULE(kv_cache_store, m) {
   nb::module_::import_(
       "google3.third_party.tpu_raiden.raiden_lib.raw_transfer.jax.raw_"
