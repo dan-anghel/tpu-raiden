@@ -266,3 +266,22 @@ nanobind_extension(
         "@nanobind",
     ],
 )
+
+nanobind_extension(
+    name = "_raw_transfer",
+    srcs = [
+        "raw_transfer.cc",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":jax_utils",
+        "//core:raw_transfer_impl",
+        "@com_google_absl//absl/status",
+        "@xla//xla/pjrt:status_casters",
+    ],
+)

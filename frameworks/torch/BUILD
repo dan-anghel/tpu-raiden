@@ -180,3 +180,28 @@ nanobind_extension(
         "@torch_tpu//shims/torch:aten_headers",
     ],
 )
+
+nanobind_extension(
+    name = "_torch_raw_transfer",
+    srcs = ["torch_raw_transfer.cc"],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":torch_nanobind_utils",
+        ":torch_tpu_utils",
+        "//core:host_memory_allocator",
+        "//core:raw_transfer_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@xla//xla:future",
+        "@xla//xla:shape_util",
+        "@xla//xla/pjrt:common_pjrt_client",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:pjrt_layout",
+        "@xla//xla/pjrt:raw_buffer",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+        "@xla//xla/tsl/concurrency:ref_count",
+    ],
+)

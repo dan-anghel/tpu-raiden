@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_python//python:defs.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -29,18 +28,12 @@ py_library(
     ],
 )
 
-nanobind_extension(
+py_library(
     name = "raw_transfer",
-    srcs = ["raw_transfer.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
+    srcs = [
+        "raw_transfer.py",
     ],
-    features = ["-use_header_modules"],
     deps = [
-        "//core:raw_transfer_impl",
-        "//frameworks/jax:jax_utils",
-        "@com_google_absl//absl/status",
-        "@xla//xla/pjrt:status_casters",
+        "//frameworks/jax:_raw_transfer",
     ],
 )

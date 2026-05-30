@@ -294,7 +294,7 @@ inline bool is_ready(const nb::object& future_obj) {
   return true;
 }
 
-NB_MODULE(raw_transfer, m) {
+NB_MODULE(_raw_transfer, m) {
   nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
       .def("Await",
            [](PjRtCopyFuture& future) {
