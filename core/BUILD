@@ -258,3 +258,31 @@ cc_test(
         "@xla//xla/tsl/platform:test_main",
     ],
 )
+
+cc_test(
+    name = "raiden_manager_base_test",
+    srcs = ["raiden_manager_base_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    tags = [
+        "no_oss",
+        "requires-jellyfish",
+    ],
+    deps = [
+        ":host_memory_allocator",
+        ":raiden_manager_base",
+        ":tpu_pjrt_manager",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@xla//xla/tsl/platform:status_matchers",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
