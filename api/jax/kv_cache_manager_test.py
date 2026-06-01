@@ -361,7 +361,7 @@ class KVCacheManagerTest(parameterized.TestCase):
         device_arrays=tpu_dst_arrs,
         block_size=block_size,
         local_port=0,
-        host_blocks_to_allocate=4,
+        host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
     )
     time.sleep(0.05)
@@ -372,7 +372,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     src_manager = kv_cache_manager.KVCacheManager(
         device_arrays=tpu_src_arrs,
         block_size=block_size,
-        host_blocks_to_allocate=4,
+        host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
     )
     # Populate src_manager's host buffer first
@@ -381,10 +381,9 @@ class KVCacheManagerTest(parameterized.TestCase):
     # Push block ID 2 (slices 4:6) to remote peer server.
     peer = f"127.0.0.1:{port}"
     allocated_ids, future = src_manager.h2h_write(
-        peer=peer, src_block_ids=[2], entity_id=202
+        peer=peer, src_block_ids=[4, 5], entity_id=202
     )
-    self.assertLen(allocated_ids, 1)
-    self.assertEqual(allocated_ids[0], 0)
+    self.assertEqual(allocated_ids, [0, 1])
     future.Await()
 
     # To verify, dst_manager received data into its host buffer.
@@ -441,7 +440,7 @@ class KVCacheManagerTest(parameterized.TestCase):
         device_arrays=tpu_src_arrs,
         block_size=block_size,
         local_port=0,
-        host_blocks_to_allocate=4,
+        host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
     )
     # Populate remote host buffer
@@ -453,17 +452,16 @@ class KVCacheManagerTest(parameterized.TestCase):
     local_manager = kv_cache_manager.KVCacheManager(
         device_arrays=tpu_dst_arrs,
         block_size=block_size,
-        host_blocks_to_allocate=4,
+        host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
     peer = f"127.0.0.1:{port}"
     # Pull remote block ID 1 (slices 2:4) into local host memory.
     allocated_ids, future = local_manager.h2h_read(
-        peer=peer, src_block_ids=[1], entity_id=303
+        peer=peer, src_block_ids=[2, 3], entity_id=303
     )
-    self.assertLen(allocated_ids, 1)
-    self.assertEqual(allocated_ids[0], 0)
+    self.assertEqual(allocated_ids, [0, 1])
     future.Await()
 
     # Copy from local host buffer to tpu_dst_arrs to verify

@@ -40,11 +40,11 @@ KVCacheManager::KVCacheManager(
 }
 
 KVCacheManager::KVCacheManager(
-    std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers, int block_size,
-    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    UnpackedCache&& cache, int block_size, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
-    bool unsafe_skip_buffer_lock, int parallelism, nanobind::list device_arrays)
-    : KVCacheManagerBase(layer_buffers, block_size, local_port,
+    bool unsafe_skip_buffer_lock, int parallelism)
+    : KVCacheManagerBase(cache.layer_buffers, block_size, local_port,
                          host_blocks_to_allocate, std::nullopt,
                          unsafe_skip_buffer_lock, parallelism) {
   throw std::runtime_error(

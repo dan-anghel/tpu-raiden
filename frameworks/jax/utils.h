@@ -32,7 +32,7 @@ namespace tpu_raiden {
 namespace jax {
 
 inline std::vector<std::vector<xla::PjRtBuffer*>> UnpackJaxArrays(
-    nanobind::list jax_arrays) {
+    const nanobind::list& jax_arrays) {
   size_t num_layers = nanobind::len(jax_arrays);
   if (num_layers == 0) return {};
 

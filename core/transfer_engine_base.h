@@ -158,17 +158,18 @@ class TransferEngineBase {
   PollFinishedRaw();
 
   // Helpers for subclasses / nanobindings
-  StageResult IssueD2H(int64_t slot_idx, int64_t num_blocks,
-                       const std::vector<int64_t>& block_ids);
+  virtual StageResult IssueD2H(int64_t slot_idx, int64_t num_blocks,
+                               const std::vector<int64_t>& block_ids);
 
-  StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
-                       const std::vector<int64_t>& local_block_ids);
+  virtual StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
+                               const std::vector<int64_t>& local_block_ids);
 
-  CommitResult CommitH2DRaw(int64_t slot_idx, int64_t num_blocks,
-                            const std::vector<int64_t>& local_block_ids);
+  virtual CommitResult CommitH2DRaw(
+      int64_t slot_idx, int64_t num_blocks,
+      const std::vector<int64_t>& local_block_ids);
 
-  std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
-                                                    int64_t num_blocks);
+  virtual std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
+                                                            int64_t num_blocks);
 
   int local_control_port() const { return local_control_port_; }
   int local_data_port() const { return local_data_port_; }
@@ -259,6 +260,10 @@ class TransferEngineBase {
 
   int64_t StorePending(PendingOperation op);
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
+
+  static CopySpec Offsets(const std::vector<int64_t>& block_ids,
+                          bool source_is_compact);
+  static kv_cache::KVCacheCopySpec ToKVCacheCopySpec(const CopySpec& spec);
 
   std::unique_ptr<kv_cache::KVCacheManagerBase> kv_transfer_;
   int64_t tp_rank_ = 0;

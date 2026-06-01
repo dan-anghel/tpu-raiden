@@ -183,8 +183,8 @@ static std::vector<int64_t> ReadBlockIds(int fd, uint64_t num_blocks) {
   return block_ids;
 }
 
-static CopySpec Offsets(const std::vector<int64_t>& block_ids,
-                        bool source_is_compact) {
+static CopySpec OffsetsImpl(const std::vector<int64_t>& block_ids,
+                            bool source_is_compact) {
   const int64_t n = static_cast<int64_t>(block_ids.size());
   CopySpec spec;
   spec.src_offsets.reserve(block_ids.size());
@@ -209,7 +209,7 @@ static CopySpec Offsets(const std::vector<int64_t>& block_ids,
   return spec;
 }
 
-static kv_cache::KVCacheCopySpec ToKVCacheCopySpec(const CopySpec& spec) {
+static kv_cache::KVCacheCopySpec ToKVCacheCopySpecImpl(const CopySpec& spec) {
   return {.src_offsets = spec.src_offsets,
           .dst_offsets = spec.dst_offsets,
           .sizes = spec.sizes};
@@ -228,7 +228,7 @@ static CopyPlan BuildProducerCopyPlan(const std::vector<int64_t>& block_ids) {
   plan.requested_remote_block_ids = block_ids;
   plan.producer_remote_block_ids = CanonicalSendBlockIds(block_ids);
   plan.d2h_copy =
-      Offsets(plan.producer_remote_block_ids, /*source_is_compact=*/false);
+      OffsetsImpl(plan.producer_remote_block_ids, /*source_is_compact=*/false);
   return plan;
 }
 
@@ -280,7 +280,8 @@ static CopyPlan BuildLoadCopyPlan(const std::vector<int64_t>& remote_block_ids,
   if (identity_reorder) {
     plan.host_dst_to_src.clear();
   }
-  plan.h2d_copy = Offsets(plan.h2d_local_block_ids, /*source_is_compact=*/true);
+  plan.h2d_copy =
+      OffsetsImpl(plan.h2d_local_block_ids, /*source_is_compact=*/true);
   return plan;
 }
 
@@ -314,6 +315,16 @@ static double DurationMs(std::chrono::steady_clock::time_point start,
 }
 
 }  // namespace
+
+CopySpec TransferEngineBase::Offsets(const std::vector<int64_t>& block_ids,
+                                     bool source_is_compact) {
+  return OffsetsImpl(block_ids, source_is_compact);
+}
+
+kv_cache::KVCacheCopySpec TransferEngineBase::ToKVCacheCopySpec(
+    const CopySpec& spec) {
+  return ToKVCacheCopySpecImpl(spec);
+}
 
 void TransferEngineBase::ValidateRequestedBlocks(
     const SendEntry& entry, const std::vector<int64_t>& requested_block_ids) {

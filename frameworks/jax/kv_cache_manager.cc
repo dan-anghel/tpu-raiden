@@ -27,30 +27,43 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace jax {
 
+namespace {
+UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
+  auto layer_buffers = tpu_raiden::jax::UnpackJaxArrays(device_arrays);
+  return {std::move(layer_buffers), std::move(device_arrays)};
+}
+}  // namespace
+
 KVCacheManager::KVCacheManager(
     nb::list device_arrays, int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManager(tpu_raiden::jax::UnpackJaxArrays(device_arrays),
-                     block_size, local_port, host_blocks_to_allocate,
-                     external_host_ptrs, unsafe_skip_buffer_lock, parallelism,
-                     std::move(device_arrays)) {}
+    // NOTE: To achieve zero-copy initialization while remaining robust against
+    // unspecified C++ function/constructor argument evaluation order (Clang
+    // typically evaluates left-to-right, GCC evaluates right-to-left), we
+    // enforce sequencing through a helper function `UnpackAndMove`. The
+    // function call boundary acts as a strict sequencing barrier, guaranteeing
+    // that `UnpackJaxArrays` is fully evaluated before the Python list handle
+    // is moved into ownership, preventing use-after-move segfaults.
+    : KVCacheManager(UnpackAndMove(std::move(device_arrays)), block_size,
+                     local_port, host_blocks_to_allocate, external_host_ptrs,
+                     unsafe_skip_buffer_lock, parallelism) {}
 
 KVCacheManager::KVCacheManager(
-    std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers, int block_size,
-    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    UnpackedCache&& cache, int block_size, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
-    bool unsafe_skip_buffer_lock, int parallelism, nanobind::list device_arrays)
-    : KVCacheManagerBase(layer_buffers, block_size, local_port,
-                         host_blocks_to_allocate,
-                         tpu_raiden::CastExternalPointers(external_host_ptrs),
-                         unsafe_skip_buffer_lock, parallelism,
-                         tpu_raiden::CreateHostMemoryAllocator(
-                             layer_buffers.empty() || layer_buffers[0].empty()
-                                 ? nullptr
-                                 : layer_buffers[0][0]->device()->client())),
-      device_arrays_(std::move(device_arrays)) {}
+    bool unsafe_skip_buffer_lock, int parallelism)
+    : KVCacheManagerBase(
+          cache.layer_buffers, block_size, local_port, host_blocks_to_allocate,
+          tpu_raiden::CastExternalPointers(external_host_ptrs),
+          unsafe_skip_buffer_lock, parallelism,
+          tpu_raiden::CreateHostMemoryAllocator(
+              cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
+                  ? nullptr
+                  : cache.layer_buffers[0][0]->device()->client())),
+      device_arrays_(std::move(cache.device_arrays)) {}
 
 KVCacheManager::~KVCacheManager() = default;
 

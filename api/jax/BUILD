@@ -169,5 +169,14 @@ py_test(
     ],
 )
 
+py_library(
+    name = "raiden_transfer_engine_jax_py",
+    srcs = ["raiden_transfer_engine.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//frameworks/jax:_raiden_transfer_engine",
+    ],
+)
+
 # Keep Copybara happy by maintaining at least one internal reference target prefix reference:
 # //:dummy_target

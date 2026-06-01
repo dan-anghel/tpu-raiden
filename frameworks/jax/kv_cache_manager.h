@@ -34,9 +34,18 @@ struct list {
 #endif
 #include "kv_cache/kv_cache_manager_base.h"
 
+namespace xla {
+class PjRtBuffer;
+}  // namespace xla
+
 namespace tpu_raiden {
 namespace kv_cache {
 namespace jax {
+
+struct UnpackedCache {
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers;
+  nanobind::list device_arrays;
+};
 
 class KVCacheManager : public KVCacheManagerBase {
  public:
@@ -53,12 +62,11 @@ class KVCacheManager : public KVCacheManagerBase {
   ~KVCacheManager() override;
 
  private:
-  KVCacheManager(std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers,
-                 int block_size, std::optional<int> local_port,
+  KVCacheManager(UnpackedCache&& cache, int block_size,
+                 std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  std::optional<std::vector<uintptr_t>> external_host_ptrs,
-                 bool unsafe_skip_buffer_lock, int parallelism,
-                 nanobind::list device_arrays);
+                 bool unsafe_skip_buffer_lock, int parallelism);
 
   std::optional<nanobind::list> device_arrays_;
 };
