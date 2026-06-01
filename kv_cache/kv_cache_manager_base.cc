@@ -91,16 +91,19 @@ KVCacheManagerBase::KVCacheManagerBase(
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
 
+  is_blocked_layout_ = (shape.dimensions().size() == 5);
+
   physical_size_ = first_buffer->GetOnDeviceSizeInBytes().value();
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
+  int total_blocks = 0;
   if (shape.dimensions().size() > 0) {
     major_dim_size_ = shape.dimensions(0);
-    int total_blocks = major_dim_size_ / block_size_;
+    total_blocks =
+        is_blocked_layout_ ? major_dim_size_ : (major_dim_size_ / block_size_);
     block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
   }
 
-  int total_blocks = major_dim_size_ / block_size_;
   int num_host_blocks = host_blocks_to_allocate.value_or(64);
   if (external_host_ptrs.has_value()) {
     num_host_blocks = total_blocks;
@@ -131,7 +134,7 @@ KVCacheManagerBase::KVCacheManagerBase(
             "Device buffer shard size smaller than physical size");
       }
 
-      size_t alloc_size = num_host_blocks * block_size_ * slice_byte_size_;
+      size_t alloc_size = num_host_blocks * bytes_per_block();
       if (external_host_ptrs.has_value()) {
         if (shard_idx < external_host_ptrs->size()) {
           shard_info.host_ptr = (*external_host_ptrs)[shard_idx];
@@ -210,7 +213,7 @@ KVCacheManagerBase::KVCacheManagerBase(
       ShardBufferInfoBase shard_info;
 
       int num_host_blocks = host_blocks_to_allocate.value_or(0);
-      size_t alloc_size = num_host_blocks * block_size_ * slice_byte_size_;
+      size_t alloc_size = num_host_blocks * bytes_per_block();
       if (host_allocator) {
         auto status_or_allocation = host_allocator(alloc_size);
         if (!status_or_allocation.ok()) {
@@ -336,6 +339,14 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::DispatchD2hChunks(
 
       std::vector<xla::Future<>> shard_futures;
       if (!is_partial) {
+        if (dst_host_ptr == nullptr) {
+          return absl::FailedPreconditionError(
+              "Destination host pointer is null");
+        }
+        if (physical_size_ > shard_info.host_size) {
+          return absl::OutOfRangeError(
+              "Copy range exceeds destination host buffer size");
+        }
         xla::Future<> future =
             shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
         shard_futures.push_back(std::move(future));
@@ -599,6 +610,13 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
 
       std::vector<xla::Future<>> shard_futures;
       if (!is_partial) {
+        if (shard_info.host_ptr == nullptr) {
+          return absl::FailedPreconditionError("Source host pointer is null");
+        }
+        if (physical_size_ > shard_info.host_size) {
+          return absl::OutOfRangeError(
+              "Copy range exceeds source host buffer size");
+        }
         xla::Future<> future = shard_hold.CopyRawHostToDevice(
             shard_info.host_ptr, 0, physical_size_);
         shard_futures.push_back(std::move(future));
@@ -824,6 +842,13 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFromHostSlot(
   TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
                       HostSpan(layer_idx, shard_idx, slot_idx, num_major));
   return H2dFrom(layer_idx, span.ptr, span.nbytes, copy_spec, shard_idx);
+}
+
+size_t KVCacheManagerBase::bytes_per_block() const {
+  if (is_blocked_layout_) {
+    return slice_byte_size_;
+  }
+  return block_size_ * slice_byte_size_;
 }
 
 }  // namespace kv_cache

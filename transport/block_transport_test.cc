@@ -32,16 +32,23 @@ namespace {
 
 class MockDelegate : public BlockTransportDelegate {
  public:
-  MockDelegate(size_t slice_size, int max_blocks = 1)
-      : slice_size_(slice_size), max_blocks_(max_blocks) {
-    buffer_.resize(slice_size_ * max_blocks_, 0);
+  MockDelegate(size_t slice_size, int max_blocks = 1, size_t num_layers = 1,
+               size_t num_shards = 1)
+      : slice_size_(slice_size),
+        max_blocks_(max_blocks),
+        num_layers_(num_layers),
+        num_shards_(num_shards) {
+    buffers_.resize(num_layers_ * num_shards_);
+    for (auto& buffer : buffers_) {
+      buffer.resize(slice_size_ * max_blocks_, 0);
+    }
   }
 
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
                                                   int64_t entity_id) override {
     std::vector<int> ids;
     for (size_t i = 0; i < num_blocks; ++i) {
-      ids.push_back(static_cast<int>(i));
+      ids.push_back(i % max_blocks_);
     }
     return ids;
   }
@@ -49,32 +56,41 @@ class MockDelegate : public BlockTransportDelegate {
   absl::Status OnDataReceived() override { return absl::OkStatus(); }
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override {
-    return buffer_.data();
+    return buffers_[BufferIndex(layer_idx, shard_idx)].data();
   }
 
   size_t GetHostSize(size_t layer_idx, size_t shard_idx) override {
-    return buffer_.size();
+    return buffers_[BufferIndex(layer_idx, shard_idx)].size();
   }
 
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     return base_remote_id + chunk_k;
   }
 
-  size_t num_layers() const override { return 1; }
-  size_t num_shards() const override { return 1; }
+  size_t num_layers() const override { return num_layers_; }
+  size_t num_shards() const override { return num_shards_; }
   size_t slice_byte_size() const override { return slice_size_; }
   int block_size() const override { return 1; }
   size_t shard_factor() const override { return 1; }
 
-  uint8_t* data() { return buffer_.data(); }
-  uint8_t* block_data(int block_id) {
-    return buffer_.data() + block_id * slice_size_;
+  uint8_t* data(size_t layer_idx = 0, size_t shard_idx = 0) {
+    return buffers_[BufferIndex(layer_idx, shard_idx)].data();
+  }
+  uint8_t* block_data(int block_id, size_t layer_idx = 0,
+                      size_t shard_idx = 0) {
+    return data(layer_idx, shard_idx) + block_id * slice_size_;
   }
 
  private:
+  size_t BufferIndex(size_t layer_idx, size_t shard_idx) const {
+    return layer_idx * num_shards_ + shard_idx;
+  }
+
   size_t slice_size_;
   int max_blocks_;
-  std::vector<uint8_t> buffer_;
+  size_t num_layers_;
+  size_t num_shards_;
+  std::vector<std::vector<uint8_t>> buffers_;
 };
 
 TEST(BlockTransportTest, PushAndPullCorrectness) {
@@ -178,6 +194,62 @@ TEST(BlockTransportTest, PullNonContiguous) {
   // Local Block 1 should have 0xCC (from remote Block 2)
   EXPECT_EQ(delegate2.block_data(1)[0], 0xCC);
   EXPECT_EQ(delegate2.block_data(1)[size - 1], 0xCC);
+}
+
+TEST(BlockTransportTest, PullExplicitDestPtrsMultiLayerUnevenParallelism) {
+  constexpr size_t kSliceSize = 16;
+  constexpr int kNumBlocks = 3;
+  constexpr size_t kNumLayers = 2;
+  MockDelegate source(kSliceSize, kNumBlocks, kNumLayers);
+  MockDelegate receiver(kSliceSize, kNumBlocks, kNumLayers);
+
+  for (size_t layer = 0; layer < kNumLayers; ++layer) {
+    for (int block = 0; block < kNumBlocks; ++block) {
+      std::memset(source.block_data(block, layer),
+                  static_cast<int>(0x10 + layer * 0x10 + block), kSliceSize);
+    }
+  }
+
+  std::vector<uint8_t> layer0(kSliceSize * kNumBlocks, 0);
+  std::vector<uint8_t> layer1(kSliceSize * kNumBlocks, 0);
+  std::vector<uint8_t*> explicit_dst_ptrs = {layer0.data(), layer1.data()};
+
+  BlockTransport source_transport(&source, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string source_peer =
+      "localhost:" + std::to_string(source_transport.local_port());
+  auto pull_res = receiver_transport.Pull(source_peer, {0, 1, 2}, {0, 1, 2},
+                                          explicit_dst_ptrs,
+                                          /*parallelism=*/2);
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+  EXPECT_EQ(*pull_res, std::vector<int>({0, 1, 2}));
+
+  for (int block = 0; block < kNumBlocks; ++block) {
+    EXPECT_EQ(layer0[block * kSliceSize], 0x10 + block);
+    EXPECT_EQ(layer0[(block + 1) * kSliceSize - 1], 0x10 + block);
+    EXPECT_EQ(layer1[block * kSliceSize], 0x20 + block);
+    EXPECT_EQ(layer1[(block + 1) * kSliceSize - 1], 0x20 + block);
+  }
+}
+
+TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
+  constexpr size_t kSliceSize = 16;
+  constexpr int kNumBlocks = 1;
+  MockDelegate source(kSliceSize, kNumBlocks);
+  MockDelegate receiver(kSliceSize, kNumBlocks);
+
+  BlockTransport source_transport(&source, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string source_peer =
+      "localhost:" + std::to_string(source_transport.local_port());
+  auto pull_res = receiver_transport.Pull(source_peer, {1}, {0});
+  EXPECT_FALSE(pull_res.ok());
 }
 
 }  // namespace

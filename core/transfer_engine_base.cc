@@ -64,7 +64,6 @@
 #include "absl/status/statusor.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/kv_cache_manager_base.h"
-#include "transport/socket_transport.h"
 
 namespace tpu_raiden {
 namespace {
@@ -343,9 +342,7 @@ TransferEngineBase::TransferEngineBase(
     : kv_transfer_(std::move(kv_transfer)),
       tp_rank_(tp_rank),
       local_control_port_(static_cast<int>(local_control_port)),
-      local_data_port_(static_cast<int>(local_control_port) == 0
-                           ? 0
-                           : static_cast<int>(local_control_port) + 1),
+      local_data_port_(0),
       max_blocks_(max_blocks),
       num_slots_(num_slots),
       timeout_s_(timeout_s),
@@ -356,9 +353,9 @@ TransferEngineBase::TransferEngineBase(
   if (num_slots <= 0) {
     throw std::invalid_argument("num_slots must be positive");
   }
-  transport_ = std::make_unique<tpu_raiden::transport::SocketTransport>(
-      local_data_port_);
-  local_data_port_ = transport_->local_port();
+  if (kv_transfer_) {
+    ConfigureDataPortFromKvTransfer();
+  }
   InitializeSlotPool(num_slots_);
   StartControlServer();
 }
@@ -493,42 +490,48 @@ int64_t TransferEngineBase::SubmitLoad(
           if (response.num_layers != local_spans.size()) {
             throw std::runtime_error("remote layer descriptor count mismatch");
           }
-          for (size_t i = 0; i < local_spans.size(); ++i) {
-            PullLayerDescriptor layer;
-            const auto descriptor_start = std::chrono::steady_clock::now();
-            CheckStatus("control stream layer descriptor read",
-                        ReadExact(control_fd, &layer, sizeof(layer)));
-            descriptor_ms +=
-                DurationMs(descriptor_start, std::chrono::steady_clock::now());
-            if (layer.len != static_cast<uint64_t>(local_spans[i].nbytes)) {
-              throw std::runtime_error("remote layer descriptor size mismatch");
-            }
-            ++h2h_layers;
-            h2h_bytes += static_cast<int64_t>(layer.len);
-            peregrine::Request request;
-            request.op = peregrine::Op::kRead;
-            request.laddr = local_spans[i].ptr;
-            request.raddr = reinterpret_cast<uint8_t*>(layer.addr);
-            request.len = layer.len;
-            const auto h2h_start = std::chrono::steady_clock::now();
-            auto handle_or = transport_->Post(
-                EndpointWithPort(remote_endpoint, response.data_port), request);
-            if (!handle_or.ok()) {
-              ThrowStatus("SocketTransport read failed", handle_or.status());
-            }
-            auto status_or = transport_->Poll(handle_or.value());
-            if (!status_or.ok() ||
-                status_or.value() != peregrine::Status::kSuccess) {
-              throw std::runtime_error("SocketTransport read did not succeed");
-            }
-            h2h_ms += DurationMs(h2h_start, std::chrono::steady_clock::now());
+          PullBlockDescriptor block_descriptor;
+          const auto descriptor_start = std::chrono::steady_clock::now();
+          CheckStatus("control stream block descriptor read",
+                      ReadExact(control_fd, &block_descriptor,
+                                sizeof(block_descriptor)));
+          descriptor_ms +=
+              DurationMs(descriptor_start, std::chrono::steady_clock::now());
+          if (block_descriptor.num_blocks !=
+              static_cast<uint64_t>(load_plan.num_blocks)) {
+            throw std::runtime_error("remote block descriptor size mismatch");
+          }
 
-            if (load_plan.RequiresHostReorder()) {
-              const auto reorder_start = std::chrono::steady_clock::now();
-              ReorderCompactBlocks(local_spans[i], load_plan.host_dst_to_src);
-              host_reorder_ms +=
-                  DurationMs(reorder_start, std::chrono::steady_clock::now());
+          std::vector<uint8_t*> explicit_dst_ptrs;
+          explicit_dst_ptrs.reserve(local_spans.size());
+          for (const kv_cache::KVCacheHostSpan& span : local_spans) {
+            explicit_dst_ptrs.push_back(span.ptr);
+            ++h2h_layers;
+            h2h_bytes += static_cast<int64_t>(span.nbytes);
+          }
+
+          std::vector<int> remote_staging_block_ids = ContiguousBlockIds(
+              block_descriptor.remote_block_base, block_descriptor.num_blocks);
+          std::vector<int> local_compact_block_ids =
+              ContiguousBlockIds(/*base=*/0, block_descriptor.num_blocks);
+          const auto h2h_start = std::chrono::steady_clock::now();
+          auto h2h_future_or = kv_transfer_->H2hReadExplicit(
+              EndpointWithPort(remote_endpoint, response.data_port),
+              remote_staging_block_ids, local_compact_block_ids,
+              explicit_dst_ptrs);
+          if (!h2h_future_or.ok()) {
+            ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
+          }
+          h2h_future_or.value().Await();
+          h2h_ms += DurationMs(h2h_start, std::chrono::steady_clock::now());
+
+          if (load_plan.RequiresHostReorder()) {
+            const auto reorder_start = std::chrono::steady_clock::now();
+            for (const kv_cache::KVCacheHostSpan& span : local_spans) {
+              ReorderCompactBlocks(span, load_plan.host_dst_to_src);
             }
+            host_reorder_ms +=
+                DurationMs(reorder_start, std::chrono::steady_clock::now());
           }
 
           const auto h2d_start = std::chrono::steady_clock::now();
@@ -969,13 +972,11 @@ void TransferEngineBase::ProcessPullStream(int fd,
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
-  for (size_t i = 0; i < d2h.host_spans.size(); ++i) {
-    PullLayerDescriptor layer;
-    layer.addr = reinterpret_cast<uint64_t>(d2h.host_spans[i].ptr);
-    layer.len = d2h.host_spans[i].nbytes;
-    CheckStatus("control stream layer descriptor write",
-                WriteExact(fd, &layer, sizeof(layer)));
-  }
+  PullBlockDescriptor descriptor;
+  descriptor.remote_block_base = StagingBlockBase(slot_idx);
+  descriptor.num_blocks = static_cast<uint64_t>(entry->num_blocks);
+  CheckStatus("control stream block descriptor write",
+              WriteExact(fd, &descriptor, sizeof(descriptor)));
   const auto response_ms =
       DurationMs(response_start, std::chrono::steady_clock::now());
 
@@ -1103,6 +1104,52 @@ CopyPlan TransferEngineBase::BuildLoadCopyPlanForTesting(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids) const {
   return BuildLoadCopyPlan(remote_block_ids, local_block_ids);
+}
+
+void TransferEngineBase::ConfigureDataPortFromKvTransfer() {
+  if (!kv_transfer_) {
+    local_data_port_ = 0;
+    return;
+  }
+  std::optional<int> data_port = kv_transfer_->local_port();
+  if (!data_port.has_value()) {
+    throw std::runtime_error("KVCacheManager BlockTransport is not running");
+  }
+  local_data_port_ = *data_port;
+}
+
+uint64_t TransferEngineBase::StagingBlockBase(int64_t slot_idx) const {
+  if (slot_idx < 0) {
+    throw std::out_of_range("slot_idx out of range");
+  }
+  if (slot_idx >
+      std::numeric_limits<int64_t>::max() / std::max<int64_t>(max_blocks_, 1)) {
+    throw std::out_of_range("staging block base exceeds int64 range");
+  }
+  const int64_t base = slot_idx * max_blocks_;
+  if (base < 0 ||
+      base > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+    throw std::out_of_range("staging block base exceeds int range");
+  }
+  return static_cast<uint64_t>(base);
+}
+
+std::vector<int> TransferEngineBase::ContiguousBlockIds(uint64_t base,
+                                                        uint64_t count) const {
+  if (count > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+    throw std::out_of_range("block count exceeds int range");
+  }
+  if (base > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+      count >
+          static_cast<uint64_t>(std::numeric_limits<int>::max()) - base + 1) {
+    throw std::out_of_range("block id range exceeds int range");
+  }
+  std::vector<int> ids;
+  ids.reserve(static_cast<size_t>(count));
+  for (uint64_t i = 0; i < count; ++i) {
+    ids.push_back(static_cast<int>(base + i));
+  }
+  return ids;
 }
 
 }  // namespace tpu_raiden

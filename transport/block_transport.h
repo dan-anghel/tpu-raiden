@@ -50,8 +50,11 @@ class BlockTransportDelegate {
 
   virtual uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
                                        int block_id) {
-    return GetHostPointer(layer_idx, shard_idx) +
-           block_id * block_size() * slice_byte_size();
+    return GetHostPointer(layer_idx, shard_idx) + block_id * bytes_per_block();
+  }
+
+  virtual size_t bytes_per_block() const {
+    return block_size() * slice_byte_size();
   }
 
   virtual int GetRemoteReadBlockId(int base_remote_id, int chunk_k) = 0;
@@ -103,13 +106,14 @@ class BlockTransport {
   void ListenerLoop();
 
   void H2hWriteWorker(int stream_idx, const std::string& peer,
-                      size_t blocks_per_stream,
+                      size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses);
 
   void H2hReadWorker(int stream_idx, const std::string& peer,
-                     size_t blocks_per_stream, size_t remote_blocks_per_stream,
+                     size_t local_block_offset, size_t local_block_count,
+                     size_t remote_block_offset, size_t remote_block_count,
                      const std::vector<int>& src_block_ids,
                      const std::vector<int>& allocated_ids,
                      const std::vector<uint8_t*>& explicit_dst_ptrs,

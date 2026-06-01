@@ -32,6 +32,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//core:xla_raw_transfer_headers",
         "//frameworks/torch:torch_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
@@ -39,7 +40,6 @@ cc_library(
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -72,6 +72,7 @@ cc_library(
         "-use_header_modules",
     ],
     deps = [
+        "//core:xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
@@ -79,7 +80,6 @@ cc_library(
         "@torch_tpu//torch_tpu/eager:device_buffer",
         "@torch_tpu//torch_tpu/eager:materialize",
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -97,8 +97,8 @@ cc_library(
     ],
     deps = [
         ":torch_tpu_utils",
+        "//core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -189,17 +189,9 @@ nanobind_extension(
         "//core:host_memory_allocator",
         "//core:raw_transfer_core",
         "//core:utils",
+        "//core:xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:common_pjrt_client",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:pjrt_layout",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/concurrency:ref_count",
     ],
 )

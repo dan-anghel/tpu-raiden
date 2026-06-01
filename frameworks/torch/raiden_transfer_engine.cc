@@ -147,8 +147,10 @@ class RaidenTransferEngine : public TransferEngineBase {
         throw std::runtime_error("Failed to configure KVCacheManager: " +
                                  std::string(status.message()));
       }
+      ConfigureDataPortFromKvTransfer();
     } else {
       kv_transfer_ = nullptr;
+      local_data_port_ = 0;
     }
     InitializeSlotPool(num_slots_);
 

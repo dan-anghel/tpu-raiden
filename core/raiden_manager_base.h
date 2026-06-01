@@ -66,6 +66,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t num_shards() const override { return num_shards_; }
   size_t slice_byte_size() const override { return slice_byte_size_; }
   int block_size() const override { return block_size_; }
+  size_t bytes_per_block() const override;
   size_t shard_factor() const override { return shard_factor_; }
 
  protected:

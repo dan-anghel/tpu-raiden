@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -83,6 +84,38 @@ absl::Status ReadExact(int fd, void* buffer, size_t length) {
     }
     ptr += bytes_read;
     remaining -= bytes_read;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
+                                size_t layer_idx, size_t shard_idx,
+                                int block_id, size_t num_blocks,
+                                size_t bytes_per_block) {
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("Negative block id");
+  }
+  if (bytes_per_block == 0) {
+    return absl::InvalidArgumentError("bytes_per_block must be positive");
+  }
+  uint8_t* base = delegate->GetHostPointer(layer_idx, shard_idx);
+  if (base == nullptr) {
+    return absl::FailedPreconditionError("Host pointer is null");
+  }
+  const size_t host_size = delegate->GetHostSize(layer_idx, shard_idx);
+  const size_t first_block = static_cast<size_t>(block_id);
+  if (first_block > std::numeric_limits<size_t>::max() / bytes_per_block) {
+    return absl::OutOfRangeError("Block offset overflows size_t");
+  }
+  const size_t byte_offset = first_block * bytes_per_block;
+  if (num_blocks > std::numeric_limits<size_t>::max() / bytes_per_block) {
+    return absl::OutOfRangeError("Block byte size overflows size_t");
+  }
+  const size_t byte_count = num_blocks * bytes_per_block;
+  if (byte_offset > host_size || byte_count > host_size - byte_offset) {
+    return absl::OutOfRangeError(absl::StrCat(
+        "Block range out of bounds. Block: ", block_id, ", Count: ", num_blocks,
+        ", Bytes per block: ", bytes_per_block, ", Host size: ", host_size));
   }
   return absl::OkStatus();
 }
@@ -220,8 +253,7 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
   BlockPacketHeader header;
   TF_RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
 
-  size_t bytes_per_block =
-      delegate_->block_size() * delegate_->slice_byte_size();
+  size_t bytes_per_block = delegate_->bytes_per_block();
 
   if (header.op == 1) {  // Push
     TF_ASSIGN_OR_RETURN(
@@ -236,6 +268,8 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
         for (size_t k = 0; k < header.num_blocks; ++k) {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           int dst_id = allocated_ids[k];
+          TF_RETURN_IF_ERROR(ValidateBlockRange(
+              delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
           uint8_t* dest_ptr = delegate_->GetBlockHostPointer(l, sh, dst_id);
           TF_RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
         }
@@ -246,6 +280,13 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     TF_RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
     TF_RETURN_IF_ERROR(delegate_->OnDataReceived());
   } else if (header.op == 2) {  // Pull request
+    if (delegate_->shard_factor() == 0) {
+      return absl::InvalidArgumentError("shard_factor must be positive");
+    }
+    if (header.num_blocks % delegate_->shard_factor() != 0) {
+      return absl::InvalidArgumentError(
+          "Requested remote block count is not divisible by shard_factor");
+    }
     BlockPacketHeader resp_header;
     resp_header.op = 2;
     resp_header.remote_block_id = header.local_block_id;
@@ -256,10 +297,19 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
         WriteExact(client_fd, &resp_header, sizeof(resp_header)));
 
     size_t local_blocks = header.num_blocks / delegate_->shard_factor();
+    if (header.remote_block_id >
+            static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+        local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+        local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) -
+                           static_cast<size_t>(header.remote_block_id)) {
+      return absl::OutOfRangeError("Requested block range exceeds int range");
+    }
     for (size_t l = 0; l < delegate_->num_layers(); ++l) {
       for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
-        for (int k = 0; k < local_blocks; ++k) {
-          int read_id = header.remote_block_id + k;
+        for (size_t k = 0; k < local_blocks; ++k) {
+          int read_id = static_cast<int>(header.remote_block_id + k);
+          TF_RETURN_IF_ERROR(ValidateBlockRange(
+              delegate_, l, sh, read_id, /*num_blocks=*/1, bytes_per_block));
           const uint8_t* src_ptr =
               delegate_->GetBlockHostPointer(l, sh, read_id);
           TF_RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, bytes_per_block));
@@ -361,24 +411,27 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   }
 
   int P = parallelism;
+  if (P <= 0) {
+    return absl::InvalidArgumentError("parallelism must be positive");
+  }
   if (static_cast<int>(num_blocks) < P) P = num_blocks;
 
-  if (num_blocks % P != 0) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Block count (", num_blocks,
-                     ") must be fully divisible by parallelism (", P, ")"));
-  }
-
-  size_t blocks_per_stream = num_blocks / P;
   std::vector<int> allocated_ids(num_blocks, 0);
   std::vector<std::thread> threads;
   std::vector<absl::Status> statuses(P, absl::OkStatus());
 
   threads.reserve(P);
+  const size_t base_blocks_per_stream = num_blocks / P;
+  const size_t remainder = num_blocks % P;
+  size_t block_offset = 0;
   for (int i = 0; i < P; ++i) {
-    threads.push_back(std::thread(
-        &BlockTransport::H2hWriteWorker, this, i, peer, blocks_per_stream,
-        std::ref(src_block_ids), std::ref(allocated_ids), std::ref(statuses)));
+    const size_t block_count =
+        base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
+    threads.push_back(std::thread(&BlockTransport::H2hWriteWorker, this, i,
+                                  peer, block_offset, block_count,
+                                  std::ref(src_block_ids),
+                                  std::ref(allocated_ids), std::ref(statuses)));
+    block_offset += block_count;
   }
 
   for (auto& t : threads) {
@@ -401,7 +454,17 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     return absl::InvalidArgumentError("Block list cannot be empty");
   }
 
+  if (delegate_->shard_factor() == 0) {
+    return absl::InvalidArgumentError("shard_factor must be positive");
+  }
+  if (num_blocks % delegate_->shard_factor() != 0) {
+    return absl::InvalidArgumentError(
+        "Block count must be divisible by shard_factor");
+  }
   size_t local_blocks = num_blocks / delegate_->shard_factor();
+  if (local_blocks == 0) {
+    return absl::InvalidArgumentError("Local block list cannot be empty");
+  }
   if (!explicit_dst_ptrs.empty() &&
       explicit_dst_ptrs.size() !=
           delegate_->num_layers() * delegate_->num_shards()) {
@@ -420,27 +483,31 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   }
 
   int P = parallelism;
-  if (static_cast<int>(local_blocks) < P) P = local_blocks;
-
-  if (local_blocks % P != 0) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Local block count (", local_blocks,
-                     ") must be fully divisible by parallelism (", P, ")"));
+  if (P <= 0) {
+    return absl::InvalidArgumentError("parallelism must be positive");
   }
-
-  size_t blocks_per_stream = local_blocks / P;
-  size_t remote_blocks_per_stream = num_blocks / P;
+  if (static_cast<int>(local_blocks) < P) P = local_blocks;
 
   std::vector<std::thread> threads;
   std::vector<absl::Status> statuses(P, absl::OkStatus());
 
   threads.reserve(P);
+  const size_t base_blocks_per_stream = local_blocks / P;
+  const size_t remainder = local_blocks % P;
+  size_t local_block_offset = 0;
   for (int i = 0; i < P; ++i) {
-    threads.push_back(
-        std::thread(&BlockTransport::H2hReadWorker, this, i, peer,
-                    blocks_per_stream, remote_blocks_per_stream,
-                    std::ref(src_block_ids), std::ref(allocated_ids),
-                    std::ref(explicit_dst_ptrs), std::ref(statuses)));
+    const size_t local_block_count =
+        base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
+    const size_t remote_block_offset =
+        local_block_offset * delegate_->shard_factor();
+    const size_t remote_block_count =
+        local_block_count * delegate_->shard_factor();
+    threads.push_back(std::thread(
+        &BlockTransport::H2hReadWorker, this, i, peer, local_block_offset,
+        local_block_count, remote_block_offset, remote_block_count,
+        std::ref(src_block_ids), std::ref(allocated_ids),
+        std::ref(explicit_dst_ptrs), std::ref(statuses)));
+    local_block_offset += local_block_count;
   }
 
   for (auto& t : threads) {
@@ -455,11 +522,10 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
 }
 
 void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
-                                    size_t blocks_per_stream,
+                                    size_t block_offset, size_t block_count,
                                     const std::vector<int>& src_block_ids,
                                     std::vector<int>& allocated_ids,
                                     std::vector<absl::Status>& statuses) {
-  size_t offset = stream_idx * blocks_per_stream;
   auto status_or_fd = ConnectToPeer(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -472,7 +538,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   header.op = 1;  // Push
   header.remote_block_id = 0;
   header.local_block_id = 0;
-  header.num_blocks = blocks_per_stream;
+  if (block_count > std::numeric_limits<uint32_t>::max()) {
+    statuses[stream_idx] = absl::OutOfRangeError("Block count exceeds uint32");
+    return;
+  }
+  header.num_blocks = static_cast<uint32_t>(block_count);
 
   absl::Status s = WriteExact(fd, &header, sizeof(header));
   if (!s.ok()) {
@@ -480,30 +550,34 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
     return;
   }
 
-  std::vector<int> stream_allocated_ids(blocks_per_stream, 0);
-  s = ReadExact(fd, stream_allocated_ids.data(),
-                blocks_per_stream * sizeof(int));
+  std::vector<int> stream_allocated_ids(block_count, 0);
+  s = ReadExact(fd, stream_allocated_ids.data(), block_count * sizeof(int));
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;
   }
 
-  for (size_t k = 0; k < blocks_per_stream; ++k) {
-    ABSL_DCHECK_LT(offset + k, allocated_ids.size());
+  for (size_t k = 0; k < block_count; ++k) {
+    ABSL_DCHECK_LT(block_offset + k, allocated_ids.size());
     ABSL_DCHECK_LT(k, stream_allocated_ids.size());
-    allocated_ids[offset + k] = stream_allocated_ids[k];
+    allocated_ids[block_offset + k] = stream_allocated_ids[k];
   }
 
-  size_t bytes_per_block =
-      delegate_->block_size() * delegate_->slice_byte_size();
+  size_t bytes_per_block = delegate_->bytes_per_block();
 
   for (size_t l = 0; l < delegate_->num_layers(); ++l) {
     for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
       const uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
 
-      for (size_t k = 0; k < blocks_per_stream; ++k) {
-        ABSL_DCHECK_LT(offset + k, src_block_ids.size());
-        int src_id = src_block_ids[offset + k];
+      for (size_t k = 0; k < block_count; ++k) {
+        ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
+        int src_id = src_block_ids[block_offset + k];
+        s = ValidateBlockRange(delegate_, l, sh, src_id, /*num_blocks=*/1,
+                               bytes_per_block);
+        if (!s.ok()) {
+          statuses[stream_idx] = s;
+          return;
+        }
         const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
         s = WriteExact(fd, src_ptr, bytes_per_block);
         if (!s.ok()) {
@@ -523,14 +597,12 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
 }
 
 void BlockTransport::H2hReadWorker(
-    int stream_idx, const std::string& peer, size_t blocks_per_stream,
-    size_t remote_blocks_per_stream, const std::vector<int>& src_block_ids,
+    int stream_idx, const std::string& peer, size_t local_block_offset,
+    size_t local_block_count, size_t remote_block_offset,
+    size_t remote_block_count, const std::vector<int>& src_block_ids,
     const std::vector<int>& allocated_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses) {
-  size_t offset = stream_idx * blocks_per_stream;
-  size_t remote_offset = stream_idx * remote_blocks_per_stream;
-
   auto status_or_fd = ConnectToPeer(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -541,6 +613,13 @@ void BlockTransport::H2hReadWorker(
 
   size_t SF = delegate_->shard_factor();
 
+  if (remote_block_offset > src_block_ids.size() ||
+      remote_block_count > src_block_ids.size() - remote_block_offset) {
+    statuses[stream_idx] =
+        absl::OutOfRangeError("Remote block range exceeds source block list");
+    return;
+  }
+
   struct PullChunk {
     size_t local_start_idx;
     size_t local_count;
@@ -549,17 +628,17 @@ void BlockTransport::H2hReadWorker(
   };
   std::vector<PullChunk> chunks;
 
-  if (blocks_per_stream > 0) {
+  if (local_block_count > 0) {
     size_t curr_local_start = 0;
     size_t curr_local_count = 1;
-    ABSL_DCHECK_LT(remote_offset, src_block_ids.size());
-    int curr_base_remote_id = src_block_ids[remote_offset];
+    ABSL_DCHECK_LT(remote_block_offset, src_block_ids.size());
+    int curr_base_remote_id = src_block_ids[remote_block_offset];
 
-    for (size_t k = 1; k < blocks_per_stream; ++k) {
-      ABSL_DCHECK_LT(remote_offset + k * SF - 1, src_block_ids.size());
-      int prev_last_remote = src_block_ids[remote_offset + k * SF - 1];
-      ABSL_DCHECK_LT(remote_offset + k * SF, src_block_ids.size());
-      int curr_first_remote = src_block_ids[remote_offset + k * SF];
+    for (size_t k = 1; k < local_block_count; ++k) {
+      ABSL_DCHECK_LT(remote_block_offset + k * SF - 1, src_block_ids.size());
+      int prev_last_remote = src_block_ids[remote_block_offset + k * SF - 1];
+      ABSL_DCHECK_LT(remote_block_offset + k * SF, src_block_ids.size());
+      int curr_first_remote = src_block_ids[remote_block_offset + k * SF];
 
       if (curr_first_remote == prev_last_remote + 1) {
         curr_local_count++;
@@ -575,17 +654,34 @@ void BlockTransport::H2hReadWorker(
                       curr_local_count * SF});
   }
 
-  size_t bytes_per_block =
-      delegate_->block_size() * delegate_->slice_byte_size();
+  size_t bytes_per_block = delegate_->bytes_per_block();
 
   for (const auto& chunk : chunks) {
     BlockPacketHeader header;
     header.op = 2;  // Pull request
-    header.remote_block_id =
+    int remote_read_block_id =
         delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
-    ABSL_DCHECK_LT(offset + chunk.local_start_idx, allocated_ids.size());
-    header.local_block_id = allocated_ids[offset + chunk.local_start_idx];
-    header.num_blocks = chunk.remote_count;
+    if (remote_read_block_id < 0 ||
+        static_cast<uint64_t>(remote_read_block_id) >
+            std::numeric_limits<uint32_t>::max() ||
+        chunk.remote_count > std::numeric_limits<uint32_t>::max()) {
+      statuses[stream_idx] =
+          absl::OutOfRangeError("Remote block range exceeds transport header");
+      return;
+    }
+    header.remote_block_id = static_cast<uint32_t>(remote_read_block_id);
+    ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx,
+                   allocated_ids.size());
+    int local_block_id =
+        allocated_ids[local_block_offset + chunk.local_start_idx];
+    if (local_block_id < 0 || static_cast<uint64_t>(local_block_id) >
+                                  std::numeric_limits<uint32_t>::max()) {
+      statuses[stream_idx] =
+          absl::OutOfRangeError("Local block id exceeds transport header");
+      return;
+    }
+    header.local_block_id = static_cast<uint32_t>(local_block_id);
+    header.num_blocks = static_cast<uint32_t>(chunk.remote_count);
 
     absl::Status s = WriteExact(fd, &header, sizeof(header));
     if (!s.ok()) {
@@ -599,6 +695,11 @@ void BlockTransport::H2hReadWorker(
       statuses[stream_idx] = s;
       return;
     }
+    if (resp_header.op != 2 || resp_header.num_blocks != chunk.remote_count) {
+      statuses[stream_idx] =
+          absl::InternalError("Unexpected block pull response header");
+      return;
+    }
 
     for (size_t l = 0; l < delegate_->num_layers(); ++l) {
       for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
@@ -606,11 +707,30 @@ void BlockTransport::H2hReadWorker(
             explicit_dst_ptrs.empty()
                 ? delegate_->GetHostPointer(l, sh)
                 : explicit_dst_ptrs[l * delegate_->num_shards() + sh];
+        if (base_host_ptr == nullptr) {
+          statuses[stream_idx] =
+              absl::FailedPreconditionError("Destination host pointer is null");
+          return;
+        }
 
         for (size_t k = 0; k < chunk.local_count; ++k) {
-          ABSL_DCHECK_LT(offset + chunk.local_start_idx + k,
+          ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx + k,
                          allocated_ids.size());
-          int dst_id = allocated_ids[offset + chunk.local_start_idx + k];
+          int dst_id =
+              allocated_ids[local_block_offset + chunk.local_start_idx + k];
+          if (dst_id < 0) {
+            statuses[stream_idx] =
+                absl::InvalidArgumentError("Destination block id is negative");
+            return;
+          }
+          if (explicit_dst_ptrs.empty()) {
+            s = ValidateBlockRange(delegate_, l, sh, dst_id, /*num_blocks=*/1,
+                                   bytes_per_block);
+            if (!s.ok()) {
+              statuses[stream_idx] = s;
+              return;
+            }
+          }
           uint8_t* dest_ptr = base_host_ptr + dst_id * bytes_per_block;
           s = ReadExact(fd, dest_ptr, bytes_per_block);
           if (!s.ok()) {

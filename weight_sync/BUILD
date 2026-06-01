@@ -33,6 +33,7 @@ cc_library(
     deps = [
         "//core:raiden_manager_base",
         "//core:raw_transfer_core",
+        "//core:xla_raw_transfer_headers",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -64,5 +65,7 @@ cc_test(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
     ],
 )

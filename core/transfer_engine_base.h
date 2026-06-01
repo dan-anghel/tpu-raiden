@@ -48,7 +48,6 @@
 #include "absl/status/statusor.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/kv_cache_manager_base.h"
-#include "transport/socket_transport.h"
 
 namespace tpu_raiden {
 
@@ -211,9 +210,9 @@ class TransferEngineBase {
     std::chrono::steady_clock::time_point deadline;
   };
 
-  struct PullLayerDescriptor {
-    uint64_t addr = 0;
-    uint64_t len = 0;
+  struct PullBlockDescriptor {
+    uint64_t remote_block_base = 0;
+    uint64_t num_blocks = 0;
   };
 
   struct alignas(8) ControlRequestHeader {
@@ -239,6 +238,9 @@ class TransferEngineBase {
   std::string EndpointWithPort(const std::string& endpoint, int port) const;
   ControlResponseHeader ReadControlResponseHeader(int fd);
   void AckSend(uint64_t uuid);
+  void ConfigureDataPortFromKvTransfer();
+  uint64_t StagingBlockBase(int64_t slot_idx) const;
+  std::vector<int> ContiguousBlockIds(uint64_t base, uint64_t count) const;
   static void ValidateRequestedBlocks(
       const SendEntry& entry, const std::vector<int64_t>& requested_block_ids);
 
@@ -278,7 +280,6 @@ class TransferEngineBase {
 
   std::mutex mu_;
   std::condition_variable cv_;
-  std::unique_ptr<transport::SocketTransport> transport_;
   int control_fd_ = -1;
   std::atomic<bool> stopping_{false};
   std::thread control_thread_;

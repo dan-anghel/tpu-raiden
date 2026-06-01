@@ -118,4 +118,8 @@ absl::Status RaidenManagerBase::PullWeightsChunk(
                                    dst_shard_idx, dst_offset_bytes, size_bytes);
 }
 
+size_t RaidenManagerBase::bytes_per_block() const {
+  return block_size_ * slice_byte_size_;
+}
+
 }  // namespace tpu_raiden

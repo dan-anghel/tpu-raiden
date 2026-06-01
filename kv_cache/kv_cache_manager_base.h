@@ -175,12 +175,15 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // Returns the internal LogicalBlockManager.
   LogicalBlockManager* block_manager() const { return block_manager_.get(); }
 
+  size_t bytes_per_block() const override;
+
  protected:
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t physical_size_ = 0;
   int64_t staging_num_slots_ = 0;
   int64_t staging_max_major_per_slot_ = 0;
+  bool is_blocked_layout_ = false;
 
   std::unique_ptr<LogicalBlockManager> block_manager_;
 

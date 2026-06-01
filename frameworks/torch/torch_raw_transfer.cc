@@ -422,13 +422,14 @@ NB_MODULE(_torch_raw_transfer, m) {
       .def_prop_ro("data_ptr", &RawHostBuffer::DataPtr)
       .def_prop_ro("is_pjrt_backed", &RawHostBuffer::IsPjRtBacked);
 
-  nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
-      .def("Await", &PjRtCopyFuture::Await,
-           nb::call_guard<nb::gil_scoped_release>())
-      .def("wait", &PjRtCopyFuture::Await,
-           nb::call_guard<nb::gil_scoped_release>())
-      .def("IsReady", &PjRtCopyFuture::IsReady)
-      .def("is_ready", &PjRtCopyFuture::IsReady);
+  auto future_cls = nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
+                        .def("Await", &PjRtCopyFuture::Await,
+                             nb::call_guard<nb::gil_scoped_release>())
+                        .def("wait", &PjRtCopyFuture::Await,
+                             nb::call_guard<nb::gil_scoped_release>())
+                        .def("IsReady", &PjRtCopyFuture::IsReady)
+                        .def("is_ready", &PjRtCopyFuture::IsReady);
+  m.attr("PjRtCopyFuture") = future_cls;
 
   nb::class_<PreparedTorchRawTransfer>(m, "PreparedTorchRawTransfer")
       .def(nb::new_([](const at::Tensor& tpu_tensor,
