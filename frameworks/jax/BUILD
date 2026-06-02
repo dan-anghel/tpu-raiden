@@ -105,10 +105,12 @@ nanobind_extension(
     copts = [
         "-fexceptions",
         "-march=x86-64-v2",
+        "-fvisibility=hidden",
     ],
     features = [
         "-use_header_modules",
     ],
+    linkopts = ["-Wl,--exclude-libs,ALL"],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_jax",
@@ -179,10 +181,12 @@ nanobind_extension(
     copts = [
         "-fexceptions",
         "-march=x86-64-v2",
+        "-fvisibility=hidden",
     ],
     features = [
         "-use_header_modules",
     ],
+    linkopts = ["-Wl,--exclude-libs,ALL"],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_ffi",
@@ -275,10 +279,12 @@ nanobind_extension(
     ],
     copts = [
         "-fexceptions",
+        "-fvisibility=hidden",
     ],
     features = [
         "-use_header_modules",
     ],
+    linkopts = ["-Wl,--exclude-libs,ALL"],
     visibility = ["//visibility:public"],
     deps = [
         ":weight_synchronizer_jax",
@@ -298,8 +304,10 @@ nanobind_extension(
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
+        "-fvisibility=hidden",
     ],
     features = ["-use_header_modules"],
+    linkopts = ["-Wl,--exclude-libs,ALL"],
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",

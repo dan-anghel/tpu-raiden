@@ -189,6 +189,6 @@ if [ "$BUILD_TORCH" = true ]; then
 fi
 
 echo "=== Install Python Dependencies! ==="
-pip install -r requirements.txt || echo "Warning: pip installation returned a non-zero status. Proceeding anyway."
+pip install --index-url=https://pypi.org/simple -r requirements.txt || echo "Warning: pip installation returned a non-zero status. Proceeding anyway."
 
 echo "=== Installation Complete! ==="

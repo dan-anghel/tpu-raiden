@@ -138,6 +138,8 @@ cc_library(
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
     ],
 )
 

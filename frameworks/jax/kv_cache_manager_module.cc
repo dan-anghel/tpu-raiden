@@ -25,7 +25,7 @@ namespace nb = nanobind;
 
 NB_MODULE(_kv_cache_manager, m) {
   nb::module_::import_(
-      "google3.third_party.tpu_raiden.raiden_lib.raw_transfer.jax.raw_"
+      "raiden_lib.raw_transfer.jax.raw_"
       "transfer");
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
