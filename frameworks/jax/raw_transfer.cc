@@ -25,6 +25,7 @@
 
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
@@ -41,11 +42,10 @@ using ::xla::PjRtBuffer;
 using ::xla::PjRtCApiBuffer;
 using ::xla::Shape;
 
-// Unpack and forward to pure C++ transfer_d2h_core
-absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
+absl::StatusOr<PjRtCopyFuture> transfer_d2h_async_internal(
     const nb::object& src_arr, const nb::object& dst_arr,
-    const nb::list& src_offsets_major_dim,
-    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    absl::Span<const int64_t> src_offsets,
+    absl::Span<const int64_t> dst_offsets, absl::Span<const int64_t> copy_sizes,
     bool unsafe_skip_buffer_lock) {
   std::vector<PjRtBuffer*> src_buffers =
       jax::ExtractPjRtBuffersFromPyArray(src_arr);
@@ -66,18 +66,26 @@ absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
         nb::cast<size_t>(dst_shard_data.attr("on_device_size_in_bytes")()));
   }
 
-  return transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes,
-                           jax::UnpackListToVector(src_offsets_major_dim),
-                           jax::UnpackListToVector(dst_offsets_major_dim),
-                           jax::UnpackListToVector(copy_sizes_major_dim),
-                           unsafe_skip_buffer_lock);
+  return transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes, src_offsets,
+                           dst_offsets, copy_sizes, unsafe_skip_buffer_lock);
 }
 
-// Unpack and forward to pure C++ transfer_h2d_core
-absl::StatusOr<PjRtCopyFuture> transfer_h2d_async(
+// Unpack and forward to pure C++ transfer_d2h_async_internal
+absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
     const nb::object& src_arr, const nb::object& dst_arr,
     const nb::list& src_offsets_major_dim,
     const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
+  return transfer_d2h_async_internal(
+      src_arr, dst_arr, jax::UnpackListToVector(src_offsets_major_dim),
+      jax::UnpackListToVector(dst_offsets_major_dim),
+      jax::UnpackListToVector(copy_sizes_major_dim), unsafe_skip_buffer_lock);
+}
+
+absl::StatusOr<PjRtCopyFuture> transfer_h2d_async_internal(
+    const nb::object& src_arr, const nb::object& dst_arr,
+    absl::Span<const int64_t> src_offsets,
+    absl::Span<const int64_t> dst_offsets, absl::Span<const int64_t> copy_sizes,
     bool unsafe_skip_buffer_lock) {
   std::vector<PjRtBuffer*> dst_buffers =
       jax::ExtractPjRtBuffersFromPyArray(dst_arr);
@@ -98,11 +106,20 @@ absl::StatusOr<PjRtCopyFuture> transfer_h2d_async(
         nb::cast<size_t>(src_shard_data.attr("on_device_size_in_bytes")()));
   }
 
-  return transfer_h2d_core(dst_buffers, src_ptrs, src_sizes,
-                           jax::UnpackListToVector(src_offsets_major_dim),
-                           jax::UnpackListToVector(dst_offsets_major_dim),
-                           jax::UnpackListToVector(copy_sizes_major_dim),
-                           unsafe_skip_buffer_lock);
+  return transfer_h2d_core(dst_buffers, src_ptrs, src_sizes, src_offsets,
+                           dst_offsets, copy_sizes, unsafe_skip_buffer_lock);
+}
+
+// Unpack and forward to pure C++ transfer_h2d_async_internal
+absl::StatusOr<PjRtCopyFuture> transfer_h2d_async(
+    const nb::object& src_arr, const nb::object& dst_arr,
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
+  return transfer_h2d_async_internal(
+      src_arr, dst_arr, jax::UnpackListToVector(src_offsets_major_dim),
+      jax::UnpackListToVector(dst_offsets_major_dim),
+      jax::UnpackListToVector(copy_sizes_major_dim), unsafe_skip_buffer_lock);
 }
 
 // Pure FFI JAX helper to run parallel batch transfers using pure C++ core
@@ -126,11 +143,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
   std::vector<int64_t> c_sizes = jax::UnpackListToVector(copy_sizes_major_dim);
 
   for (size_t i = 0; i < n; ++i) {
-    TF_ASSIGN_OR_RETURN(
-        PjRtCopyFuture f,
-        transfer_d2h_async(src_arrs[i], dst_arrs[i], src_offsets_major_dim,
-                           dst_offsets_major_dim, copy_sizes_major_dim,
-                           unsafe_skip_buffer_lock));
+    TF_ASSIGN_OR_RETURN(PjRtCopyFuture f,
+                        transfer_d2h_async_internal(
+                            src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
+                            c_sizes, unsafe_skip_buffer_lock));
     acc.Append(std::move(f));
   }
   return acc;
@@ -157,11 +173,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
   std::vector<int64_t> c_sizes = jax::UnpackListToVector(copy_sizes_major_dim);
 
   for (size_t i = 0; i < n; ++i) {
-    TF_ASSIGN_OR_RETURN(
-        PjRtCopyFuture f,
-        transfer_h2d_async(src_arrs[i], dst_arrs[i], src_offsets_major_dim,
-                           dst_offsets_major_dim, copy_sizes_major_dim,
-                           unsafe_skip_buffer_lock));
+    TF_ASSIGN_OR_RETURN(PjRtCopyFuture f,
+                        transfer_h2d_async_internal(
+                            src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
+                            c_sizes, unsafe_skip_buffer_lock));
     acc.Append(std::move(f));
   }
   return acc;

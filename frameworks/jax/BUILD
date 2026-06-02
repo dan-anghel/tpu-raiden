@@ -295,6 +295,14 @@ nanobind_extension(
     ],
 )
 
+cc_library(
+    name = "mock_nanobind",
+    hdrs = [
+        "mock_nanobind.h",
+    ],
+    visibility = ["//visibility:private"],
+)
+
 nanobind_extension(
     name = "_raw_transfer",
     srcs = [
@@ -311,10 +319,12 @@ nanobind_extension(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
+        ":mock_nanobind",
         "//core:raw_transfer_core",
         "//core:raw_transfer_impl",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
         "@nanobind",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
@@ -458,12 +468,12 @@ cc_library(
         "//core:raw_transfer_core",
         "//core:raw_transfer_impl",
         "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
         "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
