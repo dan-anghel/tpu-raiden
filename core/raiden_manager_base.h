@@ -24,16 +24,30 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "xla/future.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/semaphore.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
+
+struct BlockMetadata {
+  int block_id;
+  void* data_ptr;
+  std::string address;
+  xla::PjRtClient* pjrt_client = nullptr;
+};
 
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
   RaidenManagerBase(size_t num_layers, size_t num_shards,
                     size_t slice_byte_size, int block_size = 1,
                     std::optional<int> local_port = std::nullopt,
-                    int parallelism = 1);
+                    int parallelism = 1, size_t max_staging_blocks = 4);
+
+  xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
+                                    const BlockMetadata& dst,
+                                    size_t size_bytes);
 
   ~RaidenManagerBase() override;
 
@@ -106,6 +120,12 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   }
 
   absl::Status OnDataReceived() override { return absl::OkStatus(); }
+
+ private:
+  xla::Future<> DoD2DTransfer(const BlockMetadata& src,
+                              const BlockMetadata& dst, size_t size_bytes);
+
+  std::unique_ptr<xla::Semaphore> semaphore_;
 };
 
 }  // namespace tpu_raiden

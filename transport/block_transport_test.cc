@@ -53,7 +53,13 @@ class MockDelegate : public BlockTransportDelegate {
     return ids;
   }
 
-  absl::Status OnDataReceived() override { return absl::OkStatus(); }
+  absl::Status OnDataReceived() override {
+    on_data_received_called_ = true;
+    return absl::OkStatus();
+  }
+
+  bool on_data_received_called() const { return on_data_received_called_; }
+  void reset_data_received() { on_data_received_called_ = false; }
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override {
     return buffers_[BufferIndex(layer_idx, shard_idx)].data();
@@ -91,6 +97,7 @@ class MockDelegate : public BlockTransportDelegate {
   size_t num_layers_;
   size_t num_shards_;
   std::vector<std::vector<uint8_t>> buffers_;
+  bool on_data_received_called_ = false;
 };
 
 TEST(BlockTransportTest, PushAndPullCorrectness) {
@@ -250,6 +257,38 @@ TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
       "localhost:" + std::to_string(source_transport.local_port());
   auto pull_res = receiver_transport.Pull(source_peer, {1}, {0});
   EXPECT_FALSE(pull_res.ok());
+}
+
+TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
+  size_t size = 1024;
+  MockDelegate delegate1(size);
+  MockDelegate delegate2(size);
+
+  std::vector<uint8_t> src_data(size);
+  for (size_t i = 0; i < size; ++i) {
+    src_data[i] = static_cast<uint8_t>(i % 256);
+  }
+  std::memset(delegate2.data(), 0x00, size);
+
+  BlockTransport transport1(&delegate1, 0);
+  BlockTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+
+  // Write block 0 directly from src_data to transport2
+  auto write_res = transport1.WriteBlockDirect(peer2, /*remote_block_id=*/0,
+                                               src_data.data(), size);
+  ASSERT_TRUE(write_res.ok()) << write_res.message();
+
+  // Verify the data was received correctly in delegate2
+  for (size_t i = 0; i < size; ++i) {
+    EXPECT_EQ(delegate2.data()[i], src_data[i]);
+  }
+
+  // Verify OnDataReceived was called
+  EXPECT_TRUE(delegate2.on_data_received_called());
 }
 
 }  // namespace

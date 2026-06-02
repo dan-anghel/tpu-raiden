@@ -18,14 +18,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -95,6 +92,11 @@ class BlockTransport {
   absl::Status PullWeightsChunk(const std::string& source, size_t src_shard_idx,
                                 size_t src_offset_bytes, size_t dst_shard_idx,
                                 size_t dst_offset_bytes, size_t size_bytes);
+
+  // Write a single block of data directly from a host pointer to a remote
+  // block ID (Direct Push).
+  absl::Status WriteBlockDirect(const std::string& peer, int remote_block_id,
+                                const uint8_t* data_ptr, size_t size_bytes);
 
   int local_port() const { return local_port_; }
 

@@ -308,6 +308,7 @@ cc_library(
 nanobind_extension(
     name = "_raw_transfer",
     srcs = [
+        "mock_nanobind.h",
         "raw_transfer.cc",
         "raw_transfer_internal.h",
     ],

@@ -14,13 +14,14 @@
 
 #include "transport/block_transport.h"
 
-#include <arpa/inet.h>
+#include <asm-generic/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdio.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -340,6 +341,20 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
 
     const uint8_t* src_ptr = base_host_ptr + src_offset;
     TF_RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
+  } else if (header.op == 4) {  // Single Block Push (Direct)
+    int dst_id = header.remote_block_id;
+    size_t size_bytes = header.num_blocks;
+
+    // Handshake response
+    uint8_t ack = 1;
+    TF_RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+
+    uint8_t* dest_ptr = delegate_->GetBlockHostPointer(0, 0, dst_id);
+    TF_RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
+
+    ack = 1;
+    TF_RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+    TF_RETURN_IF_ERROR(delegate_->OnDataReceived());
   }
   return absl::OkStatus();
 }
@@ -443,6 +458,40 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   }
 
   return allocated_ids;
+}
+
+absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
+                                              int remote_block_id,
+                                              const uint8_t* data_ptr,
+                                              size_t size_bytes) {
+  auto status_or_fd = ConnectToPeer(peer);
+  if (!status_or_fd.ok()) return status_or_fd.status();
+  int fd = status_or_fd.value();
+  auto fd_cleaner = absl::MakeCleanup([fd] { close(fd); });
+
+  BlockPacketHeader header;
+  header.op = 4;  // Single Block Push (Direct)
+  header.remote_block_id = remote_block_id;
+  header.local_block_id = 0;
+  header.num_blocks = size_bytes;
+
+  TF_RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
+
+  uint8_t ack = 0;
+  TF_RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
+  if (ack != 1) {
+    return absl::InternalError("Direct push handshaking failed");
+  }
+
+  TF_RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
+
+  ack = 0;
+  TF_RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
+  if (ack != 1) {
+    return absl::InternalError("Direct push verification failed");
+  }
+
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Pull(
