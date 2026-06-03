@@ -23,8 +23,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "xla/future.h"
@@ -33,6 +33,7 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
+#include "core/status_macros.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
