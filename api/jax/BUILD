@@ -44,7 +44,7 @@ py_test(
         "@jax//jax",
         "@pypi//numpy",
         # buildcleaner: keep
-        "//raiden_lib/raw_transfer/jax:raw_transfer",
+        ":raw_transfer",
     ],
 )
 
@@ -172,6 +172,26 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "//frameworks/jax:_raiden_transfer_engine",
+    ],
+)
+
+py_library(
+    name = "utils",
+    srcs = ["utils.py"],
+    deps = [
+        "@com_google_absl_py//absl/flags",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_library(
+    name = "raw_transfer",
+    srcs = [
+        "raw_transfer.py",
+    ],
+    deps = [
+        "//frameworks/jax:_raw_transfer",
     ],
 )
 

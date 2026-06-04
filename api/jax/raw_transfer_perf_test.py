@@ -24,8 +24,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from raiden_lib.raw_transfer.jax import raw_transfer
-from raiden_lib.raw_transfer.jax import utils
+from api.jax import raw_transfer
+from api.jax import utils
 
 # os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
