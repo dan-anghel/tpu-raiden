@@ -25,6 +25,7 @@
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -260,13 +261,13 @@ absl::Status WeightSynchronizerBase::PushWeights(
   }
 
   // 1. Automatically copy latest weights from Device TPU HBM onto Host CPU!
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
-  TF_RETURN_IF_ERROR(d2h_future.Await().status());
+  ABSL_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
+  ABSL_RETURN_IF_ERROR(d2h_future.Await().status());
 
   // 2. Run high-speed parallel sockets H2H write to push host weights to peers!
   std::vector<int> weights_block_id = {0};
   for (const std::string& peer : peers) {
-    TF_RETURN_IF_ERROR(
+    ABSL_RETURN_IF_ERROR(
         H2hWriteDirect(peer, weights_block_id, /*entity_id=*/0).status());
   }
   return absl::OkStatus();
@@ -280,13 +281,13 @@ absl::Status WeightSynchronizerBase::PullWeights(const std::string& source) {
 
   // 1. Run high-speed parallel sockets H2H read to pull weights from source!
   std::vector<int> weights_block_id = {0};
-  TF_RETURN_IF_ERROR(
+  ABSL_RETURN_IF_ERROR(
       H2hReadDirect(source, weights_block_id, /*entity_id=*/0).status());
 
   // 2. Automatically copy the received staging weights onto local Device TPU
   // HBM!
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
-  TF_RETURN_IF_ERROR(h2d_future.Await().status());
+  ABSL_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
+  ABSL_RETURN_IF_ERROR(h2d_future.Await().status());
 
   return absl::OkStatus();
 }
@@ -314,8 +315,8 @@ void WeightSynchronizerBase::SetExternalHostBuffer(
 absl::Status WeightSynchronizerBase::OnDataReceived() {
   // Automatically copy all received staging weights from Host onto Device TPU
   // HBM!
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
-  TF_RETURN_IF_ERROR(h2d_future.Await().status());
+  ABSL_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
+  ABSL_RETURN_IF_ERROR(h2d_future.Await().status());
   return absl::OkStatus();
 }
 

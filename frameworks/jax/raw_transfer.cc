@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "absl/log/log.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
@@ -40,8 +41,6 @@
 namespace raiden {
 
 using ::xla::PjRtBuffer;
-using ::xla::PjRtCApiBuffer;
-using ::xla::Shape;
 
 absl::StatusOr<PjRtCopyFuture> transfer_d2h_async_internal(
     const nb::object& src_arr, const nb::object& dst_arr,
@@ -146,10 +145,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
   std::vector<int64_t> c_sizes = jax::UnpackListToVector(copy_sizes_major_dim);
 
   for (size_t i = 0; i < n; ++i) {
-    TF_ASSIGN_OR_RETURN(PjRtCopyFuture f,
-                        transfer_d2h_async_internal(
-                            src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
-                            c_sizes, unsafe_skip_buffer_lock));
+    ABSL_ASSIGN_OR_RETURN(PjRtCopyFuture f,
+                          transfer_d2h_async_internal(
+                              src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
+                              c_sizes, unsafe_skip_buffer_lock));
     futures.push_back(std::move(f));
   }
   return FlattenPjRtFutures(xla::JoinFutures(absl::MakeSpan(futures)));
@@ -178,10 +177,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
   std::vector<int64_t> c_sizes = jax::UnpackListToVector(copy_sizes_major_dim);
 
   for (size_t i = 0; i < n; ++i) {
-    TF_ASSIGN_OR_RETURN(PjRtCopyFuture f,
-                        transfer_h2d_async_internal(
-                            src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
-                            c_sizes, unsafe_skip_buffer_lock));
+    ABSL_ASSIGN_OR_RETURN(PjRtCopyFuture f,
+                          transfer_h2d_async_internal(
+                              src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
+                              c_sizes, unsafe_skip_buffer_lock));
     futures.push_back(std::move(f));
   }
   return FlattenPjRtFutures(xla::JoinFutures(absl::MakeSpan(futures)));

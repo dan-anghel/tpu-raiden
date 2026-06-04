@@ -26,23 +26,6 @@ header_only_cc_info(
 )
 
 cc_library(
-    name = "status_macros",
-    hdrs = [
-        "status_macros.h",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-    ],
-)
-
-cc_library(
     name = "raiden_manager_base",
     srcs = [
         "raiden_manager_base.cc",
@@ -60,12 +43,12 @@ cc_library(
         ":host_memory_allocator",
         ":raw_transfer_core",
         ":raw_transfer_impl",
-        ":status_macros",
         "//transport:block_transport",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
@@ -158,9 +141,12 @@ cc_library(
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/synchronization",
+        # buildcleaner: keep
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        # buildcleaner: keep
         "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+        # buildcleaner: keep
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -179,6 +165,7 @@ cc_library(
     deps = [
         ":raw_transfer_core",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
         "@xla//xla:future",
@@ -260,7 +247,6 @@ cc_test(
         ":tpu_pjrt_manager",
         "@xla//xla:literal",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/tsl/platform:status_matchers",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
@@ -285,7 +271,6 @@ cc_test(
     deps = [
         ":host_memory_allocator",
         ":tpu_pjrt_manager",
-        "@xla//xla/tsl/platform:status_matchers",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
@@ -400,8 +385,6 @@ cc_test(
         ":transfer_engine_base",
         "//kv_cache:kv_cache_manager_base",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        "@xla//xla/tsl/platform:status_matchers",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",

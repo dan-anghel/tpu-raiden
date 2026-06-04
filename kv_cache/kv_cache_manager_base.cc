@@ -27,6 +27,7 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "xla/future.h"
@@ -99,7 +100,7 @@ KVCacheManagerBase::KVCacheManagerBase(
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
   int total_blocks = 0;
-  if (shape.dimensions().size() > 0) {
+  if (!shape.dimensions().empty()) {
     major_dim_size_ = shape.dimensions(0);
     total_blocks =
         is_blocked_layout_ ? major_dim_size_ : (major_dim_size_ / block_size_);
@@ -421,8 +422,8 @@ KVCacheManagerBase::D2hAutoAllocate(
     blocks_per_chunk.push_back(needed);
   }
 
-  TF_ASSIGN_OR_RETURN(std::vector<int> allocated_block_ids,
-                      AllocateBlocks(total_blocks_to_allocate, entity_id));
+  ABSL_ASSIGN_OR_RETURN(std::vector<int> allocated_block_ids,
+                        AllocateBlocks(total_blocks_to_allocate, entity_id));
 
   std::vector<int64_t> flat_src_offsets;
   std::vector<int64_t> flat_dst_offsets;
@@ -444,7 +445,7 @@ KVCacheManagerBase::D2hAutoAllocate(
     }
   }
 
-  TF_ASSIGN_OR_RETURN(
+  ABSL_ASSIGN_OR_RETURN(
       raiden::PjRtCopyFuture future,
       DispatchD2hChunks(flat_src_offsets, flat_dst_offsets, flat_copy_sizes));
   return std::make_pair(allocated_block_ids, std::move(future));
@@ -454,8 +455,8 @@ absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hWrite(std::string peer,
                              const std::vector<int>& src_block_ids,
                              int64_t entity_id) {
-  TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                      H2hWriteDirect(peer, src_block_ids, entity_id));
+  ABSL_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
+                        H2hWriteDirect(peer, src_block_ids, entity_id));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
@@ -465,8 +466,8 @@ absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hRead(std::string peer,
                             const std::vector<int>& src_block_ids,
                             int64_t entity_id) {
-  TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                      H2hReadDirect(peer, src_block_ids, entity_id));
+  ABSL_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
+                        H2hReadDirect(peer, src_block_ids, entity_id));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
@@ -479,9 +480,9 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                      server_->Pull(peer, src_block_ids, local_block_ids,
-                                    explicit_dst_ptrs, parallelism_));
+  ABSL_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
+                        server_->Pull(peer, src_block_ids, local_block_ids,
+                                      explicit_dst_ptrs, parallelism_));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 
@@ -542,7 +543,7 @@ absl::Status KVCacheManagerBase::H2dDirect(
       uint8_t* dst_ptr = d_base + d_offset;
 
       stream_executor::DeviceAddressBase device_addr(dst_ptr, size_bytes);
-      TF_RETURN_IF_ERROR(stream->Memcpy(&device_addr, src_ptr, size_bytes));
+      ABSL_RETURN_IF_ERROR(stream->Memcpy(&device_addr, src_ptr, size_bytes));
     }
   }
   return absl::OkStatus();
@@ -586,7 +587,7 @@ absl::Status KVCacheManagerBase::D2hDirect(
 
       stream_executor::DeviceAddressBase src_addr(const_cast<uint8_t*>(src_ptr),
                                                   size_bytes);
-      TF_RETURN_IF_ERROR(stream->Memcpy(dst_ptr, src_addr, size_bytes));
+      ABSL_RETURN_IF_ERROR(stream->Memcpy(dst_ptr, src_addr, size_bytes));
     }
   }
   return absl::OkStatus();
@@ -671,7 +672,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hTo(
     size_t layer_idx, void* dst_host_ptr, size_t dst_size,
     const KVCacheCopySpec& copy_spec, size_t shard_idx) {
   // TODO: Long-term, KVCacheManager should own host buffers for prefix cache.
-  TF_RETURN_IF_ERROR(ValidateCopySpecStatus(copy_spec));
+  ABSL_RETURN_IF_ERROR(ValidateCopySpecStatus(copy_spec));
   if (layer_idx >= layers_.size() ||
       shard_idx >= layers_[layer_idx].shards.size()) {
     return absl::OutOfRangeError("D2H layer or shard index out of range");
@@ -726,7 +727,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFrom(
     size_t layer_idx, const void* src_host_ptr, size_t src_size,
     const KVCacheCopySpec& copy_spec, size_t shard_idx) {
   // TODO: Long-term, KVCacheManager should own host buffers for prefix cache.
-  TF_RETURN_IF_ERROR(ValidateCopySpecStatus(copy_spec));
+  ABSL_RETURN_IF_ERROR(ValidateCopySpecStatus(copy_spec));
   if (layer_idx >= layers_.size() ||
       shard_idx >= layers_[layer_idx].shards.size()) {
     return absl::OutOfRangeError("H2D layer or shard index out of range");
@@ -842,16 +843,16 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hToHostSlot(
     size_t layer_idx, int64_t slot_idx, int64_t num_major,
     const KVCacheCopySpec& copy_spec, size_t shard_idx) {
-  TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
-                      HostSpan(layer_idx, shard_idx, slot_idx, num_major));
+  ABSL_ASSIGN_OR_RETURN(KVCacheHostSpan span,
+                        HostSpan(layer_idx, shard_idx, slot_idx, num_major));
   return D2hTo(layer_idx, span.ptr, span.nbytes, copy_spec, shard_idx);
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFromHostSlot(
     size_t layer_idx, int64_t slot_idx, int64_t num_major,
     const KVCacheCopySpec& copy_spec, size_t shard_idx) {
-  TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
-                      HostSpan(layer_idx, shard_idx, slot_idx, num_major));
+  ABSL_ASSIGN_OR_RETURN(KVCacheHostSpan span,
+                        HostSpan(layer_idx, shard_idx, slot_idx, num_major));
   return H2dFrom(layer_idx, span.ptr, span.nbytes, copy_spec, shard_idx);
 }
 

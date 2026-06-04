@@ -26,6 +26,7 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
@@ -35,7 +36,6 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
-#include "core/status_macros.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -183,13 +183,13 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
                                                const BlockMetadata& dst,
                                                size_t size_bytes) {
   auto [promise, future] = xla::MakePromise<void>();
-  ASSIGN_OR_RETURN(std::unique_ptr<HostMemoryAllocator> allocator,
-                   HostMemoryAllocator::Create(src.pjrt_client),
-                   _.LogError().With(ReturnFuture));
+  ABSL_ASSIGN_OR_RETURN(std::unique_ptr<HostMemoryAllocator> allocator,
+                        HostMemoryAllocator::Create(src.pjrt_client),
+                        _.LogError().With(ReturnFuture));
 
   // 1. Allocate local staging memory
-  ASSIGN_OR_RETURN(auto host_allocation, allocator->Allocate(size_bytes),
-                   _.LogError().With(ReturnFuture));
+  ABSL_ASSIGN_OR_RETURN(auto host_allocation, allocator->Allocate(size_bytes),
+                        _.LogError().With(ReturnFuture));
 
   // 2. Copy data from device to host staging memory (D2H)
   xla::PjRtBuffer* src_buffer = static_cast<xla::PjRtBuffer*>(src.data_ptr);
@@ -198,12 +198,13 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
   std::vector<uint8_t*> dst_ptrs = {host_allocation.ptr};
   std::vector<size_t> dst_sizes = {host_allocation.size};
 
-  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future,
-                   raiden::transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes,
-                                             /*src_offsets_major_dim=*/{},
-                                             /*dst_offsets_major_dim=*/{},
-                                             /*copy_sizes_major_dim=*/{}),
-                   _.LogError().With(ReturnFuture));
+  ABSL_ASSIGN_OR_RETURN(
+      raiden::PjRtCopyFuture d2h_future,
+      raiden::transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes,
+                                /*src_offsets_major_dim=*/{},
+                                /*dst_offsets_major_dim=*/{},
+                                /*copy_sizes_major_dim=*/{}),
+      _.LogError().With(ReturnFuture));
 
   // Wrap promise in shared_ptr because OnReady lambda needs to be copyable
   auto shared_promise =

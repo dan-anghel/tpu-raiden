@@ -253,34 +253,34 @@ absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
 
 absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
   BlockPacketHeader header = {};
-  RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
+  ABSL_RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
 
   size_t bytes_per_block = delegate_->bytes_per_block();
 
   if (header.op == 1) {  // Push
-    TF_ASSIGN_OR_RETURN(
+    ABSL_ASSIGN_OR_RETURN(
         std::vector<int> allocated_ids,
         delegate_->AllocateBlocks(header.num_blocks, /*entity_id=*/0));
 
-    RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
-                                  header.num_blocks * sizeof(int)));
+    ABSL_RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
+                                    header.num_blocks * sizeof(int)));
 
     for (size_t l = 0; l < delegate_->num_layers(); ++l) {
       for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
         for (size_t k = 0; k < header.num_blocks; ++k) {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           int dst_id = allocated_ids[k];
-          RETURN_IF_ERROR(ValidateBlockRange(
+          ABSL_RETURN_IF_ERROR(ValidateBlockRange(
               delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
           uint8_t* dest_ptr = delegate_->GetBlockHostPointer(l, sh, dst_id);
-          RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
+          ABSL_RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
         }
       }
     }
 
     uint8_t ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-    RETURN_IF_ERROR(delegate_->OnDataReceived());
+    ABSL_RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+    ABSL_RETURN_IF_ERROR(delegate_->OnDataReceived());
   } else if (header.op == 2) {  // Pull request
     if (delegate_->shard_factor() == 0) {
       return absl::InvalidArgumentError("shard_factor must be positive");
@@ -295,7 +295,7 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     resp_header.local_block_id = 0;
     resp_header.num_blocks = header.num_blocks;
 
-    RETURN_IF_ERROR(
+    ABSL_RETURN_IF_ERROR(
         WriteExact(client_fd, &resp_header, sizeof(resp_header)));
 
     size_t local_blocks = header.num_blocks / delegate_->shard_factor();
@@ -310,11 +310,11 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
       for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
         for (size_t k = 0; k < local_blocks; ++k) {
           int read_id = static_cast<int>(header.remote_block_id + k);
-          RETURN_IF_ERROR(ValidateBlockRange(
+          ABSL_RETURN_IF_ERROR(ValidateBlockRange(
               delegate_, l, sh, read_id, /*num_blocks=*/1, bytes_per_block));
           const uint8_t* src_ptr =
               delegate_->GetBlockHostPointer(l, sh, read_id);
-          RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, bytes_per_block));
+          ABSL_RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, bytes_per_block));
         }
       }
     }
@@ -341,24 +341,24 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     }
 
     const uint8_t* src_ptr = base_host_ptr + src_offset;
-    RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
+    ABSL_RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
   } else if (header.op == 4) {  // Single Block Push (Direct)
     int dst_id = header.remote_block_id;
     size_t size_bytes = header.num_blocks;
 
     // Handshake response
     uint8_t ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+    ABSL_RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
-    RETURN_IF_ERROR(ValidateBlockRange(delegate_, /*layer_idx=*/0,
-                                          /*shard_idx=*/0, dst_id,
-                                          /*num_blocks=*/1, size_bytes));
+    ABSL_RETURN_IF_ERROR(ValidateBlockRange(delegate_, /*layer_idx=*/0,
+                                            /*shard_idx=*/0, dst_id,
+                                            /*num_blocks=*/1, size_bytes));
     uint8_t* dest_ptr = delegate_->GetBlockHostPointer(0, 0, dst_id);
-    RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
+    ABSL_RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
 
     ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-    RETURN_IF_ERROR(delegate_->OnSingleBlockReceived(dst_id, size_bytes));
+    ABSL_RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+    ABSL_RETURN_IF_ERROR(delegate_->OnSingleBlockReceived(dst_id, size_bytes));
   }
   return absl::OkStatus();
 }
@@ -479,18 +479,18 @@ absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
   header.local_block_id = 0;
   header.num_blocks = size_bytes;
 
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
+  ABSL_RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
 
   uint8_t ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
+  ABSL_RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
   if (ack != 1) {
     return absl::InternalError("Direct push handshaking failed");
   }
 
-  RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
+  ABSL_RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
 
   ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
+  ABSL_RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
   if (ack != 1) {
     return absl::InternalError("Direct push verification failed");
   }
@@ -531,8 +531,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     }
     allocated_ids = local_block_ids;
   } else {
-    TF_ASSIGN_OR_RETURN(allocated_ids, delegate_->AllocateBlocks(
-                                           local_blocks, /*entity_id=*/0));
+    ABSL_ASSIGN_OR_RETURN(allocated_ids, delegate_->AllocateBlocks(
+                                             local_blocks, /*entity_id=*/0));
   }
 
   int P = parallelism;
@@ -811,7 +811,7 @@ absl::Status BlockTransport::PullWeightsChunk(
   }
 
   // Establish peer socket connection
-  TF_ASSIGN_OR_RETURN(int fd, ConnectToPeer(source));
+  ABSL_ASSIGN_OR_RETURN(int fd, ConnectToPeer(source));
 
   // Send our customized resharding pull header (op = 3)
   BlockPacketHeader header = {};
@@ -820,12 +820,12 @@ absl::Status BlockTransport::PullWeightsChunk(
   header.local_block_id = static_cast<uint32_t>(src_shard_idx);
   header.num_blocks = static_cast<uint32_t>(size_bytes);
 
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
+  ABSL_RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
 
   // Read bytes directly into our local Host buffer!
   uint8_t* dest_ptr =
       delegate_->GetHostPointer(0, dst_shard_idx) + dst_offset_bytes;
-  RETURN_IF_ERROR(ReadExact(fd, dest_ptr, size_bytes));
+  ABSL_RETURN_IF_ERROR(ReadExact(fd, dest_ptr, size_bytes));
 
   return absl::OkStatus();
 }
