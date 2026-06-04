@@ -90,7 +90,7 @@ KVCacheStore::~KVCacheStore() {
 }
 
 void KVCacheStore::Clear() {
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   lru_list_.clear();
   cache_map_.clear();
   block_to_ptrs_.clear();
@@ -101,7 +101,7 @@ void KVCacheStore::Clear() {
 
 uint8_t* KVCacheStore::GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
                                            int block_id) {
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   if (num_layers_ == 0) return nullptr;
   auto it = block_to_ptrs_.find(block_id);
   if (it != block_to_ptrs_.end()) {
@@ -112,7 +112,7 @@ uint8_t* KVCacheStore::GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
 
 absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlocks(
     size_t num_blocks, int64_t entity_id) {
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   if (!block_manager_) {
     return absl::FailedPreconditionError("Block manager is not initialized");
   }
@@ -139,7 +139,7 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
   std::vector<raiden::PjRtCopyFuture> futures_to_join;
 
   {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     CleanupCompletedFuturesLocked();
   }
 
@@ -158,7 +158,7 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
     raiden::PjRtCopyFuture insert_future;
 
     {
-      absl::MutexLock lock(&mutex_);
+      absl::MutexLock lock(mutex_);
       auto it = cache_map_.find(hash);
       if (it != cache_map_.end()) {
         hits[i] = true;
@@ -231,7 +231,7 @@ absl::Status KVCacheStore::Insert(
     const std::vector<int>& src_offsets_major_dim,
     const std::vector<int>& copy_sizes_major_dim) {
   {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     CleanupCompletedFuturesLocked();
   }
 
@@ -262,7 +262,7 @@ absl::Status KVCacheStore::Insert(
 
   int64_t entity_id = next_entity_id_++;
   {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     ASSIGN_OR_RETURN(store_block_ids,
                      block_manager_->Allocate(total_needed_blocks, entity_id));
   }
@@ -286,7 +286,7 @@ absl::Status KVCacheStore::Insert(
 
   auto fut_or = manager.D2hAutoAllocate(src_offsets_64, copy_sizes_64);
   if (!fut_or.ok()) {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     (void)block_manager_->Unlock(store_block_ids);
     return fut_or.status();
   }
@@ -302,7 +302,7 @@ absl::Status KVCacheStore::Insert(
         store_block_ids.begin() + block_idx + needed);
 
     {
-      absl::MutexLock lock(&mutex_);
+      absl::MutexLock lock(mutex_);
       for (int k = 0; k < needed; ++k) {
         int store_block_id = chunk_block_ids[k];
         block_to_ptrs_[store_block_id].resize(num_layers_ * num_shards_);
