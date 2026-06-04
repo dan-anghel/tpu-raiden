@@ -15,14 +15,10 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_API_TORCH_KV_CACHE_MANAGER_H_
 #define THIRD_PARTY_TPU_RAIDEN_API_TORCH_KV_CACHE_MANAGER_H_
 
-#include <cstddef>
-#include <memory>
 #include <optional>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "absl/status/statusor.h"
-#include "xla/pjrt/pjrt_client.h"
 #include "kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {

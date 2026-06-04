@@ -12,29 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_WEIGHT_SYNCHRONIZER_H_
-#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_WEIGHT_SYNCHRONIZER_H_
-
-#include <optional>
-#include <vector>
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_MOCK_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_MOCK_H_
 
 #include "ATen/core/TensorBody.h"
-#include "weight_sync/weight_synchronizer_base.h"
+#include "xla/pjrt/pjrt_client.h"
 
 namespace tpu_raiden {
 namespace torch {
 
-class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
- public:
-  // PyTorch sharded constructor E2E
-  WeightSynchronizer(const std::vector<std::vector<at::Tensor>>& device_tensors,
-                     std::optional<int> local_port = std::nullopt,
-                     int parallelism = 1);
-
-  ~WeightSynchronizer() override;
-};
+// Registers a mapping from a PyTorch tensor to a PJRT buffer for testing.
+// The mock implementation of UnpackTorchTensor will use this mapping.
+void RegisterMockTensor(const at::Tensor& tensor, xla::PjRtBuffer* buffer);
 
 }  // namespace torch
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_WEIGHT_SYNCHRONIZER_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_MOCK_H_

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -192,5 +192,111 @@ nanobind_extension(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
+    ],
+)
+
+cc_library(
+    name = "torch_tpu_utils_mock",
+    srcs = ["torch_tpu_utils_mock.cc"],
+    hdrs = [
+        "torch_tpu_utils.h",
+        "torch_tpu_utils_mock.h",
+    ],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+)
+
+cc_library(
+    name = "torch_utils_mock",
+    srcs = ["torch_utils.cc"],
+    hdrs = ["torch_utils.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":torch_tpu_utils_mock",
+        "//core:xla_raw_transfer_headers",
+        "@torch_tpu//shims/torch:aten_headers",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_manager_torch_mock",
+    srcs = ["kv_cache_manager.cc"],
+    hdrs = ["kv_cache_manager.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":torch_tpu_utils_mock",
+        ":torch_utils_mock",
+        "//core:host_memory_allocator",
+        "//core:utils",
+        "//core:xla_raw_transfer_headers",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+    ],
+)
+
+cc_library(
+    name = "weight_synchronizer_torch_mock",
+    srcs = ["weight_synchronizer.cc"],
+    hdrs = ["weight_synchronizer.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":torch_utils_mock",
+        "//core:xla_raw_transfer_headers",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_manager_test",
+    srcs = ["kv_cache_manager_test.cc"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":kv_cache_manager_torch_mock",
+        ":torch_tpu_utils_mock",
+        "@torch_tpu//shims/torch",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
     ],
 )

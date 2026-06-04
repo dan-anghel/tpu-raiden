@@ -31,7 +31,7 @@ namespace tpu_raiden {
 
 absl::StatusOr<std::unique_ptr<HostMemoryAllocator>>
 HostMemoryAllocator::Create(xla::PjRtClient* pjrt_client) {
-  if (pjrt_client != nullptr) {
+  if (pjrt_client != nullptr && pjrt_client->platform_name() != "cpu") {
     return XlaHostMemoryAllocator::Create(pjrt_client);
   }
   return std::unique_ptr<HostMemoryAllocator>(
