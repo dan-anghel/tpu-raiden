@@ -96,11 +96,11 @@ static nb::dict CopyPlanToDict(const CopyPlan& plan) {
   return out;
 }
 
-class RaidenTransferEngine : public TransferEngineBase {
+class TransferEngine : public TransferEngineBase {
  public:
-  RaidenTransferEngine(nb::list kv_caches, int64_t local_control_port,
-                       int64_t max_blocks, int64_t num_slots, double timeout_s,
-                       bool unsafe_skip_buffer_lock)
+  TransferEngine(nb::list kv_caches, int64_t local_control_port,
+                 int64_t max_blocks, int64_t num_slots, double timeout_s,
+                 bool unsafe_skip_buffer_lock)
       : TransferEngineBase(
             CreateKvCacheManager(kv_caches, num_slots, max_blocks,
                                  unsafe_skip_buffer_lock),
@@ -108,7 +108,7 @@ class RaidenTransferEngine : public TransferEngineBase {
             unsafe_skip_buffer_lock),
         kv_caches_(kv_caches) {}
 
-  ~RaidenTransferEngine() override = default;
+  ~TransferEngine() override = default;
 
   std::vector<kv_cache::KVCacheHostSpan> LayerSpans(
       int64_t slot_idx, int64_t num_blocks) override {
@@ -285,36 +285,35 @@ bool IsReady(nb::object futures) {
 
 }  // namespace
 
-NB_MODULE(_raiden_transfer_engine, m) {
+NB_MODULE(_transfer_engine, m) {
   nb::class_<TransferFuture>(m, "RaidenTransferFuture")
       .def("Await", &TransferFuture::Await)
       .def("wait", &TransferFuture::Await)
       .def("IsReady", &TransferFuture::IsReady)
       .def("is_ready", &TransferFuture::IsReady);
 
-  nb::class_<RaidenTransferEngine>(m, "RaidenTransferEngine")
+  nb::class_<TransferEngine>(m, "TransferEngine")
       .def(nb::init<nb::list, int64_t, int64_t, int64_t, double, bool>(),
            nb::arg("kv_caches"), nb::arg("local_control_port"),
            nb::arg("max_blocks"), nb::arg("num_slots"),
            nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true)
       .def_prop_ro("uses_prepared_tpu_buffers",
-                   &RaidenTransferEngine::UsesPreparedTpuBuffers)
-      .def_prop_ro("local_control_port",
-                   &RaidenTransferEngine::local_control_port)
-      .def_prop_ro("local_data_port", &RaidenTransferEngine::local_data_port)
-      .def("register_kv_cache", &RaidenTransferEngine::RegisterKvCache,
+                   &TransferEngine::UsesPreparedTpuBuffers)
+      .def_prop_ro("local_control_port", &TransferEngine::local_control_port)
+      .def_prop_ro("local_data_port", &TransferEngine::local_data_port)
+      .def("register_kv_cache", &TransferEngine::RegisterKvCache,
            nb::arg("kv_caches"))
-      .def("register_host_buffers", &RaidenTransferEngine::RegisterHostBuffers,
+      .def("register_host_buffers", &TransferEngine::RegisterHostBuffers,
            nb::arg("host_pool"), nb::arg("tp_rank"))
-      .def("notify_for_read", &RaidenTransferEngine::NotifyForRead,
-           nb::arg("req_id"), nb::arg("uuid"), nb::arg("block_ids"))
-      .def("start_read", &RaidenTransferEngine::StartRead, nb::arg("req_id"),
+      .def("notify_for_read", &TransferEngine::NotifyForRead, nb::arg("req_id"),
+           nb::arg("uuid"), nb::arg("block_ids"))
+      .def("start_read", &TransferEngine::StartRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("remote_endpoint"),
            nb::arg("remote_block_ids"), nb::arg("local_block_ids"))
       .def(
           "stage_d2h",
-          [](RaidenTransferEngine& self, int64_t slot_idx, int64_t num_blocks,
+          [](TransferEngine& self, int64_t slot_idx, int64_t num_blocks,
              const std::vector<int64_t>& block_ids) {
             auto result = self.IssueD2H(slot_idx, num_blocks, block_ids);
             return nb::make_tuple(result.future, self.kv_caches(),
@@ -325,7 +324,7 @@ NB_MODULE(_raiden_transfer_engine, m) {
           nb::arg("block_ids"))
       .def(
           "stage_d2h_sync",
-          [](RaidenTransferEngine& self, int64_t slot_idx, int64_t num_blocks,
+          [](TransferEngine& self, int64_t slot_idx, int64_t num_blocks,
              const std::vector<int64_t>& block_ids) {
             auto result = self.IssueD2H(slot_idx, num_blocks, block_ids);
             result.future->Await();
@@ -334,7 +333,7 @@ NB_MODULE(_raiden_transfer_engine, m) {
           nb::arg("block_ids"))
       .def(
           "commit_h2d",
-          [](RaidenTransferEngine& self, int64_t slot_idx, int64_t num_blocks,
+          [](TransferEngine& self, int64_t slot_idx, int64_t num_blocks,
              const std::vector<int64_t>& local_block_ids) {
             auto res = self.CommitH2DRaw(slot_idx, num_blocks, local_block_ids);
             return nb::make_tuple(res.duration_issue_ms, res.duration_wait_ms,
@@ -344,7 +343,7 @@ NB_MODULE(_raiden_transfer_engine, m) {
           nb::arg("local_block_ids"))
       .def(
           "rank_layer_views",
-          [](RaidenTransferEngine& self, int64_t slot_idx, int64_t rank,
+          [](TransferEngine& self, int64_t slot_idx, int64_t rank,
              int64_t num_blocks) {
             if (rank != self.tp_rank()) {
               throw std::invalid_argument(
@@ -355,7 +354,7 @@ NB_MODULE(_raiden_transfer_engine, m) {
           nb::arg("slot_idx"), nb::arg("rank"), nb::arg("num_blocks"))
       .def(
           "unpack_rank_layers",
-          [](RaidenTransferEngine& self, int64_t slot_idx, int64_t rank,
+          [](TransferEngine& self, int64_t slot_idx, int64_t rank,
              int64_t num_blocks, nb::object layer_buffers) {
             if (rank != self.tp_rank()) {
               throw std::invalid_argument(
@@ -382,35 +381,31 @@ NB_MODULE(_raiden_transfer_engine, m) {
           },
           nb::arg("slot_idx"), nb::arg("rank"), nb::arg("num_blocks"),
           nb::arg("layer_buffers"))
-      .def("submit_d2h", &RaidenTransferEngine::SubmitD2H, nb::kw_only(),
+      .def("submit_d2h", &TransferEngine::SubmitD2H, nb::kw_only(),
            nb::arg("slot_idx"), nb::arg("num_blocks"), nb::arg("block_ids"))
-      .def("submit_h2d", &RaidenTransferEngine::SubmitH2D, nb::kw_only(),
+      .def("submit_h2d", &TransferEngine::SubmitH2D, nb::kw_only(),
            nb::arg("slot_idx"), nb::arg("num_blocks"),
            nb::arg("local_block_ids"))
       .def("complete_read",
-           [](RaidenTransferEngine& self) {
+           [](TransferEngine& self) {
              auto [done_sending, done_recving, failed_recving] =
                  self.CompleteReadRaw();
              return nb::make_tuple(done_sending, done_recving, failed_recving);
            })
-      .def("poll_transfer_ops", &RaidenTransferEngine::PollTransferOps)
-      .def("wait_transfer", &RaidenTransferEngine::WaitTransfer,
-           nb::arg("op_id"))
+      .def("poll_transfer_ops", &TransferEngine::PollTransferOps)
+      .def("wait_transfer", &TransferEngine::WaitTransfer, nb::arg("op_id"))
       .def("_count_copy_segments_for_testing",
-           &RaidenTransferEngine::CountCopySegmentsForTesting,
-           nb::arg("block_ids"))
+           &TransferEngine::CountCopySegmentsForTesting, nb::arg("block_ids"))
       .def(
           "_send_copy_plan_for_testing",
-          [](RaidenTransferEngine& self,
-             const std::vector<int64_t>& block_ids) {
+          [](TransferEngine& self, const std::vector<int64_t>& block_ids) {
             return CopyPlanToDict(
                 self.BuildProducerCopyPlanForTesting(block_ids));
           },
           nb::arg("block_ids"))
       .def(
           "_load_copy_plan_for_testing",
-          [](RaidenTransferEngine& self,
-             const std::vector<int64_t>& remote_block_ids,
+          [](TransferEngine& self, const std::vector<int64_t>& remote_block_ids,
              const std::vector<int64_t>& local_block_ids) {
             return CopyPlanToDict(self.BuildLoadCopyPlanForTesting(
                 remote_block_ids, local_block_ids));

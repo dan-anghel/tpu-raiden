@@ -103,7 +103,7 @@ if [ "$BUILD_JAX" = true ]; then
     "//frameworks/jax:_kv_cache_manager"
     "//frameworks/jax:_kv_cache_manager_ffi"
     "//frameworks/jax:_weight_synchronizer"
-    "//frameworks/jax:_raiden_transfer_engine"
+    "//frameworks/jax:_transfer_engine"
   )
 else
   DEFINE_FLAGS+=" --define with_jax=false"
@@ -131,7 +131,7 @@ PY
     "//frameworks/torch:_torch_raw_transfer"
     "//frameworks/torch:_kv_cache_manager"
     "//frameworks/torch:_weight_synchronizer"
-    "//frameworks/torch:_raiden_transfer_engine"
+    "//frameworks/torch:_transfer_engine"
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
@@ -167,7 +167,7 @@ if [ "$BUILD_JAX" = true ]; then
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/jax/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/frameworks/jax/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_raiden_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/jax/"
 fi
 
 if [ "$BUILD_TORCH" = true ]; then
@@ -176,7 +176,7 @@ if [ "$BUILD_TORCH" = true ]; then
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/frameworks/torch/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/torch/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/torch/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_raiden_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/torch/"
 fi
 
 

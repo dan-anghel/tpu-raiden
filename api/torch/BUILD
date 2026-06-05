@@ -100,7 +100,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//frameworks/torch:_raiden_transfer_engine",
+        "//frameworks/torch:_transfer_engine",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
         "@torch_tpu//torch_tpu:_loader",

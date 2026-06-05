@@ -2,7 +2,6 @@ class TransferEngine:
   def __init__(
       self,
       kv_caches: list,
-      tp_rank: int,
       local_control_port: int,
       max_blocks: int,
       num_slots: int,

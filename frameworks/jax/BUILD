@@ -506,9 +506,9 @@ cc_test(
 )
 
 nanobind_extension(
-    name = "_raiden_transfer_engine",
+    name = "_transfer_engine",
     srcs = [
-        "raiden_transfer_engine.cc",
+        "transfer_engine.cc",
     ],
     copts = [
         "-fexceptions",

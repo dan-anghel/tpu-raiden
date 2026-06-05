@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""E2E physical unit tests for RaidenTransferEngine on XLA TPUs."""
+"""E2E physical unit tests for TransferEngine on XLA TPUs."""
 
 import threading
 import time
@@ -22,10 +22,10 @@ from absl.testing import parameterized
 import numpy as np
 import torch
 
-from api.torch.transfer_engine import RaidenTransferEngine
+from api.torch.transfer_engine import TransferEngine
 
 
-class RaidenTransferEngineTest(parameterized.TestCase):
+class TransferEngineTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -39,7 +39,7 @@ class RaidenTransferEngineTest(parameterized.TestCase):
     shape = (4, 128, 8)
     kv_caches = [torch.zeros(shape, device=device)]
 
-    engine = RaidenTransferEngine(
+    engine = TransferEngine(
         kv_caches=kv_caches,
         tp_rank=0,
         local_control_port=0,
@@ -66,7 +66,7 @@ class RaidenTransferEngineTest(parameterized.TestCase):
           torch.zeros(shape, dtype=torch.float32, device=self.device)
       )
 
-    producer = RaidenTransferEngine(
+    producer = TransferEngine(
         kv_caches=src_caches,
         tp_rank=0,
         local_control_port=0,
@@ -74,7 +74,7 @@ class RaidenTransferEngineTest(parameterized.TestCase):
         num_slots=2,
     )
 
-    consumer = RaidenTransferEngine(
+    consumer = TransferEngine(
         kv_caches=dst_caches,
         tp_rank=0,
         local_control_port=0,

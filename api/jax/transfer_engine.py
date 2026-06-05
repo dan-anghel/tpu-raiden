@@ -28,10 +28,10 @@
 
 """Standalone Raiden transfer engine for JAX TPU KV-cache movement."""
 
-from frameworks.jax import _raiden_transfer_engine as _impl
+from frameworks.jax import _transfer_engine as _impl
 
-RaidenTransferEngine = _impl.RaidenTransferEngine
+TransferEngine = _impl.TransferEngine
 
 __all__ = [
-    "RaidenTransferEngine",
+    "TransferEngine",
 ]

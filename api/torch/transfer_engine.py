@@ -47,10 +47,10 @@ def _load_torch_tpu_common() -> None:
 
 _load_torch_tpu_common()
 
-from frameworks.torch import _raiden_transfer_engine as _impl
+from frameworks.torch import _transfer_engine as _impl
 
-RaidenTransferEngine = _impl.RaidenTransferEngine
+TransferEngine = _impl.TransferEngine
 
 __all__ = [
-    "RaidenTransferEngine",
+    "TransferEngine",
 ]

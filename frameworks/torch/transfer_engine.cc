@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "frameworks/torch/raiden_transfer_engine.h"
+#include "frameworks/torch/transfer_engine.h"
 
 #include <limits>
 #include <memory>
@@ -43,19 +43,17 @@ std::vector<std::vector<at::Tensor>> SingleShardLayers(
 
 }  // namespace
 
-RaidenTransferEngine::RaidenTransferEngine(const TensorList& kv_caches,
-                                           int64_t tp_rank,
-                                           int64_t local_control_port,
-                                           int64_t max_blocks,
-                                           int64_t num_slots, double timeout_s,
-                                           bool unsafe_skip_buffer_lock)
+TransferEngine::TransferEngine(const TensorList& kv_caches, int64_t tp_rank,
+                               int64_t local_control_port, int64_t max_blocks,
+                               int64_t num_slots, double timeout_s,
+                               bool unsafe_skip_buffer_lock)
     : TransferEngineBase(CreateKvCacheManager(kv_caches, num_slots, max_blocks,
                                               unsafe_skip_buffer_lock),
                          tp_rank, local_control_port, max_blocks, num_slots,
                          timeout_s, unsafe_skip_buffer_lock),
       kv_caches_(kv_caches) {}
 
-std::vector<int64_t> RaidenTransferEngine::RegisterKvCache(
+std::vector<int64_t> TransferEngine::RegisterKvCache(
     const TensorList& kv_caches) {
   kv_caches_ = kv_caches;
   if (num_slots_ <= 0) {
@@ -107,15 +105,14 @@ std::vector<int64_t> RaidenTransferEngine::RegisterKvCache(
   return region_ids;
 }
 
-void RaidenTransferEngine::RegisterHostBuffers(int64_t tp_rank) {
+void TransferEngine::RegisterHostBuffers(int64_t tp_rank) {
   tp_rank_ = tp_rank;
 }
 
 std::unique_ptr<kv_cache::KVCacheManagerBase>
-RaidenTransferEngine::CreateKvCacheManager(const TensorList& kv_caches,
-                                           int64_t num_slots,
-                                           int64_t max_blocks,
-                                           bool unsafe_skip_buffer_lock) {
+TransferEngine::CreateKvCacheManager(const TensorList& kv_caches,
+                                     int64_t num_slots, int64_t max_blocks,
+                                     bool unsafe_skip_buffer_lock) {
   bool has_tpu = false;
   for (const auto& t : kv_caches) {
 #ifdef RAIDEN_TORCH_USE_MOCKS

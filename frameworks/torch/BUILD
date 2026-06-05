@@ -162,9 +162,9 @@ nanobind_extension(
 )
 
 cc_library(
-    name = "raiden_transfer_engine_torch",
-    srcs = ["raiden_transfer_engine.cc"],
-    hdrs = ["raiden_transfer_engine.h"],
+    name = "transfer_engine_torch",
+    srcs = ["transfer_engine.cc"],
+    hdrs = ["transfer_engine.h"],
     copts = [
         "-std=c++20",
         "-fexceptions",
@@ -184,15 +184,15 @@ cc_library(
 )
 
 nanobind_extension(
-    name = "_raiden_transfer_engine",
-    srcs = ["raiden_transfer_engine_module.cc"],
+    name = "_transfer_engine",
+    srcs = ["transfer_engine_module.cc"],
     features = [
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":raiden_transfer_engine_torch",
         ":torch_nanobind_utils",
+        ":transfer_engine_torch",
         "//core:transfer_engine_base",
         "//kv_cache:kv_cache_manager_base",
         "@torch_tpu//shims/torch:aten_headers",
@@ -200,9 +200,9 @@ nanobind_extension(
 )
 
 cc_library(
-    name = "raiden_transfer_engine_torch_mock",
-    srcs = ["raiden_transfer_engine.cc"],
-    hdrs = ["raiden_transfer_engine.h"],
+    name = "transfer_engine_torch_mock",
+    srcs = ["transfer_engine.cc"],
+    hdrs = ["transfer_engine.h"],
     copts = [
         "-std=c++20",
         "-fexceptions",
@@ -393,16 +393,16 @@ cc_test(
 )
 
 cc_test(
-    name = "raiden_transfer_engine_test",
-    srcs = ["raiden_transfer_engine_test.cc"],
+    name = "transfer_engine_test",
+    srcs = ["transfer_engine_test.cc"],
     copts = [
         "-std=c++20",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
     deps = [
-        ":raiden_transfer_engine_torch_mock",
         ":torch_tpu_utils_mock",
+        ":transfer_engine_torch_mock",
         "@torch_tpu//shims/torch",
         "@torch_tpu//shims/torch:torch_headers",
         "@xla//xla/pjrt:pjrt_client",

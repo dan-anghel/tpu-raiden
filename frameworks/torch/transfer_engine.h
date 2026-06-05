@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_RAIDEN_TRANSFER_ENGINE_H_
-#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_RAIDEN_TRANSFER_ENGINE_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TRANSFER_ENGINE_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TRANSFER_ENGINE_H_
 
 #include <memory>
 #include <vector>
@@ -24,14 +24,14 @@
 
 namespace tpu_raiden::torch {
 
-class RaidenTransferEngine : public TransferEngineBase {
+class TransferEngine : public TransferEngineBase {
  public:
-  RaidenTransferEngine(const std::vector<at::Tensor>& kv_caches,
-                       int64_t tp_rank, int64_t local_control_port,
-                       int64_t max_blocks, int64_t num_slots, double timeout_s,
-                       bool unsafe_skip_buffer_lock);
+  TransferEngine(const std::vector<at::Tensor>& kv_caches, int64_t tp_rank,
+                 int64_t local_control_port, int64_t max_blocks,
+                 int64_t num_slots, double timeout_s,
+                 bool unsafe_skip_buffer_lock);
 
-  ~RaidenTransferEngine() override = default;
+  ~TransferEngine() override = default;
 
   std::vector<int64_t> RegisterKvCache(
       const std::vector<at::Tensor>& kv_caches);
@@ -50,4 +50,4 @@ class RaidenTransferEngine : public TransferEngineBase {
 
 }  // namespace tpu_raiden::torch
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_RAIDEN_TRANSFER_ENGINE_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TRANSFER_ENGINE_H_

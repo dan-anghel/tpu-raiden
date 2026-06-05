@@ -169,9 +169,12 @@ py_test(
 py_library(
     name = "transfer_engine_jax_py",
     srcs = ["transfer_engine.py"],
+    data = [
+        "transfer_engine.pyi",
+    ],
     visibility = ["//visibility:public"],
     deps = [
-        "//frameworks/jax:_raiden_transfer_engine",
+        "//frameworks/jax:_transfer_engine",
     ],
 )
 

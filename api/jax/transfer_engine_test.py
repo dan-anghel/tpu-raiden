@@ -26,7 +26,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""E2E unit tests for JAX RaidenTransferEngine."""
+"""E2E unit tests for JAX TransferEngine."""
 
 import os
 import time
@@ -37,12 +37,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax.transfer_engine import RaidenTransferEngine
+from api.jax.transfer_engine import TransferEngine
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
 
-class RaidenTransferEngineJaxTest(parameterized.TestCase):
+class TransferEngineJaxTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -100,7 +100,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     shape = (4, 128, 8, 8, 128)
     kv_caches = [jax.device_put(jnp.zeros(shape), tpu_sharding)]
 
-    engine = RaidenTransferEngine(
+    engine = TransferEngine(
         kv_caches=kv_caches,
         local_control_port=0,
         max_blocks=4,
@@ -135,7 +135,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = RaidenTransferEngine(
+    producer = TransferEngine(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=2,
@@ -143,7 +143,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = RaidenTransferEngine(
+    consumer = TransferEngine(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=2,
@@ -221,7 +221,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = RaidenTransferEngine(
+    producer = TransferEngine(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=3,
@@ -229,7 +229,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = RaidenTransferEngine(
+    consumer = TransferEngine(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=3,
@@ -309,7 +309,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = RaidenTransferEngine(
+    producer = TransferEngine(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=2,
@@ -317,7 +317,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = RaidenTransferEngine(
+    consumer = TransferEngine(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=2,
@@ -395,7 +395,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = RaidenTransferEngine(
+    producer = TransferEngine(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=16,
@@ -403,7 +403,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = RaidenTransferEngine(
+    consumer = TransferEngine(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=16,

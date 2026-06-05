@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "frameworks/torch/raiden_transfer_engine.h"
+#include "frameworks/torch/transfer_engine.h"
 
 #include <memory>
 #include <vector>
@@ -21,13 +21,13 @@
 #include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
-#include "torch/torch.h"
 #include "frameworks/torch/torch_tpu_utils_mock.h"
+#include "torch/torch.h"
 
 namespace tpu_raiden::torch {
 namespace {
 
-class RaidenTransferEngineTest : public ::testing::Test {
+class TransferEngineTest : public ::testing::Test {
  protected:
   void SetUp() override {
     TF_ASSERT_OK_AND_ASSIGN(client_,
@@ -37,7 +37,7 @@ class RaidenTransferEngineTest : public ::testing::Test {
   std::unique_ptr<xla::PjRtClient> client_;
 };
 
-TEST_F(RaidenTransferEngineTest, ConstructorAndRegisterSucceeds) {
+TEST_F(TransferEngineTest, ConstructorAndRegisterSucceeds) {
   // Create a real CPU PJRT buffer
   TF_ASSERT_OK_AND_ASSIGN(
       xla::PjRtMemorySpace * memory_space,
@@ -60,11 +60,11 @@ TEST_F(RaidenTransferEngineTest, ConstructorAndRegisterSucceeds) {
 
   std::vector<at::Tensor> kv_caches = {tensor};
 
-  // Construct RaidenTransferEngine
-  RaidenTransferEngine engine(kv_caches, /*tp_rank=*/0,
-                              /*local_control_port=*/0, /*max_blocks=*/2,
-                              /*num_slots=*/2, /*timeout_s=*/10.0,
-                              /*unsafe_skip_buffer_lock=*/true);
+  // Construct TransferEngine
+  TransferEngine engine(kv_caches, /*tp_rank=*/0,
+                        /*local_control_port=*/0, /*max_blocks=*/2,
+                        /*num_slots=*/2, /*timeout_s=*/10.0,
+                        /*unsafe_skip_buffer_lock=*/true);
 
   EXPECT_TRUE(engine.UsesPreparedTpuBuffers());
 
