@@ -16,7 +16,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
 #include <memory>
+#include <optional>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -27,10 +32,14 @@
 #include "absl/status/status.h"
 #include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
-#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
+#include "absl/types/span.h"
+#include "xla/future.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/shape_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
 
 ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
@@ -39,6 +48,138 @@ ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
 
 namespace tpu_raiden {
 namespace weight_sync {
+
+namespace {
+
+absl::Status DetileBuffer(const uint8_t* src_tiled, uint8_t* dst_linear,
+                          const xla::Shape& shape, const xla::Layout& layout) {
+  if (layout.tiles().empty()) {
+    return absl::InternalError("Buffer is not tiled");
+  }
+  const xla::Tile& tile = layout.tiles()[0];
+  auto tile_dims = tile.dimensions();
+  if (tile_dims.size() != 2) {
+    return absl::UnimplementedError("Only 2D tiling supported");
+  }
+  int64_t tH = tile_dims[0];
+  int64_t tW = tile_dims[1];
+
+  int64_t itemsize =
+      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
+
+  int64_t rank = shape.dimensions().size();
+  if (rank < 2) {
+    return absl::InvalidArgumentError("Rank must be at least 2 for 2D tiling");
+  }
+
+  int64_t logical_minor_0 = layout.minor_to_major(0);
+  int64_t logical_minor_1 = layout.minor_to_major(1);
+
+  int64_t W = shape.dimensions(logical_minor_0);
+  int64_t H = shape.dimensions(logical_minor_1);
+
+  int64_t num_tiles_W = (W + tW - 1) / tW;
+  int64_t num_tiles_H = (H + tH - 1) / tH;
+
+  int64_t tiled_2d_block_size = num_tiles_W * num_tiles_H * tH * tW * itemsize;
+  int64_t linear_2d_block_size = H * W * itemsize;
+
+  int64_t num_outer_blocks = 1;
+  for (int i = 0; i < rank; ++i) {
+    if (i != logical_minor_0 && i != logical_minor_1) {
+      num_outer_blocks *= shape.dimensions(i);
+    }
+  }
+
+  for (int64_t ob = 0; ob < num_outer_blocks; ++ob) {
+    const uint8_t* src_block = src_tiled + ob * tiled_2d_block_size;
+    uint8_t* dst_block = dst_linear + ob * linear_2d_block_size;
+
+    for (int64_t h = 0; h < H; ++h) {
+      for (int64_t w = 0; w < W; ++w) {
+        int64_t tile_h = h / tH;
+        int64_t tile_w = w / tW;
+        int64_t offset_within_tile = (h % tH) * tW + (w % tW);
+        int64_t tile_index = tile_h * num_tiles_W + tile_w;
+        int64_t physical_offset =
+            (tile_index * (tH * tW) + offset_within_tile) * itemsize;
+        int64_t logical_offset = (h * W + w) * itemsize;
+
+        std::memcpy(dst_block + logical_offset, src_block + physical_offset,
+                    itemsize);
+      }
+    }
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status TileBuffer(const uint8_t* src_linear, uint8_t* dst_tiled,
+                        const xla::Shape& shape, const xla::Layout& layout) {
+  if (layout.tiles().empty()) {
+    return absl::InternalError("Buffer is not tiled");
+  }
+  const xla::Tile& tile = layout.tiles()[0];
+  auto tile_dims = tile.dimensions();
+  if (tile_dims.size() != 2) {
+    return absl::UnimplementedError("Only 2D tiling supported");
+  }
+  int64_t tH = tile_dims[0];
+  int64_t tW = tile_dims[1];
+
+  int64_t itemsize =
+      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
+
+  int64_t rank = shape.dimensions().size();
+  if (rank < 2) {
+    return absl::InvalidArgumentError("Rank must be at least 2 for 2D tiling");
+  }
+
+  int64_t logical_minor_0 = layout.minor_to_major(0);
+  int64_t logical_minor_1 = layout.minor_to_major(1);
+
+  int64_t W = shape.dimensions(logical_minor_0);
+  int64_t H = shape.dimensions(logical_minor_1);
+
+  int64_t num_tiles_W = (W + tW - 1) / tW;
+  int64_t num_tiles_H = (H + tH - 1) / tH;
+
+  int64_t tiled_2d_block_size = num_tiles_W * num_tiles_H * tH * tW * itemsize;
+  int64_t linear_2d_block_size = H * W * itemsize;
+
+  int64_t num_outer_blocks = 1;
+  for (int i = 0; i < rank; ++i) {
+    if (i != logical_minor_0 && i != logical_minor_1) {
+      num_outer_blocks *= shape.dimensions(i);
+    }
+  }
+
+  std::memset(dst_tiled, 0, num_outer_blocks * tiled_2d_block_size);
+
+  for (int64_t ob = 0; ob < num_outer_blocks; ++ob) {
+    const uint8_t* src_block = src_linear + ob * linear_2d_block_size;
+    uint8_t* dst_block = dst_tiled + ob * tiled_2d_block_size;
+
+    for (int64_t h = 0; h < H; ++h) {
+      for (int64_t w = 0; w < W; ++w) {
+        int64_t tile_h = h / tH;
+        int64_t tile_w = w / tW;
+        int64_t offset_within_tile = (h % tH) * tW + (w % tW);
+        int64_t tile_index = tile_h * num_tiles_W + tile_w;
+        int64_t physical_offset =
+            (tile_index * (tH * tW) + offset_within_tile) * itemsize;
+        int64_t logical_offset = (h * W + w) * itemsize;
+
+        std::memcpy(dst_block + physical_offset, src_block + logical_offset,
+                    itemsize);
+      }
+    }
+  }
+
+  return absl::OkStatus();
+}
+
+}  // namespace
 
 WeightSynchronizerBase::WeightSynchronizerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
@@ -190,10 +331,33 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
       const auto& shard_info = layer_info.shards[i];
       const auto& shard_hold = layer_holds[i];
 
+      auto pjrt_layout = shard_hold.buffer->layout();
+      const xla::Layout* xla_layout = nullptr;
+      if (pjrt_layout) {
+        xla_layout = &pjrt_layout->xla_layout();
+      }
+      bool is_tiled = xla_layout && !xla_layout->tiles().empty();
+
       std::vector<xla::Future<>> shard_futures;
-      xla::Future<> future = shard_hold.CopyRawHostToDevice(shard_info.host_ptr,
-                                                            0, physical_size_);
-      shard_futures.push_back(std::move(future));
+      if (is_tiled) {
+        auto temp_buffer =
+            std::make_shared<std::vector<uint8_t>>(physical_size_);
+        auto status =
+            TileBuffer(shard_info.host_ptr, temp_buffer->data(),
+                       shard_hold.buffer->on_device_shape(), *xla_layout);
+        if (!status.ok()) {
+          return status;
+        }
+
+        xla::Future<> future = shard_hold.CopyRawHostToDevice(
+            temp_buffer->data(), 0, physical_size_);
+        xla::Future<> mapped_future = future.Map([temp_buffer]() {});
+        shard_futures.push_back(std::move(mapped_future));
+      } else {
+        xla::Future<> future = shard_hold.CopyRawHostToDevice(
+            shard_info.host_ptr, 0, physical_size_);
+        shard_futures.push_back(std::move(future));
+      }
       shard_futures_to_join.push_back(raiden::CreateBufferFuture(
           std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
@@ -215,13 +379,43 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dChunk(
   const auto& shard_info = layer_info.shards[shard_idx];
   const auto& shard_hold = layer_holds[shard_idx];
 
-  const uint8_t* src_ptr = shard_info.host_ptr + host_offset_bytes;
+  auto pjrt_layout = shard_hold.buffer->layout();
+  const xla::Layout* xla_layout = nullptr;
+  if (pjrt_layout) {
+    xla_layout = &pjrt_layout->xla_layout();
+  }
+  bool is_tiled = xla_layout && !xla_layout->tiles().empty();
 
   std::vector<xla::Future<>> shard_futures;
-  xla::Future<> future = shard_hold.CopyRawHostToDevice(
-      const_cast<uint8_t*>(src_ptr), device_offset_bytes, size_bytes
-  );
-  shard_futures.push_back(std::move(future));
+  if (is_tiled) {
+    auto temp_buffer = std::make_shared<std::vector<uint8_t>>(physical_size_);
+    auto status = TileBuffer(shard_info.host_ptr, temp_buffer->data(),
+                             shard_hold.buffer->on_device_shape(), *xla_layout);
+    if (!status.ok()) {
+      return status;
+    }
+
+    if (host_offset_bytes != 0 || device_offset_bytes != 0 ||
+        size_bytes != physical_size_) {
+      LOG(WARNING) << "H2dChunk called with partial offsets on tiled buffer. "
+                   << "host_offset=" << host_offset_bytes
+                   << ", device_offset=" << device_offset_bytes
+                   << ", size=" << size_bytes
+                   << ", physical_size=" << physical_size_;
+    }
+
+    const uint8_t* src_ptr = temp_buffer->data() + device_offset_bytes;
+
+    xla::Future<> future = shard_hold.CopyRawHostToDevice(
+        const_cast<uint8_t*>(src_ptr), device_offset_bytes, size_bytes);
+    xla::Future<> mapped_future = future.Map([temp_buffer]() {});
+    shard_futures.push_back(std::move(mapped_future));
+  } else {
+    const uint8_t* src_ptr = shard_info.host_ptr + host_offset_bytes;
+    xla::Future<> future = shard_hold.CopyRawHostToDevice(
+        const_cast<uint8_t*>(src_ptr), device_offset_bytes, size_bytes);
+    shard_futures.push_back(std::move(future));
+  }
 
   std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
   shard_futures_to_join.push_back(raiden::CreateBufferFuture(
@@ -242,10 +436,36 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
       const auto& shard_hold = layer_holds[i];
       uint8_t* dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
 
+      auto pjrt_layout = shard_hold.buffer->layout();
+      const xla::Layout* xla_layout = nullptr;
+      if (pjrt_layout) {
+        xla_layout = &pjrt_layout->xla_layout();
+      }
+      bool is_tiled = xla_layout && !xla_layout->tiles().empty();
+
       std::vector<xla::Future<>> shard_futures;
-      xla::Future<> future =
-          shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
-      shard_futures.push_back(std::move(future));
+      if (is_tiled) {
+        auto temp_buffer =
+            std::make_shared<std::vector<uint8_t>>(physical_size_);
+        uint8_t* temp_buffer_ptr = temp_buffer->data();
+
+        xla::Future<> copy_future =
+            shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, physical_size_);
+
+        xla::Future<> detile_future =
+            copy_future.Map([temp_buffer, dst_host_ptr,
+                             shape = shard_hold.buffer->on_device_shape(),
+                             layout = *xla_layout]() -> absl::Status {
+              return DetileBuffer(temp_buffer->data(), dst_host_ptr, shape,
+                                  layout);
+            });
+
+        shard_futures.push_back(std::move(detile_future));
+      } else {
+        xla::Future<> future =
+            shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
+        shard_futures.push_back(std::move(future));
+      }
       shard_futures_to_join.push_back(raiden::CreateBufferFuture(
           std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }

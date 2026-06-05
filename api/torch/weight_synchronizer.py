@@ -52,6 +52,68 @@ class WeightSynchronizer:
     """Inference server pulling current weights from the source peer coordinate E2E."""
     self._impl.PullWeights(source)
 
+  def d2h(self) -> None:
+    """Triggers asynchronous Device-to-Host (D2H) copy of current weights to Host buffer."""
+    self._impl.D2h()
+
+  def pull_weights_chunk(
+      self,
+      source: str,
+      src_shard_idx: int,
+      src_offset_bytes: int,
+      dst_shard_idx: int,
+      dst_offset_bytes: int,
+      size_bytes: int,
+  ) -> None:
+    """Inference server pulling a specific byte range directly from a source worker peer.
+
+    Args:
+      source: "host:port" coordinate of the source peer.
+      src_shard_idx: Target source device shard index to read.
+      src_offset_bytes: Offset in bytes inside source shard staging buffer.
+      dst_shard_idx: Local destination device shard index to write.
+      dst_offset_bytes: Offset in bytes inside local destination staging buffer.
+      size_bytes: Number of bytes to transfer.
+    """
+    self._impl.PullWeightsChunk(
+        source,
+        src_shard_idx,
+        src_offset_bytes,
+        dst_shard_idx,
+        dst_offset_bytes,
+        size_bytes,
+    )
+
+  def h2d_chunk(
+      self,
+      shard_idx: int,
+      host_offset_bytes: int,
+      device_offset_bytes: int,
+      size_bytes: int,
+  ) -> None:
+    """Triggers asynchronous Host-to-Device (H2D) chunk copy directly to Device HBM.
+
+    Args:
+      shard_idx: Target shard index.
+      host_offset_bytes: Source offset in Host staging buffer.
+      device_offset_bytes: Destination offset in Device memory.
+      size_bytes: Number of bytes to copy.
+    """
+    self._impl.H2dChunk(
+        shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
+    )
+
+  def get_host_buffer(
+      self, layer_idx: int = 0, shard_idx: int = 0
+  ) -> torch.Tensor:
+    """Returns a zero-copy Host-side CPU PyTorch Tensor view of the C++ staging buffer.
+
+    Args:
+      layer_idx: Target layer index to fetch.
+      shard_idx: Target shard index to fetch.
+    """
+    return self._impl.get_host_buffer(layer_idx, shard_idx)
+
   @property
   def local_port(self) -> Optional[int]:
     """Returns assigned ephemeral listener port coordinates."""
