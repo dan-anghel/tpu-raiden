@@ -102,7 +102,14 @@ absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
   }
   uint8_t* base = delegate->GetHostPointer(layer_idx, shard_idx);
   if (base == nullptr) {
-    return absl::FailedPreconditionError("Host pointer is null");
+    for (size_t i = 0; i < num_blocks; ++i) {
+      if (delegate->GetBlockHostPointer(layer_idx, shard_idx,
+                                        block_id + static_cast<int>(i)) ==
+          nullptr) {
+        return absl::FailedPreconditionError("Host pointer is null");
+      }
+    }
+    return absl::OkStatus();
   }
   const size_t host_size = delegate->GetHostSize(layer_idx, shard_idx);
   const size_t first_block = static_cast<size_t>(block_id);
@@ -666,12 +673,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   s = ForEachPayload(major_order, delegate_->num_layers(),
                      delegate_->num_shards(), block_count,
                      [&](size_t l, size_t sh, size_t k) -> absl::Status {
-      const uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
       ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
       const int src_id = src_block_ids[block_offset + k];
       ABSL_RETURN_IF_ERROR(ValidateBlockRange(
           delegate_, l, sh, src_id, /*num_blocks=*/1, bytes_per_block));
-      const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
+      const uint8_t* src_ptr = delegate_->GetBlockHostPointer(l, sh, src_id);
       return WriteExact(fd, src_ptr, bytes_per_block);
     });
   if (!s.ok()) {
