@@ -370,6 +370,33 @@ cc_test(
 )
 
 cc_test(
+    name = "raw_transfer_perf_test",
+    srcs = ["raw_transfer_perf_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    tags = [
+        "no_oss",
+        "requires-ghostlite",  # Runs on physical TPU slices
+    ],
+    deps = [
+        ":raw_transfer_core",
+        ":raw_transfer_impl",
+        ":tpu_pjrt_manager",
+        "@com_google_absl//absl/time",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
     name = "transfer_engine_base_test",
     srcs = ["transfer_engine_base_test.cc"],
     copts = [
