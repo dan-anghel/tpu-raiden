@@ -61,6 +61,7 @@ cc_library(
         ":raw_transfer_core",
         ":raw_transfer_impl",
         ":status_macros",
+        ":xla_raw_transfer_headers",
         "//transport:block_transport",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -69,9 +70,6 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@xla//xla:future",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:semaphore",
     ],
     alwayslink = 1,
 )
@@ -82,9 +80,11 @@ header_only_cc_info(
         "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:common_pjrt_client",
+        "@xla//xla/pjrt:host_memory_allocator",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_layout",
         "@xla//xla/pjrt:raw_buffer",
+        "@xla//xla/pjrt:semaphore",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
@@ -120,7 +120,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@xla//xla/pjrt:host_memory_allocator",
     ],
 )
 
@@ -137,9 +136,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
+        ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status:statusor",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -158,10 +156,6 @@ cc_library(
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        # buildcleaner: keep
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        # buildcleaner: keep
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         # buildcleaner: keep
         "@com_google_absl//absl/synchronization",
     ],
@@ -182,18 +176,10 @@ cc_library(
     deps = [
         ":raw_transfer_core",
         ":status_macros",
+        ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/platform:logging",
-        "@xla//xla/tsl/platform:statusor",
     ],
 )
 

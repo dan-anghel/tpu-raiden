@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "ATen/ops/from_blob.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/stl/optional.h"
 #include "nanobind/stl/string.h"
@@ -118,7 +119,8 @@ NB_MODULE(_weight_synchronizer, m) {
           nb::call_guard<nb::gil_scoped_release>())
       .def(
           "get_host_buffer",
-          [](WeightSynchronizer& self, size_t layer_idx, size_t shard_idx) {
+          [](WeightSynchronizer& self, size_t layer_idx,
+             size_t shard_idx) -> at::Tensor {
             const uint8_t* ptr = self.GetHostBufferPtr(layer_idx, shard_idx);
             if (!ptr) {
               throw std::runtime_error("Invalid layer or shard index");

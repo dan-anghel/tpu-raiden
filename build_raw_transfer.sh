@@ -54,6 +54,7 @@ BAZEL_OUTPUT_BASE="${BAZEL_OUTPUT_BASE:-${DEFAULT_BAZEL_OUTPUT_BASE}}"
 
 echo "=== Navigating to workspace directory ==="
 cd "${WORKSPACE_DIR}"
+TORCH_TPU_MODULE_PATH="${TORCH_TPU_MODULE_PATH:-../torch_tpu}"
 
 # 0. Set up standalone Bazel environment based on .bazelversion in /tmp
 BAZEL_VERSION="7.7.0"
@@ -72,12 +73,19 @@ fi
 
 "${BAZEL_BIN}" --version
 
+if [[ -z "${CC:-}" ]] && command -v clang > /dev/null; then
+  export CC="$(command -v clang)"
+fi
+if [[ -z "${CXX:-}" ]] && command -v clang++ > /dev/null; then
+  export CXX="$(command -v clang++)"
+fi
+
 # Default behavior based on auto-detection
 BUILD_JAX=true
 BUILD_TORCH=true
 
-if [ ! -d "../torch_tpu" ]; then
-  echo "Sibling torch_tpu checkout not found. Defaulting to JAX-only build."
+if [ ! -f "${TORCH_TPU_MODULE_PATH}/MODULE.bazel" ]; then
+  echo "torch_tpu checkout not found at ${TORCH_TPU_MODULE_PATH}. Defaulting to JAX-only build."
   BUILD_TORCH=false
 fi
 
@@ -111,6 +119,7 @@ fi
 
 BAZEL_TARGETS=()
 DEFINE_FLAGS=""
+BAZEL_MODULE_FLAGS=()
 TORCH_REPO_ENV_FLAGS=()
 
 if [ "$BUILD_JAX" = true ]; then
@@ -128,6 +137,13 @@ fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Configuring build for Torch..."
+  if [[ ! -f "${TORCH_TPU_MODULE_PATH}/MODULE.bazel" ]]; then
+    echo "Error: Torch build requires a torch_tpu checkout at ${TORCH_TPU_MODULE_PATH}." >&2
+    echo "Set TORCH_TPU_MODULE_PATH to override the default ../torch_tpu location." >&2
+    exit 1
+  fi
+  TORCH_TPU_MODULE_PATH="$(cd "${TORCH_TPU_MODULE_PATH}" && pwd)"
+  BAZEL_MODULE_FLAGS+=("--override_module=torch_tpu=${TORCH_TPU_MODULE_PATH}")
   if [[ -z "${TORCH_SOURCE:-}" ]]; then
     TORCH_SOURCE="$(python3 - <<'PY'
 import importlib.util
@@ -152,6 +168,12 @@ PY
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
+  DUMMY_TORCH_TPU_MODULE="${BAZEL_CACHE_BASE}/dummy_torch_tpu_module"
+  mkdir -p "${DUMMY_TORCH_TPU_MODULE}"
+  cat > "${DUMMY_TORCH_TPU_MODULE}/MODULE.bazel" <<'EOF'
+module(name = "torch_tpu", version = "0.1.1")
+EOF
+  BAZEL_MODULE_FLAGS+=("--override_module=torch_tpu=${DUMMY_TORCH_TPU_MODULE}")
 fi
 
 if [ ${#BAZEL_TARGETS[@]} -eq 0 ]; then
@@ -168,6 +190,7 @@ echo "=== Building targets with Bazel ==="
   --repo_env=PIP_EXTRA_INDEX_URL="" \
   --repo_env=PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
   --repo_env=PIP_CONFIG_FILE="/dev/null" \
+  "${BAZEL_MODULE_FLAGS[@]}" \
   "${TORCH_REPO_ENV_FLAGS[@]}" \
   "${BAZEL_TARGETS[@]}" \
   ${DEFINE_FLAGS} \
