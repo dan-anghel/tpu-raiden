@@ -82,7 +82,7 @@ def prepare_reshard(src_sharded_array: jax.Array) -> str:
   local_src_ws_info = multihost_utils.global_array_to_host_local_array(
       src_ws_info,
       src_mesh,
-      jax.sharding.PartitionSpec(src_mesh.axis_names[0], None),
+      src_ws_info.sharding.spec,
   )
 
   gathered_src_ws_info = multihost_utils.process_allgather(
