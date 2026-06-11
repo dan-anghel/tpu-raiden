@@ -28,7 +28,6 @@
 
 """E2E physical unit tests for KVCacheManager on XLA TPUs."""
 
-import threading
 import time
 
 from absl.testing import absltest
@@ -36,7 +35,9 @@ from absl.testing import parameterized
 import numpy as np
 import torch
 
-from api.torch.kv_cache_manager import KVCacheManager
+from api.torch import kv_cache_manager
+
+KVCacheManager = kv_cache_manager.KVCacheManager
 
 
 class KVCacheManagerTest(parameterized.TestCase):
@@ -101,7 +102,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     req_id = "test_req_poll"
     uuid = 12345
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -115,7 +116,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     # Poll until consumer is done receiving
     done = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -132,7 +133,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     # Poll producer until it's done sending
     done_prod = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -179,7 +180,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     req_id = "test_req_parallel"
     uuid = 99999
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -193,7 +194,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -208,7 +209,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break

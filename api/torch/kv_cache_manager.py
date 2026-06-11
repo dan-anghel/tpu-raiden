@@ -30,12 +30,16 @@
 
 import ctypes
 import os
-from pathlib import Path
+import pathlib
 from typing import Any, List, Tuple
 
-import torch  # noqa: F401  # Load torch shared libraries before the extension.
-import torch_tpu
+import torch
+
+import torch_tpu  # noqa: F401  # Load torch shared libraries before the extension.
 from torch_tpu import _loader as _torch_tpu_loader
+
+
+Path = pathlib.Path
 
 
 def _load_torch_tpu_common() -> None:
@@ -95,11 +99,21 @@ class KVCacheManager:
     """Returns the active control plane listener port."""
     return self._impl.local_control_port
 
-  def notify_for_read(
+  def register_read(
       self, req_id: str, uuid: int, block_ids: List[int]
-  ) -> int:
-    """Producer node notifies the registry/peer that blocks are ready for read."""
-    return self._impl.notify_for_read(req_id, uuid, block_ids)
+  ) -> bool:
+    """Producer node notifies the registry/peer that blocks are ready for read.
+
+    Args:
+      req_id: The request ID of the transfer operation.
+      uuid: The UUID of the request.
+      block_ids: The list of block IDs to be read.
+
+    Returns:
+      True if a transfer is indeed needed; False if there is nothing to be
+      transferred.
+    """
+    return bool(self._impl.notify_for_read(req_id, uuid, block_ids))
 
   def start_read(
       self,
@@ -120,6 +134,11 @@ class KVCacheManager:
         parallelism,
     )
 
-  def complete_read(self) -> Tuple[List[str], List[str], List[str]]:
-    """Waits for and completes all active asynchronous read operations."""
+  def poll_stats(self) -> Tuple[List[str], List[str], List[str]]:
+    """Polls the status of all active background transfer operations.
+
+    Returns:
+      A tuple of (done_sending, done_recving, failed_recving) lists of request
+      IDs.
+    """
     return self._impl.complete_read()

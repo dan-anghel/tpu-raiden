@@ -91,9 +91,19 @@ class KVCacheManager:
     """Registers a shared CPU host memory pool for staging transfers."""
     self._impl.register_host_buffers(host_pool, tp_rank)
 
-  def notify_for_read(self, req_id: str, uuid: int, block_ids: List[int]) -> None:
-    """Producer node notifies the registry/peer that blocks are ready for read."""
-    self._impl.notify_for_read(req_id, uuid, block_ids)
+  def register_read(self, req_id: str, uuid: int, block_ids: List[int]) -> bool:
+    """Producer node notifies the registry/peer that blocks are ready for read.
+
+    Args:
+      req_id: The request ID of the transfer operation.
+      uuid: The UUID of the request.
+      block_ids: The list of block IDs to be read.
+
+    Returns:
+      True if a transfer is indeed needed; False if there is nothing to be
+      transferred.
+    """
+    return bool(self._impl.notify_for_read(req_id, uuid, block_ids))
 
   def start_read(
       self,
@@ -176,8 +186,13 @@ class KVCacheManager:
         local_block_ids=local_block_ids,
     )
 
-  def complete_read(self) -> Tuple[bool, bool, bool]:
-    """Waits for and completes all active asynchronous read operations."""
+  def poll_stats(self) -> Tuple[List[str], List[str], List[str]]:
+    """Polls the status of all active background transfer operations.
+
+    Returns:
+      A tuple of (done_sending, done_recving, failed_recving) lists of request
+      IDs.
+    """
     return self._impl.complete_read()
 
   def poll_transfer_ops(self) -> List[Any]:
@@ -189,14 +204,14 @@ class KVCacheManager:
     self._impl.wait_transfer(op_id)
 
   def _count_copy_segments_for_testing(self, block_ids: List[int]) -> int:
-    return self._impl._count_copy_segments_for_testing(block_ids)
+    return self._impl._count_copy_segments_for_testing(block_ids)  # pytype: disable=protected-access
 
   def _send_copy_plan_for_testing(self, block_ids: List[int]) -> Any:
-    return self._impl._send_copy_plan_for_testing(block_ids)
+    return self._impl._send_copy_plan_for_testing(block_ids)  # pytype: disable=protected-access
 
   def _load_copy_plan_for_testing(
       self, remote_block_ids: List[int], local_block_ids: List[int]
   ) -> Any:
-    return self._impl._load_copy_plan_for_testing(
+    return self._impl._load_copy_plan_for_testing(  # pytype: disable=protected-access
         remote_block_ids, local_block_ids
     )

@@ -22,12 +22,12 @@ class KVCacheManager:
       timeout_s: float = ...,
       unsafe_skip_buffer_lock: bool = ...,
   ) -> None: ...
-  def notify_for_read(
+  def register_read(
       self,
       req_id: str,
       uuid: int,
       block_ids: list[int],
-  ) -> int: ...
+  ) -> bool: ...
   def start_read(
       self,
       req_id: str,
@@ -37,4 +37,4 @@ class KVCacheManager:
       local_block_ids: list[int],
       parallelism: int = 1,
   ) -> int: ...
-  def complete_read(self) -> tuple[list[str], list[str], list[str]]: ...
+  def poll_stats(self) -> tuple[list[str], list[str], list[str]]: ...
