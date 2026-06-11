@@ -49,18 +49,6 @@ py_test(
 )
 
 py_library(
-    name = "kv_cache_manager_ffi_py",
-    srcs = ["kv_cache_manager_ffi.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//frameworks/jax:_kv_cache_manager_ffi",
-        "@jax//jax",
-        "@jax//jax/experimental:compute_on",
-        "@pypi//numpy",
-    ],
-)
-
-py_library(
     name = "weight_synchronizer_ffi_py",
     srcs = ["weight_synchronizer_ffi.py"],
     visibility = ["//visibility:public"],
