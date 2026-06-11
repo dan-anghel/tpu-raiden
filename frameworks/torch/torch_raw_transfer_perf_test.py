@@ -27,7 +27,7 @@ import torch.multiprocessing as mp
 import torch_tpu
 
 from google3.pyglib.contrib.g3_multiprocessing import g3_multiprocessing
-from api.torch import torch_raw_transfer
+from frameworks.torch import _torch_raw_transfer as torch_raw_transfer
 
 _GOOGLE_PCI_VENDOR_ID = "0x1ae0"
 _TOPOLOGY_BY_TPU_PCI_DEVICE_ID = {
