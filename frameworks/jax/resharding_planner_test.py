@@ -34,7 +34,7 @@ os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=16"
 
 from absl.testing import absltest
 import jax
-from api.jax import resharding_planner
+from frameworks.jax import resharding_planner
 import numpy as np
 
 

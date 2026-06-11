@@ -29,7 +29,7 @@
 
 import jax
 import numpy as np
-from api.jax import resharding_planner
+from frameworks.jax import resharding_planner
 
 
 def reshard_matrix_controller_piped(

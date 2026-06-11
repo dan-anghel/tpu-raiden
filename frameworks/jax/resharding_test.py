@@ -36,8 +36,8 @@ from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 from jax.experimental import multihost_utils
-from api.jax import resharding_engine
-from api.jax import resharding_test_lib
+from frameworks.jax import resharding_engine
+from frameworks.jax import resharding_test_lib
 import numpy as np
 
 

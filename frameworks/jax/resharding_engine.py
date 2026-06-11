@@ -32,8 +32,8 @@ import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
 import numpy as np
-from api.jax import resharding_planner
-from api.jax import weight_synchronizer_ffi as raiden_ffi
+from frameworks.jax import resharding_planner
+from frameworks.jax import weight_synchronizer_ffi as raiden_ffi
 from rpc import coordination_helper
 
 _COORDINATION_SERVER: Optional[coordination_helper.CoordinationServer] = None
