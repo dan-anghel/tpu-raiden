@@ -80,25 +80,5 @@ py_library(
     ],
 )
 
-py_library(
-    name = "utils",
-    srcs = ["utils.py"],
-    deps = [
-        "@com_google_absl_py//absl/flags",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
-py_library(
-    name = "raw_transfer",
-    srcs = [
-        "raw_transfer.py",
-    ],
-    deps = [
-        "//frameworks/jax:_raw_transfer",
-    ],
-)
-
 # Keep Copybara happy by maintaining at least one internal reference target prefix reference:
 # //:dummy_target

@@ -619,3 +619,102 @@ py_test(
         "@pypi//numpy",
     ],
 )
+
+py_library(
+    name = "jax_test_utils",
+    srcs = ["utils.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl_py//absl/flags",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "raw_transfer_perf_gl",
+    timeout = "long",
+    srcs = ["raw_transfer_perf_test.py"],
+    main = "raw_transfer_perf_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostlite:8",
+        "requires-net:external",
+    ],
+    deps = [
+        ":_raw_transfer",
+        ":jax_test_utils",
+        "@com_google_absl_py//absl/flags",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "raw_transfer_perf_gf",
+    timeout = "long",
+    srcs = ["raw_transfer_perf_test.py"],
+    main = "raw_transfer_perf_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostfish:4",
+        "requires-net:external",
+    ],
+    deps = [
+        ":_raw_transfer",
+        ":jax_test_utils",
+        "@com_google_absl_py//absl/flags",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "raw_transfer_test_gl",
+    timeout = "long",
+    srcs = ["raw_transfer_test.py"],
+    main = "raw_transfer_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostlite:8",
+        "requires-net:external",
+    ],
+    deps = [
+        ":_raw_transfer",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "raw_transfer_test_gf",
+    timeout = "long",
+    srcs = ["raw_transfer_test.py"],
+    main = "raw_transfer_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostfish:4",
+        "requires-net:external",
+    ],
+    deps = [
+        ":_raw_transfer",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
