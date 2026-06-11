@@ -33,9 +33,12 @@ cc_library(
 py_library(
     name = "kv_cache_manager_torch_py",
     srcs = ["kv_cache_manager.py"],
+    data = [
+        "kv_cache_manager.pyi",
+    ],
     visibility = ["//visibility:public"],
     deps = [
-        "//frameworks/torch:_kv_cache_manager",
+        "//frameworks/torch:_torch_raw_transfer",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
     ],
