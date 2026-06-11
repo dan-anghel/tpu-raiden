@@ -232,7 +232,6 @@ cc_library(
         "@xla//xla:literal",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt/plugin/xla_tpu:tpu_static_registration",
         "@xla//xla/pjrt/plugin/xla_tpu:xla_tpu_pjrt_client",
     ],
 )
@@ -388,7 +387,6 @@ cc_test(
     ],
     deps = [
         ":host_memory_allocator",
-        ":raw_transfer_core",
         ":raw_transfer_impl",
         ":tpu_pjrt_manager",
         "@com_google_absl//absl/time",
