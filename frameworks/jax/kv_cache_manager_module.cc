@@ -24,7 +24,8 @@
 namespace nb = nanobind;
 
 NB_MODULE(_kv_cache_manager, m) {
-  nb::module_::import_("api.jax.raw_transfer");
+  nb::module_::import_(
+      "frameworks.jax._raw_transfer");
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, int, std::optional<int>, std::optional<int>,

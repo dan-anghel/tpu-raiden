@@ -31,7 +31,8 @@
 namespace nb = nanobind;
 
 NB_MODULE(kv_cache_store, m) {
-  nb::module_::import_("api.jax.raw_transfer");
+  nb::module_::import_(
+      "frameworks.jax._raw_transfer");
   nb::class_<tpu_raiden::kv_cache::KVCacheStore>(m, "KVCacheStore")
       .def(nb::init<int, int, std::string, std::string>(),
            nb::arg("block_size"), nb::arg("capacity"),

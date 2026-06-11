@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax import kv_cache_manager
+from frameworks.jax import _kv_cache_manager
 
 
 # os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
@@ -310,7 +310,7 @@ class KVCacheManagerPerfTest(parameterized.TestCase):
     )
 
     # Initialize KVCacheManager
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=self.src_arrs,
         block_size=1,
         host_blocks_to_allocate=num_blocks,
@@ -573,7 +573,7 @@ class KVCacheManagerPerfTest(parameterized.TestCase):
     )
 
     num_blocks = shape[0]
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=self.src_arrs,
         block_size=1,
         host_blocks_to_allocate=num_blocks,
