@@ -40,6 +40,7 @@
 #include "xla/tsl/platform/statusor.h"
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
+#include "weight_sync/weight_synchronizer_control_service.h"
 
 ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
           "Amount of scratchpad to allocate to host buffers for resharding "
@@ -184,7 +185,8 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
-    bool unsafe_skip_buffer_lock, int parallelism)
+    bool unsafe_skip_buffer_lock, int parallelism,
+    std::optional<int> control_port)
     : tpu_raiden::RaidenManagerBase(
           layer_buffers.size(),
           layer_buffers.empty() ? 0 : layer_buffers[0].size(),
@@ -272,12 +274,17 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     layers_.push_back(std::move(layer_info));
     buffer_holds_.push_back(std::move(hold_info));
   }
+
+  if (control_port) {
+    control_service_ =
+        std::make_unique<WeightSynchronizerControlService>(this, *control_port);
+  }
 }
 
 WeightSynchronizerBase::WeightSynchronizerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    int parallelism)
+    int parallelism, std::optional<int> control_port)
     : tpu_raiden::RaidenManagerBase(num_layers, num_shards, slice_byte_size,
                                     /*block_size=*/1, local_port, parallelism) {
   physical_size_ = slice_byte_size_;
@@ -314,6 +321,25 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     }
     layers_.push_back(std::move(layer_info));
   }
+
+  if (control_port) {
+    control_service_ =
+        std::make_unique<WeightSynchronizerControlService>(this, *control_port);
+  }
+}
+
+std::optional<int> WeightSynchronizerBase::control_port() const {
+  if (control_service_) {
+    return control_service_->control_port();
+  }
+  return std::nullopt;
+}
+
+bool WeightSynchronizerBase::is_control_service_active() const {
+  if (control_service_) {
+    return control_service_->is_active();
+  }
+  return false;
 }
 
 WeightSynchronizerBase::~WeightSynchronizerBase() = default;

@@ -24,9 +24,11 @@ namespace jax {
 WeightSynchronizer::WeightSynchronizer(const nb::list& jax_arrays,
                                        std::optional<int> local_port,
                                        int parallelism,
-                                       bool unsafe_skip_buffer_lock)
+                                       bool unsafe_skip_buffer_lock,
+                                       std::optional<int> control_port)
     : WeightSynchronizerBase({}, local_port, std::nullopt,
-                             unsafe_skip_buffer_lock, parallelism) {
+                             unsafe_skip_buffer_lock, parallelism,
+                             control_port) {
   throw std::runtime_error(
       "Python WeightSynchronizer constructor is unsupported in pure C++ FFI "
       "unit tests.");

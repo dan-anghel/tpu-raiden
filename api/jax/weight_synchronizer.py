@@ -29,6 +29,7 @@ class WeightSynchronizer:
       local_port: Optional[int] = None,
       parallelism: int = 1,
       unsafe_skip_buffer_lock: bool = False,
+      control_port: Optional[int] = None,
   ):
     """Instantiates the Weight Synchronizer on a JAX weights list.
 
@@ -37,18 +38,16 @@ class WeightSynchronizer:
       local_port: Sockets server port for incoming pulls (inference mode).
       parallelism: Number of parallel network stream TCP sockets workers.
       unsafe_skip_buffer_lock: Skip PJRT buffer locks during weights unpack.
+      control_port: Sockets server port for incoming C++ Control Service
+        commands.
     """
     self._impl = _weight_synchronizer.WeightSynchronizer(
-        jax_arrays, local_port, parallelism, unsafe_skip_buffer_lock
+        jax_arrays,
+        local_port,
+        parallelism,
+        unsafe_skip_buffer_lock,
+        control_port,
     )
-
-  def push_weights(self, peers: List[str]) -> None:
-    """Trainer pushing current weights to all inference server peers (D2H + network push).
-
-    Args:
-      peers: A list of "host:port" coordinates for peer inference servers.
-    """
-    self._impl.PushWeights(peers)
 
   def pull_weights(self, source: str) -> None:
     """Inference server pulling current weights from the source peer (network pull + H2D).
@@ -63,6 +62,10 @@ class WeightSynchronizer:
   def d2h(self) -> None:
     """Triggers asynchronous Device-to-Host (D2H) copy of current weights to Host buffer."""
     self._impl.D2h()
+
+  def h2d(self) -> None:
+    """Triggers asynchronous Host-to-Device (H2D) copy of staged host buffer back to Device memory E2E."""
+    self._impl.H2d()
 
   def pull_weights_chunk(
       self,
@@ -124,6 +127,16 @@ class WeightSynchronizer:
   def local_port(self) -> Optional[int]:
     """Returns the active local port assigned to the transceiving sockets server."""
     return self._impl.local_port
+
+  @property
+  def control_port(self) -> Optional[int]:
+    """Returns the active local port assigned to the C++ Control Service."""
+    return self._impl.control_port
+
+  @property
+  def is_control_service_active(self) -> bool:
+    """Returns whether the native C++ Control Service is actively running."""
+    return self._impl.is_control_service_active
 
   @property
   def num_layers(self) -> int:

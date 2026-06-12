@@ -210,6 +210,7 @@ cc_library(
     features = [
         "-use_header_modules",
     ],
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":weight_synchronizer_jax",
@@ -238,6 +239,7 @@ nanobind_extension(
     features = [
         "-use_header_modules",
     ],
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":weight_synchronizer_ffi",
@@ -260,6 +262,7 @@ cc_library(
     features = [
         "-use_header_modules",
     ],
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
@@ -286,6 +289,7 @@ nanobind_extension(
         "-use_header_modules",
     ],
     linkopts = ["-Wl,--exclude-libs,ALL"],
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":weight_synchronizer_jax",

@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,6 +33,8 @@
 namespace tpu_raiden {
 namespace weight_sync {
 
+class WeightSynchronizerControlService;
+
 class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
  public:
   // Symmetrical core constructor wrapping raw PJRT buffers directly E2E
@@ -40,14 +43,18 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> local_port = std::nullopt,
       std::optional<std::vector<const uint8_t*>> external_host_ptrs =
           std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      std::optional<int> control_port = std::nullopt);
 
   // CPU-only constructor for remote workers and mock E2E testing
   WeightSynchronizerBase(
       size_t num_layers, size_t num_shards, size_t slice_byte_size,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
-      int parallelism = 1);
+      int parallelism = 1, std::optional<int> control_port = std::nullopt);
+
+  std::optional<int> control_port() const;
+  bool is_control_service_active() const;
 
   ~WeightSynchronizerBase() override;
 
@@ -76,6 +83,7 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
       size_t size_bytes);
 
  protected:
+  std::unique_ptr<WeightSynchronizerControlService> control_service_;
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t physical_size_ = 0;

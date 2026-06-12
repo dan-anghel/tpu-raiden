@@ -12,17 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_python//python:proto.bzl", "py_proto_library")
 
 package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "weight_synchronizer_service_proto",
+    srcs = ["weight_synchronizer_service.proto"],
+)
+
+cc_proto_library(
+    name = "weight_synchronizer_service_cc_proto",
+    deps = [":weight_synchronizer_service_proto"],
+)
+
+py_proto_library(
+    name = "weight_synchronizer_service_py_pb2",
+    deps = [":weight_synchronizer_service_proto"],
+)
 
 cc_library(
     name = "weight_synchronizer_base",
     srcs = [
         "weight_synchronizer_base.cc",
+        "weight_synchronizer_control_service.cc",
     ],
     hdrs = [
         "weight_synchronizer_base.h",
+        "weight_synchronizer_control_service.h",
     ],
     copts = [
         "-fno-strict-aliasing",
@@ -31,6 +51,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":weight_synchronizer_service_cc_proto",
         "//core:raiden_manager_base",
         "//core:raw_transfer_core",
         "//core:status_macros",
@@ -62,5 +83,21 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+    ],
+)
+
+cc_test(
+    name = "weight_synchronizer_control_service_test",
+    srcs = ["weight_synchronizer_control_service_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":weight_synchronizer_base",
+        ":weight_synchronizer_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )

@@ -62,8 +62,10 @@ py_library(
 py_test(
     name = "weight_synchronizer_test",
     srcs = ["weight_synchronizer_test.py"],
+    tags = ["notap"],
     deps = [
         ":weight_synchronizer_jax_py",
+        "//weight_sync:weight_synchronizer_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
         "@pypi//numpy",

@@ -13,12 +13,12 @@
 # limitations under the License.
 
 load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_grpc_library")
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@rules_python//python:proto.bzl", "py_proto_library")
 load("//net/grpc:cc_grpc_library.bzl", "cc_grpc_library")
-load("//tools/build_defs/proto/cpp:cc_proto_library.bzl", "cc_proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -62,6 +62,9 @@ py_library(
 py_library(
     name = "raiden_controller",
     srcs = ["raiden_controller.py"],
+    deps = [
+        "//weight_sync:weight_synchronizer_service_py_pb2",
+    ],
 )
 
 py_test(

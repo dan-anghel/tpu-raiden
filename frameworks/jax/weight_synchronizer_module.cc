@@ -33,20 +33,12 @@ using ::tpu_raiden::jax::WeightSynchronizer;
 // Exported Nanobind python module definition E2E!
 NB_MODULE(_weight_synchronizer, m) {
   nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
-      .def(nb::init<const nb::list&, std::optional<int>, int, bool>(),
+      .def(nb::init<const nb::list&, std::optional<int>, int, bool,
+                    std::optional<int>>(),
            nb::arg("jax_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("parallelism") = 1,
-           nb::arg("unsafe_skip_buffer_lock") = false)
-      .def(
-          "PushWeights",
-          [](WeightSynchronizer& self, const std::vector<std::string>& peers) {
-            absl::Status s = self.PushWeights(peers);
-            if (!s.ok()) {
-              throw std::runtime_error("Weight sync PushWeights failed: " +
-                                       std::string(s.message()));
-            }
-          },
-          nb::arg("peers"), nb::call_guard<nb::gil_scoped_release>())
+           nb::arg("unsafe_skip_buffer_lock") = false,
+           nb::arg("control_port") = nb::none())
       .def(
           "PullWeights",
           [](WeightSynchronizer& self, const std::string& source) {
@@ -73,6 +65,23 @@ NB_MODULE(_weight_synchronizer, m) {
             }
           },
           nb::call_guard<nb::gil_scoped_release>())
+      .def(
+          "H2d",
+          [](WeightSynchronizer& self) {
+            auto status_or_future = self.H2d();
+            if (!status_or_future.ok()) {
+              throw std::runtime_error(
+                  "Weight sync H2D failed: " +
+                  std::string(status_or_future.status().message()));
+            }
+            absl::Status status = status_or_future.value().Await().status();
+            if (!status.ok()) {
+              throw std::runtime_error("Weight sync H2D copy failed: " +
+                                       std::string(status.message()));
+            }
+          },
+          nb::call_guard<nb::gil_scoped_release>())
+
       .def(
           "H2dChunk",
           [](WeightSynchronizer& self, size_t shard_idx,
@@ -131,6 +140,9 @@ NB_MODULE(_weight_synchronizer, m) {
           },
           nb::arg("layer_idx") = 0, nb::arg("shard_idx") = 0)
       .def_prop_ro("local_port", &WeightSynchronizer::local_port)
+      .def_prop_ro("control_port", &WeightSynchronizer::control_port)
+      .def_prop_ro("is_control_service_active",
+                   &WeightSynchronizer::is_control_service_active)
       .def_prop_ro("num_layers", &WeightSynchronizer::num_layers)
       .def_prop_ro("num_shards", &WeightSynchronizer::num_shards)
       .def_prop_ro("slice_byte_size", &WeightSynchronizer::slice_byte_size);

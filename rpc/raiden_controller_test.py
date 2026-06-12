@@ -63,7 +63,7 @@ class RaidenControllerTest(absltest.TestCase):
     )
 
     # First transfer routes to src_unit_0
-    future_1 = controller.kickoff_transfer(
+    future_1 = controller.start_transfer(
         src_units=[src_unit_0, src_unit_1],
         dst_units=[target_unit],
     )
@@ -87,7 +87,7 @@ class RaidenControllerTest(absltest.TestCase):
     self.assertEqual(unit_0_plan[1], [(target_unit, 1, [[(0, 2)]])])
 
     # Second transfer routes dynamically to least-loaded src_unit_1
-    future_2 = controller.kickoff_transfer(
+    future_2 = controller.start_transfer(
         src_units=[src_unit_0, src_unit_1],
         dst_units=[target_unit],
     )
@@ -119,7 +119,7 @@ class RaidenControllerTest(absltest.TestCase):
     controller.register_work_unit(target_0, ["10.0.0.2:8000"])
     controller.register_work_unit(target_1, ["10.0.0.3:8000"])
 
-    future_multi = controller.kickoff_transfer(
+    future_multi = controller.start_transfer(
         src_units=[src],
         dst_units=[target_0, target_1],
     )
@@ -128,6 +128,46 @@ class RaidenControllerTest(absltest.TestCase):
     plan_multi = controller.get_plan("req_0")
     self.assertLen(plan_multi.dst_units, 2)
 
+  def test_rpc_client_push_coordination(self):
+    recorded_actions = []
+
+    class MockWorkerClient(raiden_controller.WorkerRpcClient):
+
+      async def start_transfer(self, orchestrator_id, plan) -> None:
+        recorded_actions.append(("start", [orchestrator_id]))
+
+    mock_client = MockWorkerClient()
+    controller = raiden_controller.RaidenController(
+        port=10002, worker_rpc_client=mock_client
+    )
+
+    src = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="weights"
+    )
+    dst = raiden_controller.RaidenId(
+        job_name="sampler", job_replica_id="0", data_name="weights"
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[dst],
+    )
+
+    wait_task = future.wait()
+    try:
+      wait_task.send(None)
+    except StopIteration:
+      pass
+
+    self.assertEqual(
+        recorded_actions,
+        [
+            ("start", [src]),
+            ("start", [dst]),
+        ],
+    )
+
 
 if __name__ == "__main__":
+
   absltest.main()
