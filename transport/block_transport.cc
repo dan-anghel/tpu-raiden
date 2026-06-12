@@ -169,8 +169,11 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 
 }  // namespace
 
-BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port)
-    : delegate_(delegate), local_port_(local_port) {
+BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
+                               bool enable_conn_pool)
+    : delegate_(delegate),
+      local_port_(local_port),
+      pooling_enabled_(enable_conn_pool) {
   server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
     LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
@@ -204,6 +207,7 @@ BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port)
 
 BlockTransport::~BlockTransport() {
   stopping_ = true;
+  ClosePooledConnections();
   if (server_fd_ >= 0) {
     shutdown(server_fd_, SHUT_RDWR);
     close(server_fd_);
@@ -294,6 +298,57 @@ absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
   }
 
   return sock_fd;
+}
+
+absl::StatusOr<int> BlockTransport::AcquireConnection(const std::string& peer) {
+  if (pooling_enabled_) {
+    absl::MutexLock lock(pool_mu_);
+    auto it = conn_pool_.find(peer);
+    if (it != conn_pool_.end()) {
+      while (!it->second.empty()) {
+        int fd = it->second.back();
+        it->second.pop_back();
+
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        // Non-blocking poll: if > 0, the socket either has unexpected data
+        // (it should be idle) or has reached EOF/error state.
+        if (poll(&pfd, 1, 0) > 0) {
+          shutdown(fd, SHUT_RDWR);
+          close(fd);
+          continue;
+        }
+        return fd;
+      }
+    }
+  }
+  return ConnectToPeer(peer);
+}
+
+void BlockTransport::ReleaseConnection(const std::string& peer, int fd) {
+  if (fd < 0) return;
+  // Only return healthy fds to the pool; on stop/disabled, just close. The
+  // producer's ConnectionWorker keeps the matching fd open (blocked in
+  // ReadExact) so a returned connection stays valid for the next pull.
+  absl::MutexLock lock(pool_mu_);
+  if (!pooling_enabled_ || stopping_) {
+    shutdown(fd, SHUT_RDWR);
+    close(fd);
+    return;
+  }
+  conn_pool_[peer].push_back(fd);
+}
+
+void BlockTransport::ClosePooledConnections() {
+  absl::MutexLock lock(pool_mu_);
+  for (auto& entry : conn_pool_) {
+    for (int fd : entry.second) {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  }
+  conn_pool_.clear();
 }
 
 absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
@@ -457,6 +512,12 @@ void BlockTransport::ListenerLoop() {
 
     int opt = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+    // Match the connect side (ConnectToPeer): without these the accepted
+    // (producer send) socket falls back to the small default buffer, capping
+    // the per-flow window on a high-BDP link.
+    int buf_opt = 16 * 1024 * 1024;  // 16MB
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
 
     {
       absl::MutexLock _(mu_);
@@ -516,10 +577,18 @@ absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
                                               int remote_block_id,
                                               const uint8_t* data_ptr,
                                               size_t size_bytes) {
-  auto status_or_fd = ConnectToPeer(peer);
+  auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) return status_or_fd.status();
   int fd = status_or_fd.value();
-  auto fd_cleaner = absl::MakeCleanup([fd] { close(fd); });
+  bool ok_to_pool = false;
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(peer, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
 
   BlockPacketHeader header;
   header.op = 4;  // Single Block Push (Direct)
@@ -543,6 +612,7 @@ absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
     return absl::InternalError("Direct push verification failed");
   }
 
+  ok_to_pool = true;
   return absl::OkStatus();
 }
 
@@ -630,13 +700,21 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
                                     std::vector<int>& allocated_ids,
                                     std::vector<absl::Status>& statuses,
                                     MajorOrder major_order) {
-  auto status_or_fd = ConnectToPeer(peer);
+  auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
     return;
   }
   int fd = status_or_fd.value();
-  auto fd_cleaner = absl::MakeCleanup([fd] { close(fd); });
+  bool ok_to_pool = false;
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(peer, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
 
   BlockPacketHeader header = {};
   header.op = 1;  // Push
@@ -692,6 +770,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
     statuses[stream_idx] = s;
     return;
   }
+  ok_to_pool = true;  // clean completion → keep the warm connection (Exp-3)
 }
 
 void BlockTransport::H2hReadWorker(
@@ -702,13 +781,21 @@ void BlockTransport::H2hReadWorker(
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
     BlockReceivedCallback on_block_received) {
-  auto status_or_fd = ConnectToPeer(peer);
+  auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
     return;
   }
   int fd = status_or_fd.value();
-  auto fd_cleaner = absl::MakeCleanup([fd] { close(fd); });
+  bool ok_to_pool = false;
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(peer, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
 
   size_t SF = delegate_->shard_factor();
 
@@ -843,6 +930,7 @@ void BlockTransport::H2hReadWorker(
       return;
     }
   }
+  ok_to_pool = true;  // clean completion → keep the warm connection (Exp-3)
 }
 
 absl::Status BlockTransport::PullWeightsChunk(
@@ -860,7 +948,18 @@ absl::Status BlockTransport::PullWeightsChunk(
   }
 
   // Establish peer socket connection
-  TF_ASSIGN_OR_RETURN(int fd, ConnectToPeer(source));
+  auto status_or_fd = AcquireConnection(source);
+  if (!status_or_fd.ok()) return status_or_fd.status();
+  int fd = status_or_fd.value();
+  bool ok_to_pool = false;
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(source, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
 
   // Send our customized resharding pull header (op = 3)
   BlockPacketHeader header = {};
@@ -876,6 +975,7 @@ absl::Status BlockTransport::PullWeightsChunk(
       delegate_->GetHostPointer(0, dst_shard_idx) + dst_offset_bytes;
   RETURN_IF_ERROR(ReadExact(fd, dest_ptr, size_bytes));
 
+  ok_to_pool = true;
   return absl::OkStatus();
 }
 

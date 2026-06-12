@@ -18,7 +18,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <mutex>  // NOLINT
 #include <string>
 #include <thread>  // NOLINT
 #include <tuple>
@@ -27,6 +26,7 @@
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -69,7 +69,7 @@ class MockDelegate : public BlockTransportDelegate {
 
   absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
                                 int block_id) override {
-    std::lock_guard<std::mutex> lock(wait_events_mu_);
+    absl::MutexLock lock(wait_events_mu_);
     wait_events_.push_back(std::make_tuple(layer_idx, shard_idx, block_id));
     return absl::OkStatus();
   }
@@ -115,7 +115,7 @@ class MockDelegate : public BlockTransportDelegate {
     return data(layer_idx, shard_idx) + block_id * slice_size_;
   }
   std::vector<std::tuple<size_t, size_t, int>> wait_events() {
-    std::lock_guard<std::mutex> lock(wait_events_mu_);
+    absl::MutexLock lock(wait_events_mu_);
     return wait_events_;
   }
 
@@ -133,7 +133,7 @@ class MockDelegate : public BlockTransportDelegate {
   bool on_single_block_received_called_ = false;
   int received_block_id_ = -1;
   size_t received_size_bytes_ = 0;
-  std::mutex wait_events_mu_;
+  absl::Mutex wait_events_mu_;
   std::vector<std::tuple<size_t, size_t, int>> wait_events_;
 };
 
@@ -148,6 +148,44 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
 
   BlockTransport transport1(&delegate1, 0);
   BlockTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+
+  // Push block 0 from transport1 to transport2
+  auto push_res = transport1.Push(peer2, {0});
+  ASSERT_TRUE(push_res.ok()) << push_res.status().message();
+
+  // Verify push parity
+  EXPECT_EQ(delegate2.data()[0], 0xAB);
+  EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
+
+  // Reset dest to 0
+  std::memset(delegate2.data(), 0x00, size);
+
+  // Pull block 0 from transport1 using transport2
+  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+  auto pull_res = transport2.Pull(peer1, {0});
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+
+  // Verify pull parity
+  EXPECT_EQ(delegate2.data()[0], 0xAB);
+  EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
+}
+
+TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
+  size_t size = 1024;
+  MockDelegate delegate1(size);
+  MockDelegate delegate2(size);
+
+  // Populate source with custom pattern
+  std::memset(delegate1.data(), 0xAB, size);
+  std::memset(delegate2.data(), 0x00, size);
+
+  // Disable connection pooling
+  BlockTransport transport1(&delegate1, 0, /*enable_conn_pool=*/false);
+  BlockTransport transport2(&delegate2, 0, /*enable_conn_pool=*/false);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
