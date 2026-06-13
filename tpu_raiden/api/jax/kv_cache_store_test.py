@@ -12,192 +12,118 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import socket
-import subprocess
-import time
 
 from absl.testing import absltest
-from absl.testing import parameterized
-import jax
-import jax.numpy as jnp
-import numpy as np
 
 from tpu_raiden.api.jax import kv_cache_store
 
-os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
+class KVCacheStoreTest(absltest.TestCase):
 
-def pick_unused_port():
-  s = socket.socket()
-  s.bind(("localhost", 0))
-  port = s.getsockname()[1]
-  s.close()
-  return port
+  def test_basic_tests(self):
+    controller = kv_cache_store.KVCacheStore(capacity=20)
+    self.assertEqual(controller.capacity(), 20)
 
+    hashes = [6001, 6002]
+    slices = [
+        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
+        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+    ]
 
-class KVCacheStoreTest(parameterized.TestCase):
+    # 1. Insert
+    self.assertTrue(controller.insert(hashes, slices, True))
+    self.assertFalse(controller.insert(hashes, slices, True))  # Already exists
 
-  def setUp(self):
-    super().setUp()
-    try:
-      self.devices = jax.devices("tpu")
-    except RuntimeError:
-      try:
-        self.devices = jax.devices("cpu")
-      except RuntimeError as exc:
-        raise AssertionError("No devices found") from exc
+    # 2. Lookup with a partial miss at the end
+    hashes_with_miss = [6001, 6002, 6003]
+    lookup_res = controller.lookup(hashes_with_miss)
+    self.assertLen(lookup_res, 2)
+    self.assertEqual(lookup_res[0][0], 6001)
+    self.assertLen(lookup_res[0][1], 1)
+    self.assertEqual(lookup_res[0][1][0].job_name, "inference_server")
+    self.assertEqual(lookup_res[0][1][0].job_replica_id, "0")
 
-    if not self.devices:
-      raise AssertionError("No devices found")
+    # Lookup with an early miss
+    hashes_early_miss = [6001, 6003, 6002]
+    lookup_res_early = controller.lookup(hashes_early_miss)
+    self.assertLen(lookup_res_early, 1)
+    self.assertEqual(lookup_res_early[0][0], 6001)
 
-    self.num_devices = len(self.devices)
+    # 3. Delete
+    controller.delete(hashes, slices)
+    self.assertTrue(controller.insert(hashes, slices, True))  # Succesful again
 
-  def tearDown(self):
-    if hasattr(self, "registry_process"):
-      self.registry_process.terminate()
-      self.registry_process.wait()
-    super().tearDown()
+  def test_pin_and_release(self):
+    controller = kv_cache_store.KVCacheStore(capacity=2)
 
-  def create_mesh(self, devices, axis_shapes, axis_names):
-    devices_arr = np.array(devices)
-    num_required_devices = np.prod(axis_shapes)
-    if len(devices_arr) < num_required_devices:
-      raise AssertionError(
-          f"Need {num_required_devices} devices, got {len(devices_arr)}"
-      )
-    device_array = devices_arr[:num_required_devices].reshape(axis_shapes)
-    return jax.sharding.Mesh(device_array, axis_names)
+    hashes = [7001, 7002]
+    slices = [
+        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
+        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+    ]
 
-  def setup_shardings(self, devices):
-    axis_shapes = (1, self.num_devices)
-    axis_names = ("data", "model")
-    mesh = self.create_mesh(devices, axis_shapes, axis_names)
-    spec = jax.sharding.PartitionSpec(None, None, "model")
-    sharding = jax.sharding.NamedSharding(mesh, spec)
-    return sharding
+    self.assertTrue(controller.insert(hashes, slices, True))
 
-  @parameterized.named_parameters(
-      ("fp32", jnp.float32),
-  )
-  def test_e2e_local_store(self, dtype):
-    tpu_sharding = self.setup_shardings(self.devices)
-    key = jax.random.key(101)
+    # Pin both
+    self.assertTrue(controller.pin(hashes))
 
-    n_layers = 4
-    test_shape = (4, 128, 8, 8, 128)
-    tpu_arrs = []
-    for i in range(n_layers):
-      sub_key = jax.random.fold_in(key, i)
-      base = jax.random.uniform(sub_key, test_shape, dtype=dtype)
-      tpu_arrs.append(jax.device_put(base, tpu_sharding))
+    # Inserting a third element should fail to evict because both items are
+    # pinned.
+    hash_3 = [7003]
+    slice_3 = [
+        [kv_cache_store.RaidenId("inference_server", "2", "kv_cache", 0)]
+    ]
+    controller.insert(hash_3, slice_3, True)
 
-    jax.block_until_ready(tpu_arrs)
+    # Release 7001
+    controller.release([7001])
 
+    # Now inserting a fourth element (7004) should successfully evict 7001
+    hash_4 = [7004]
+    slice_4 = [
+        [kv_cache_store.RaidenId("inference_server", "3", "kv_cache", 0)]
+    ]
+    controller.insert(hash_4, slice_4, True)
 
-    store = kv_cache_store.KVCacheStore(1, 4)
+    self.assertEmpty(controller.lookup([7001, 7002]))
+    self.assertLen(controller.lookup([7002]), 1)
 
-    # Store chunk 0 into hash 1 (local LRU insert)
-    store.insert([1], tpu_arrs, [0], [1])
+  def test_partial_pin_rollback(self):
+    controller = kv_cache_store.KVCacheStore(capacity=2)
 
-    # Store chunk 2 into hash 2 (local LRU insert)
-    store.insert([2], tpu_arrs, [2], [1])
+    hashes = [8001, 8002]
+    slices = [
+        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
+        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+    ]
+    self.assertTrue(controller.insert(hashes, slices, True))
 
-    # Lookup hash 2 into TPU slice 3 (local LRU hit)
-    hits, future = store.lookup_and_fetch([2], tpu_arrs, [3], [1])
-    self.assertTrue(hits[0])
-    if future is not None:
-      future.Await()
+    # Attempt to pin a sequence with a missing hash (8003).
+    self.assertFalse(controller.pin([8001, 8002, 8003]))
 
-    for i in range(n_layers):
-      tpu_np = np.asarray(tpu_arrs[i])
-      np.testing.assert_array_equal(tpu_np[3:4], tpu_np[2:3])
-
-  @parameterized.named_parameters(
-      ("fp32", jnp.float32),
-  )
-  def test_global_lookup_fallback(self, dtype):
-    # 1. Spin up global registry server
-    server_path = os.path.join(
-        os.environ["TEST_SRCDIR"],
-        "google3/third_party/tpu_raiden/kv_cache/global_registry/global_registry_server",
-    )
-    registry_port = pick_unused_port()
-    self.registry_process = subprocess.Popen(
-        [server_path, f"--port={registry_port}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    # Simple sleep to wait for server initialization
-    time.sleep(1.0)
-
-    tpu_sharding = self.setup_shardings(self.devices)
-    key = jax.random.key(101)
-
-    n_layers = 4
-    test_shape = (4, 128, 8, 8, 128)
-
-    # Allocate separate remote and local JAX arrays
-    remote_tpu_arrs = []
-    local_tpu_arrs = []
-    for i in range(n_layers):
-      sub_key1 = jax.random.fold_in(key, i)
-      sub_key2 = jax.random.fold_in(key, i + 10)
-      remote_tpu_arrs.append(
-          jax.device_put(
-              jax.random.uniform(sub_key1, test_shape, dtype=dtype),
-              tpu_sharding,
-          )
-      )
-      local_tpu_arrs.append(
-          jax.device_put(
-              jax.random.uniform(sub_key2, test_shape, dtype=dtype),
-              tpu_sharding,
-          )
-      )
-
-    jax.block_until_ready(remote_tpu_arrs)
-    jax.block_until_ready(local_tpu_arrs)
-
-    # 2. Setup the "Remote Node" (listening on dynamic port)
-
-    remote_store = kv_cache_store.KVCacheStore(
-        block_size=1,
-        capacity=4,
-        global_registry_address=f"localhost:{registry_port}",
-        local_address="[::1]:0",
+    # Now inserting two new items (8004, 8005) should successfully evict 8001
+    # and 8002 because their pins were completely rolled back!
+    self.assertTrue(
+        controller.insert(
+            [8004, 8005],
+            [
+                [
+                    kv_cache_store.RaidenId(
+                        "inference_server", "2", "kv_cache", 0
+                    )
+                ],
+                [
+                    kv_cache_store.RaidenId(
+                        "inference_server", "3", "kv_cache", 0
+                    )
+                ],
+            ],
+            True,
+        )
     )
 
-    # 3. Setup the "Local Node" (listening on separate dynamic port)
-
-    local_store = kv_cache_store.KVCacheStore(
-        block_size=1,
-        capacity=4,
-        global_registry_address=f"localhost:{registry_port}",
-        local_address="[::1]:0",
-    )
-
-    # Insert chunk 2 into remote_store under hash 100
-    # This automatically registers hash 100 globally
-    remote_store.insert([100], remote_tpu_arrs, [2], [1])
-
-    # Wait for remote insert async copies to be ready
-    time.sleep(0.5)
-
-    # Lookup hash 100 on local_store (will local miss, global hit on remote
-    # node, and pull via H2H socket)
-    hits, future = local_store.lookup_and_fetch([100], local_tpu_arrs, [0], [1])
-    self.assertTrue(hits[0])
-
-    if future is not None:
-      future.Await()
-
-    # Assert that local array at slice 0 is identical to the remote array
-    # source slice 2
-    for i in range(n_layers):
-      remote_np = np.asarray(remote_tpu_arrs[i])
-      local_np = np.asarray(local_tpu_arrs[i])
-      np.testing.assert_array_equal(local_np[0:1], remote_np[2:3])
+    self.assertEmpty(controller.lookup([8001, 8002]))
+    self.assertLen(controller.lookup([8004, 8005]), 2)
 
 
 if __name__ == "__main__":

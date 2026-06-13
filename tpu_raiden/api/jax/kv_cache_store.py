@@ -18,47 +18,105 @@ from typing import Any
 from tpu_raiden.frameworks.jax import kv_cache_store as _impl
 
 
-class KVCacheStore:
-  """Wrapper around compiled C++ KVCacheStore."""
+class RaidenId:
+  """Wrapper around compiled C++ RaidenId."""
 
   def __init__(
       self,
-      block_size: int,
-      capacity: int,
-      global_registry_address: str = "",
-      local_address: str = "",
+      job_name: str = "",
+      job_replica_id: str = "",
+      data_name: str = "",
+      data_replica_idx: int = 0,
+      impl: Any = None,
   ):
-    self._impl = _impl.KVCacheStore(
-        block_size=block_size,
-        capacity=capacity,
-        global_registry_address=global_registry_address,
-        local_address=local_address,
+    if impl is not None:
+      self._impl = impl
+    else:
+      self._impl = _impl.RaidenId(
+          job_name, job_replica_id, data_name, data_replica_idx
+      )
+
+  @property
+  def job_name(self) -> str:
+    return self._impl.job_name
+
+  @property
+  def job_replica_id(self) -> str:
+    return self._impl.job_replica_id
+
+  @property
+  def data_name(self) -> str:
+    return self._impl.data_name
+
+  @property
+  def data_replica_idx(self) -> int:
+    return self._impl.data_replica_idx
+
+  def __repr__(self) -> str:
+    return (
+        f"RaidenId(job='{self.job_name}', replica='{self.job_replica_id}',"
+        f" data='{self.data_name}', data_idx={self.data_replica_idx})"
     )
 
-  def lookup_and_fetch(
+
+class KVCacheStore:
+  """Wrapper around compiled C++ KVCacheStore."""
+
+  def __init__(self, capacity: int):
+    self._impl = _impl.KVCacheStore(capacity=capacity)
+
+  def lookup(
       self,
       block_hashes: list[int],
-      device_arrays: Any,
-      dst_offsets_major_dim: list[int],
-      copy_sizes_major_dim: list[int],
-  ) -> tuple[list[bool], Any]:
-    return self._impl.lookup_and_fetch(
-        block_hashes,
-        device_arrays,
-        dst_offsets_major_dim,
-        copy_sizes_major_dim,
-    )
+  ) -> list[tuple[int, list[RaidenId]]]:
+    """Checks the LRU directory for cached block hashes.
+
+    Args:
+      block_hashes: Incoming block hashes to check.
+
+    Returns:
+      A list of tuples containing the block hash and a list of matching RaidenId
+      replicas, halting immediately upon the first cache miss.
+    """
+    raw_res = self._impl.lookup(block_hashes)
+    final_res = []
+    for hash_val, raw_slices in raw_res:
+      wrapped_slices = [RaidenId(impl=rs) for rs in raw_slices]
+      final_res.append((hash_val, wrapped_slices))
+    return final_res
 
   def insert(
       self,
       block_hashes: list[int],
-      device_arrays: Any,
-      src_offsets_major_dim: list[int],
-      copy_sizes_major_dim: list[int],
+      slices: list[list[RaidenId]],
+      on_host: bool,
+  ) -> bool:
+    raw_slices = []
+    for slice_list in slices:
+      raw_slices.append(
+          [s._impl for s in slice_list]  # pylint: disable=protected-access
+      )
+    return self._impl.insert(block_hashes, raw_slices, on_host)
+
+  def delete(
+      self,
+      block_hashes: list[int],
+      slices: list[list[RaidenId]],
   ) -> None:
-    self._impl.insert(
-        block_hashes,
-        device_arrays,
-        src_offsets_major_dim,
-        copy_sizes_major_dim,
-    )
+    raw_slices = []
+    for slice_list in slices:
+      raw_slices.append(
+          [s._impl for s in slice_list]  # pylint: disable=protected-access
+      )
+    self._impl.delete(block_hashes, raw_slices)
+
+  def capacity(self) -> int:
+    return self._impl.capacity()
+
+  def pin(self, block_hashes: list[int]) -> bool:
+    """Pins cached block hashes in memory, protecting them against LRU eviction while in active use."""
+    return self._impl.pin(block_hashes)
+
+  def release(self, block_hashes: list[int]) -> None:
+    """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
+    self._impl.release(block_hashes)

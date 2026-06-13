@@ -49,8 +49,6 @@ struct RaidenId {
   }
 };
 
-using RaidenSlice = RaidenId;
-
 // KV Store that manages the indices and routing of prefix cache across serving
 // nodes and microservice slices.
 class KVCacheStore {
