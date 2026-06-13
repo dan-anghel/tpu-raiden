@@ -114,7 +114,7 @@ void RaidenManagerBase::SetExternalHostPointers(
 
 void RaidenManagerBase::SetBlockReadinessCallback(
     BlockReadinessCallback callback) {
-  absl::MutexLock l(&block_readiness_mu_);
+  absl::MutexLock l(block_readiness_mu_);
   block_readiness_callback_ = std::move(callback);
 }
 
@@ -123,7 +123,7 @@ absl::Status RaidenManagerBase::WaitForBlockRead(size_t layer_idx,
                                                  int block_id) {
   BlockReadinessCallback callback;
   {
-    absl::MutexLock l(&block_readiness_mu_);
+    absl::MutexLock l(block_readiness_mu_);
     callback = block_readiness_callback_;
   }
   if (!callback) {
