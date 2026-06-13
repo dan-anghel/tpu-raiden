@@ -115,11 +115,31 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":tpu_utils",
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "tpu_utils",
+    srcs = [
+        "tpu_utils.cc",
+    ],
+    hdrs = [
+        "tpu_utils.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -283,6 +303,31 @@ cc_test(
 )
 
 cc_test(
+    name = "tpu_utils_test",
+    srcs = ["tpu_utils_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    tags = [
+        "no_oss",
+        "requires-ghostfish:4",
+    ],
+    deps = [
+        ":tpu_pjrt_manager",
+        ":tpu_utils",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
     name = "raiden_manager_base_test",
     srcs = ["raiden_manager_base_test.cc"],
     copts = [
@@ -389,6 +434,7 @@ cc_test(
         ":host_memory_allocator",
         ":raw_transfer_impl",
         ":tpu_pjrt_manager",
+        ":tpu_utils",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",

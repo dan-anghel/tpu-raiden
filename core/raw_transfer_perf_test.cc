@@ -43,6 +43,8 @@
 //     //core:raw_transfer_perf_test
 
 #include <dlfcn.h>
+#include <malloc.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +67,7 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_impl.h"
 #include "core/tpu_pjrt_manager.h"
+#include "core/tpu_utils.h"
 
 ABSL_FLAG(int, num_tpus, 1, "Number of TPUs to use");
 ABSL_FLAG(int, num_layers, 64, "Number of layers to use for the benchmark.");
@@ -105,6 +108,24 @@ bool InitializeLibtpuOnce() {
 }
 
 static bool libtpu_dummy = InitializeLibtpuOnce();
+
+// Helper to get NUMA node of a pointer using get_mempolicy syscall
+int GetPointerNumaNode(const void* ptr) {
+  int mode = -1;
+  constexpr int kMpolFNode = 1 << 0;
+  constexpr int kMpolFAddr = 1 << 1;
+#ifdef __NR_get_mempolicy
+  int64_t res = static_cast<int64_t>(syscall(__NR_get_mempolicy, &mode, nullptr,
+                                             0, const_cast<void*>(ptr),
+                                             kMpolFNode | kMpolFAddr));
+  if (res < 0) {
+    return -1;
+  }
+  return mode;
+#else
+  return -2;  // Syscall not available
+#endif
+}
 
 }  // namespace
 }  // namespace raiden
@@ -161,7 +182,8 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
                            const std::string& type_label, int num_layers,
                            int64_t num_blocks, double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
-                           bool should_gate_performance) {
+                           bool should_gate_performance,
+                           bool use_device_aware_allocator = true) {
   const int kNumLayers = num_layers;
   const int64_t kNumBlocks = num_blocks;
   constexpr int64_t kBlockSize = 128;
@@ -212,12 +234,16 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
   host_sizes.reserve(kNumLayers);
 
   for (int i = 0; i < kNumLayers; ++i) {
-    auto src_alloc_or = host_allocator->AllocateDmaMapped(bytes_per_layer);
+    xla::PjRtDevice* device =
+        use_device_aware_allocator ? devices[i % devices.size()] : nullptr;
+    auto src_alloc_or =
+        host_allocator->AllocateDmaMappedForDevice(bytes_per_layer, device);
     ASSERT_OK(src_alloc_or.status());
     host_src_buffers.push_back(std::move(src_alloc_or).value());
     std::memset(host_src_buffers.back().ptr, 0, bytes_per_layer);
 
-    auto dst_alloc_or = host_allocator->AllocateDmaMapped(bytes_per_layer);
+    auto dst_alloc_or =
+        host_allocator->AllocateDmaMappedForDevice(bytes_per_layer, device);
     ASSERT_OK(dst_alloc_or.status());
     host_dst_buffers.push_back(std::move(dst_alloc_or).value());
     std::memset(host_dst_buffers.back().ptr, 0, bytes_per_layer);
@@ -362,7 +388,8 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
                            const std::string& type_label, int num_layers,
                            int64_t num_blocks, double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
-                           bool should_gate_performance) {
+                           bool should_gate_performance,
+                           bool use_device_aware_allocator = true) {
   int num_devices = devices.size();
   const int kNumLayers = std::max(1, num_layers / num_devices);
   const int64_t kNumBlocks = num_blocks;
@@ -404,10 +431,17 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
   auto host_allocator = std::move(allocator_or).value();
 
   // Optimize: Allocate only ONE host src buffer and reuse it for all devices
-  auto src_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
+  xla::PjRtDevice* src_device =
+      use_device_aware_allocator ? devices[0] : nullptr;
+  auto src_alloc_or =
+      host_allocator->AllocateDmaMappedForDevice(total_bytes, src_device);
   ASSERT_OK(src_alloc_or.status());
   auto host_src = std::move(src_alloc_or).value();
   std::memset(host_src.ptr, 0, total_bytes);
+
+  std::cout << "[INFO] host_src ptr: " << static_cast<void*>(host_src.ptr)
+            << ", actual NUMA node: " << GetPointerNumaNode(host_src.ptr)
+            << std::endl;
 
   // Initialize source host memory with dummy values
   T* src_ptr = reinterpret_cast<T*>(host_src.ptr);
@@ -430,10 +464,20 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
   host_sizes.reserve(num_devices);
 
   for (int i = 0; i < num_devices; ++i) {
-    auto dst_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
+    xla::PjRtDevice* dst_device =
+        use_device_aware_allocator ? devices[i] : nullptr;
+    auto dst_alloc_or =
+        host_allocator->AllocateDmaMappedForDevice(total_bytes, dst_device);
     ASSERT_OK(dst_alloc_or.status());
     host_dst_buffers.push_back(std::move(dst_alloc_or).value());
     std::memset(host_dst_buffers.back().ptr, 0, total_bytes);
+
+    if (i < 2) {
+      std::cout << "[INFO] host_dst[" << i
+                << "] ptr: " << static_cast<void*>(host_dst_buffers.back().ptr)
+                << ", actual NUMA node: "
+                << GetPointerNumaNode(host_dst_buffers.back().ptr) << std::endl;
+    }
 
     host_src_ptrs.push_back(host_src.ptr);  // Reuse the same src pointer
     host_dst_ptrs.push_back(host_dst_buffers.back().ptr);
@@ -563,6 +607,7 @@ class RawTransferPerfTest : public ::testing::Test {
     auto all_devices = manager_->client()->addressable_devices();
     int available_tpus = all_devices.size();
     std::cout << "[INFO] Available TPUs: " << available_tpus << std::endl;
+    tpu_raiden::PrintTpuHardwareTopology();
 
     if (num_tpus > available_tpus) {
       std::cout << "[WARNING] Requested " << num_tpus << " TPUs, but only "
@@ -608,6 +653,117 @@ class RawTransferPerfTest : public ::testing::Test {
   double min_h2d_bandwidth_gb_s_ = 12.0;
   bool should_gate_performance_ = false;
 };
+
+TEST_F(RawTransferPerfTest, NumaBindingExperiment) {
+  int num_tpus = absl::GetFlag(FLAGS_num_tpus);
+  std::vector<xla::PjRtDevice*> devices;
+  auto all_devices = manager_->client()->addressable_devices();
+  for (int i = 0; i < num_tpus && i < all_devices.size(); ++i) {
+    devices.push_back(all_devices[i]);
+  }
+
+  std::cout << "[EXPERIMENT] Running NUMA Binding Experiment on "
+            << devices.size() << " TPUs" << std::endl;
+
+  // Flush glibc cache before start
+  malloc_trim(0);
+
+  std::cout << "[EXPERIMENT] --- Running with Host Buffer allocated on NUMA "
+               "Node 0 ---"
+            << std::endl;
+  int64_t res_0 = tpu_raiden::SetThreadMempolicy(2, 0);  // MPOL_BIND, Node 0
+  if (res_0 < 0) {
+    std::cerr << "[ERROR] Failed to set thread mempolicy to Node 0: " << res_0
+              << std::endl;
+  }
+  RunBenchmarkScenarioB<uint16_t>(manager_, devices, xla::BF16, "BF16_NUMA_0",
+                                  64, 16, 0.0, 0.0, false,
+                                  /*use_device_aware_allocator=*/false);
+
+  // Restore default policy to allow malloc_trim to work normally if needed
+  tpu_raiden::SetThreadMempolicy(0);
+  // Flush glibc cache to force release of Node 0 buffers
+  malloc_trim(0);
+
+  // Run with Node 1 binding
+  std::cout << "[EXPERIMENT] --- Running with Host Buffer allocated on NUMA "
+               "Node 1 ---"
+            << std::endl;
+  int64_t res_1 = tpu_raiden::SetThreadMempolicy(2, 1);  // MPOL_BIND, Node 1
+  if (res_1 < 0) {
+    std::cerr << "[ERROR] Failed to set thread mempolicy to Node 1: " << res_1
+              << std::endl;
+  }
+  RunBenchmarkScenarioB<uint16_t>(manager_, devices, xla::BF16, "BF16_NUMA_1",
+                                  64, 16, 0.0, 0.0, false,
+                                  /*use_device_aware_allocator=*/false);
+
+  // Restore default policy
+  tpu_raiden::SetThreadMempolicy(0);  // MPOL_DEFAULT
+  malloc_trim(0);
+}
+
+TEST_F(RawTransferPerfTest, DeviceAwareAllocationTest) {
+  auto all_devices = manager_->client()->addressable_devices();
+  if (all_devices.empty()) {
+    GTEST_SKIP() << "No devices available for testing";
+  }
+
+  auto allocator_or =
+      tpu_raiden::HostMemoryAllocator::Create(manager_->client());
+  ASSERT_OK(allocator_or.status());
+  auto host_allocator = std::move(allocator_or).value();
+
+  std::cout << "[TEST] Running Device-Aware Allocation Verification (keeping "
+               "allocations alive)..."
+            << std::endl;
+
+  std::vector<tpu_raiden::HostBufferAllocation> kept_allocations;
+  kept_allocations.reserve(all_devices.size());
+
+  int verified_allocations = 0;
+  for (auto* device : all_devices) {
+    int target_node = tpu_raiden::GetPjRtDeviceNumaNode(device);
+    if (target_node < 0) {
+      std::cout << "[WARNING] Could not determine target NUMA node for device "
+                << device->DebugString() << ", skipping verification."
+                << std::endl;
+      continue;
+    }
+
+    std::cout << "[TEST] Device " << device->DebugString()
+              << " (local_hardware_id: " << device->local_hardware_id().value()
+              << ") is mapped to target NUMA Node " << target_node << std::endl;
+
+    // Allocate a small buffer (e.g., 1MB)
+    constexpr size_t kAllocSize = 1024 * 1024;
+    auto alloc_or =
+        host_allocator->AllocateDmaMappedForDevice(kAllocSize, device);
+    ASSERT_OK(alloc_or.status());
+
+    // Keep the allocation alive to prevent any allocator reuse
+    kept_allocations.push_back(std::move(alloc_or).value());
+    void* ptr = kept_allocations.back().ptr;
+
+    int actual_node = GetPointerNumaNode(ptr);
+    std::cout << "[TEST] Allocated ptr: " << ptr
+              << ", actual NUMA node: " << actual_node << std::endl;
+
+    EXPECT_EQ(actual_node, target_node)
+        << "Allocation for device " << device->DebugString()
+        << " was not on the correct NUMA node!";
+    verified_allocations++;
+  }
+
+  if (verified_allocations == 0) {
+    std::cout << "[WARNING] No allocations could be verified (possibly due to "
+                 "missing NUMA info in sandbox)."
+              << std::endl;
+  } else {
+    std::cout << "[TEST] Successfully verified " << verified_allocations
+              << " device-aware NUMA-aligned allocations!" << std::endl;
+  }
+}
 
 struct BenchmarkParams {
   xla::PrimitiveType primitive_type;

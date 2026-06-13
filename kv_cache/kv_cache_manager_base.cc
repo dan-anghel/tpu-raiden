@@ -148,7 +148,8 @@ KVCacheManagerBase::KVCacheManagerBase(
         shard_info.host_size = alloc_size;
         shard_idx++;
       } else if (host_allocator) {
-        auto status_or_allocation = host_allocator(alloc_size);
+        auto status_or_allocation =
+            host_allocator(alloc_size, dst_buffer->device());
         if (!status_or_allocation.ok()) {
           throw std::runtime_error(absl::StrCat(
               "Host allocator failed for size: ", alloc_size,
@@ -219,7 +220,7 @@ KVCacheManagerBase::KVCacheManagerBase(
       int num_host_blocks = host_blocks_to_allocate.value_or(0);
       size_t alloc_size = num_host_blocks * bytes_per_block();
       if (host_allocator) {
-        auto status_or_allocation = host_allocator(alloc_size);
+        auto status_or_allocation = host_allocator(alloc_size, nullptr);
         if (!status_or_allocation.ok()) {
           throw std::runtime_error(absl::StrCat(
               "Host allocator failed for size: ", alloc_size,

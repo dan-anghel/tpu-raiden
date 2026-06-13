@@ -47,15 +47,14 @@ inline HostBufferAllocator CreateHostMemoryAllocator(xla::PjRtClient* client) {
   auto allocator_or = HostMemoryAllocator::Create(client);
   if (!allocator_or.ok()) {
     absl::Status status = allocator_or.status();
-    return [status](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
-      return status;
-    };
+    return [status](size_t size_bytes, const xla::PjRtDevice* device)
+               -> absl::StatusOr<HostBufferAllocation> { return status; };
   }
   std::shared_ptr<HostMemoryAllocator> allocator =
       std::move(allocator_or).value();
-  return [allocator](
-             size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
-    return allocator->AllocateDmaMapped(size_bytes);
+  return [allocator](size_t size_bytes, const xla::PjRtDevice* device)
+             -> absl::StatusOr<HostBufferAllocation> {
+    return allocator->AllocateDmaMappedForDevice(size_bytes, device);
   };
 }
 
