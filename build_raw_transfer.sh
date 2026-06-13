@@ -125,9 +125,9 @@ TORCH_REPO_ENV_FLAGS=()
 if [ "$BUILD_JAX" = true ]; then
   echo "Configuring build for JAX..."
   BAZEL_TARGETS+=(
-    "//frameworks/jax:_kv_cache_manager"
-    "//frameworks/jax:_kv_cache_manager_ffi"
-    "//frameworks/jax:_weight_synchronizer"
+    "//tpu_raiden/frameworks/jax:_kv_cache_manager"
+    "//tpu_raiden/frameworks/jax:_kv_cache_manager_ffi"
+    "//tpu_raiden/frameworks/jax:_weight_synchronizer"
   )
 else
   DEFINE_FLAGS+=" --define with_jax=false"
@@ -159,8 +159,8 @@ PY
   DEFINE_FLAGS+=" --define=TORCH_SOURCE=local"
   TORCH_REPO_ENV_FLAGS+=("--repo_env=TORCH_SOURCE=${TORCH_SOURCE}")
   BAZEL_TARGETS+=(
-    "//frameworks/torch:_kv_cache_manager"
-    "//frameworks/torch:_weight_synchronizer"
+    "//tpu_raiden/frameworks/torch:_kv_cache_manager"
+    "//tpu_raiden/frameworks/torch:_weight_synchronizer"
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
@@ -198,24 +198,24 @@ echo "=== Building targets with Bazel ==="
 echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then
   echo "Copying JAX artifacts..."
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/frameworks/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
 fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Copying Torch artifacts..."
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/torch/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/"
 fi
 
 
 echo "=== Build Complete! ==="
 if [ "$BUILD_JAX" = true ]; then
-  echo "JAX Artifacts are located in: ${WORKSPACE_DIR}/frameworks/jax/"
+  echo "JAX Artifacts are located in: ${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
 fi
 if [ "$BUILD_TORCH" = true ]; then
-  echo "Torch Artifacts are located in: ${WORKSPACE_DIR}/frameworks/torch/"
+  echo "Torch Artifacts are located in: ${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/"
 fi
 
 echo "=== Install Python Dependencies! ==="
