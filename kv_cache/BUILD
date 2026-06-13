@@ -130,3 +130,23 @@ cc_test(
         "@xla//xla/tsl/platform:test_main",
     ],
 )
+
+cc_library(
+    name = "lru_cache",
+    hdrs = ["lru_cache.h"],
+    deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_test(
+    name = "lru_cache_test",
+    srcs = ["lru_cache_test.cc"],
+    deps = [
+        ":lru_cache",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
