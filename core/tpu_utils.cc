@@ -25,13 +25,13 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/tsl/platform/logging.h"
 
 namespace tpu_raiden {
 
@@ -49,9 +49,9 @@ int64_t SetThreadMempolicy(int mode, int node) {
         syscall(__NR_set_mempolicy, kMpolBind, &mask, sizeof(mask) * 8));
   }
   if (res < 0) {
-    std::cerr << "[ERROR] SetThreadMempolicy(mode=" << mode << ", node=" << node
-              << ") failed: " << std::strerror(errno) << " (errno=" << errno
-              << ")" << std::endl;
+    LOG(ERROR) << "SetThreadMempolicy(mode=" << mode << ", node=" << node
+               << ") failed: " << std::strerror(errno) << " (errno=" << errno
+               << ")";
   }
   return res;
 #else
@@ -65,7 +65,7 @@ std::vector<int> GetNumaNodeCpuCores(int numa_node) {
       "/sys/devices/system/node/node" + std::to_string(numa_node) + "/cpulist";
   std::ifstream file(path);
   if (!file.is_open()) {
-    std::cerr << "[ERROR] Failed to open " << path << std::endl;
+    LOG(ERROR) << "Failed to open " << path;
     return cores;
   }
   std::string line;
@@ -100,8 +100,7 @@ int PinCurrentThreadToCores(const std::vector<int>& cores) {
   cpu_set_t allowed_set;
   CPU_ZERO(&allowed_set);
   if (sched_getaffinity(0, sizeof(cpu_set_t), &allowed_set) != 0) {
-    std::cerr << "[ERROR] sched_getaffinity failed: " << std::strerror(errno)
-              << std::endl;
+    LOG(ERROR) << "sched_getaffinity failed: " << std::strerror(errno);
     // Fallback: assume all cores are allowed if we can't query
     for (int i = 0; i < CPU_SETSIZE; ++i) {
       CPU_SET(i, &allowed_set);
@@ -118,21 +117,34 @@ int PinCurrentThreadToCores(const std::vector<int>& cores) {
     }
   }
   if (!has_cores) {
-    std::cerr
-        << "[WARNING] No allowed cores found for pinning on this NUMA node"
-        << std::endl;
+    LOG(WARNING) << "No allowed cores found for pinning on this NUMA node";
     return -1;
   }
   int res = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
   if (res != 0) {
-    std::cerr << "[ERROR] pthread_setaffinity_np failed: " << std::strerror(res)
-              << " (rc=" << res << ")" << std::endl;
+    LOG(ERROR) << "pthread_setaffinity_np failed: " << std::strerror(res)
+               << " (rc=" << res << ")";
     return -res;
   }
   return 0;
 #else
   return -1;
 #endif
+}
+
+int PinCurrentThreadToNumaNode(int node) {
+  if (node < 0) return -1;
+  std::vector<int> cores = GetNumaNodeCpuCores(node);
+  if (cores.empty()) {
+    LOG(WARNING) << "No CPU cores found for NUMA node " << node;
+    return -2;
+  }
+  int rc = PinCurrentThreadToCores(cores);
+  if (rc != 0) return rc;
+  constexpr int kMpolBind = 2;
+  int64_t mem_rc = SetThreadMempolicy(kMpolBind, node);
+  if (mem_rc < 0) return static_cast<int>(mem_rc);
+  return 0;
 }
 
 const std::vector<TpuPciDevice>& GetTpuPciDevices() {
@@ -279,14 +291,14 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device) {
 }
 
 void PrintTpuHardwareTopology() {
-  std::cout << "[INFO] Querying TPU NUMA topology via PCI sysfs:" << std::endl;
+  LOG(INFO) << "Querying TPU NUMA topology via PCI sysfs:";
   const auto& devices = GetTpuPciDevices();
   for (const auto& dev : devices) {
-    std::cout << "  TPU Device " << dev.bdf << " (Device ID: " << dev.device_id
-              << ") is attached to NUMA Node " << dev.numa_node << std::endl;
+    LOG(INFO) << "  TPU Device " << dev.bdf << " (Device ID: " << dev.device_id
+              << ") is attached to NUMA Node " << dev.numa_node;
   }
   if (devices.empty()) {
-    std::cout << "  No Google TPU PCI devices found in sysfs." << std::endl;
+    LOG(INFO) << "  No Google TPU PCI devices found in sysfs.";
   }
 }
 

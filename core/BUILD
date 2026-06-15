@@ -141,6 +141,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:logging",
     ],
 )
 
@@ -160,12 +161,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":tpu_utils",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/synchronization",
+        "@xla//xla/tsl/platform:logging",
     ],
 )
 
@@ -248,7 +244,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
+        ":numa_thread_pool",
         ":raw_transfer_core",
+        ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
         "//transport:block_transport",
         "@com_google_absl//absl/log",
@@ -352,6 +350,7 @@ cc_test(
         ":tpu_pjrt_manager",
         ":tpu_utils",
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:logging",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",

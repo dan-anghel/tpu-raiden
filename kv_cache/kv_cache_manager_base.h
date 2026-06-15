@@ -186,7 +186,28 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // Separate PJRT active holds matrix to protect subclass scoping E2E!
   std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
 
-  std::unique_ptr<NumaThreadPool> numa_pool_;
+  std::unique_ptr<NumaThreadPool> dma_pool_;
+  std::unique_ptr<NumaThreadPool> push_pool_;
+  std::unique_ptr<NumaThreadPool> pull_pool_;
+
+  struct CopyWork {
+    size_t layer_idx;
+    size_t shard_idx;
+  };
+
+  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+  DispatchH2dWork(const std::vector<CopyWork>& works,
+                  std::optional<int64_t> slot_idx, bool is_partial,
+                  const std::vector<int64_t>& src_offsets_major_dim,
+                  const std::vector<int64_t>& dst_offsets_major_dim,
+                  const std::vector<int64_t>& copy_sizes_major_dim);
+
+  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+  DispatchD2hWork(const std::vector<CopyWork>& works,
+                  std::optional<int64_t> slot_idx, bool is_partial,
+                  const std::vector<int64_t>& src_offsets,
+                  const std::vector<int64_t>& dst_offsets,
+                  const std::vector<int64_t>& copy_sizes);
 
   // Override parent AllocateBlocks using our dynamic block manager!
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,

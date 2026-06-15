@@ -298,12 +298,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   int control_fd_ = -1;
   std::atomic<bool> stopping_{false};
   std::thread control_thread_;
-  std::mutex control_workers_mu_;
-  std::vector<std::thread> control_workers_;
-  std::mutex worker_threads_mu_;
-  std::vector<std::thread> worker_threads_;
 
  private:
+  std::optional<int> GetLocalTpuNumaNode(xla::PjRtBuffer* buf) const;
+
   StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
                        const std::vector<int64_t>& local_block_ids);
 

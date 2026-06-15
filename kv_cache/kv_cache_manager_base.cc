@@ -14,6 +14,7 @@
 
 #include "kv_cache/kv_cache_manager_base.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -25,6 +26,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -218,13 +220,11 @@ KVCacheManagerBase::KVCacheManagerBase(
       }
     }
   }
-  auto pool_or = NumaThreadPool::Create(unique_numa_nodes);
-  if (pool_or.ok()) {
-    numa_pool_ = std::move(pool_or).value();
-  } else {
-    LOG(ERROR) << "Failed to create NumaThreadPool: "
-               << pool_or.status().message();
-  }
+  size_t pool_size = std::max<size_t>(
+      {1, static_cast<size_t>(parallelism), unique_numa_nodes.size()});
+  dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
+  push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
+  pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
 }
 
 KVCacheManagerBase::KVCacheManagerBase(
@@ -288,6 +288,10 @@ KVCacheManagerBase::KVCacheManagerBase(
     }
     layers_.push_back(std::move(layer_info));
   }
+  size_t pool_size = std::max<size_t>(1, parallelism);
+  dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
+  push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
+  pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
 }
 
 KVCacheManagerBase::~KVCacheManagerBase() {
@@ -303,6 +307,16 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
                         std::optional<int64_t> slot_idx,
                         std::optional<size_t> target_layer_idx,
                         std::optional<size_t> target_shard_idx) {
+  VLOG(1) << "KVCacheManagerBase::H2d called. Thread: "
+          << std::this_thread::get_id() << ", slot_idx: "
+          << (slot_idx.has_value() ? std::to_string(*slot_idx) : "none")
+          << ", target_layer: "
+          << (target_layer_idx.has_value() ? std::to_string(*target_layer_idx)
+                                           : "all")
+          << ", target_shard: "
+          << (target_shard_idx.has_value() ? std::to_string(*target_shard_idx)
+                                           : "all");
+
   if (buffer_holds_.empty()) {
     return absl::FailedPreconditionError(
         "H2d requires a device-backed KVCacheManagerBase");
@@ -320,86 +334,7 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
   std::vector<xla::Future<raiden::BufferHolder>> logical_futures(num_layers_ *
                                                                  num_shards_);
 
-  if (!numa_pool_) {
-    // Fallback to sequential execution if NUMA pool is not initialized
-    for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
-      if (target_layer_idx.has_value() && *target_layer_idx != layer_idx) {
-        continue;
-      }
-      const auto& layer_info = layers_[layer_idx];
-      const auto& layer_holds = buffer_holds_[layer_idx];
-      for (size_t i = 0; i < num_shards_; ++i) {
-        if (target_shard_idx.has_value() && *target_shard_idx != i) {
-          continue;
-        }
-        const auto& shard_info = layer_info.shards[i];
-        const auto& shard_hold = layer_holds[i];
-
-        // Determine the source host pointer
-        const uint8_t* base_host_ptr = nullptr;
-        size_t host_size = 0;
-        if (slot_idx.has_value()) {
-          TF_ASSIGN_OR_RETURN(
-              KVCacheHostSpan span,
-              HostSpan(layer_idx, i, *slot_idx, staging_max_major_per_slot_));
-          base_host_ptr = span.ptr;
-          host_size = span.nbytes;
-        } else {
-          base_host_ptr = shard_info.host_ptr;
-          host_size = shard_info.host_size;
-        }
-
-        std::vector<xla::Future<>> shard_futures;
-        if (!is_partial) {
-          if (base_host_ptr == nullptr) {
-            return absl::FailedPreconditionError("Source host pointer is null");
-          }
-          if (physical_size_ > host_size) {
-            return absl::InvalidArgumentError(
-                "Source host buffer is too small");
-          }
-          xla::Future<> future =
-              shard_hold.CopyRawHostToDevice(base_host_ptr, 0, physical_size_);
-          shard_futures.push_back(std::move(future));
-        } else {
-          for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
-            int64_t src_major_dim_offset = src_offsets_major_dim[j];
-            int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
-            int64_t major_dim_size = copy_sizes_major_dim[j];
-
-            int64_t src_offset = src_major_dim_offset * slice_byte_size_;
-            int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
-            int64_t size_to_copy = major_dim_size * slice_byte_size_;
-
-            if (src_offset + size_to_copy > static_cast<int64_t>(host_size)) {
-              return absl::InvalidArgumentError(
-                  "Copy range exceeds source host buffer size");
-            }
-            if (dst_offset + size_to_copy > shard_info.device_size) {
-              return absl::InvalidArgumentError(
-                  "Copy range exceeds destination device buffer size");
-            }
-
-            const uint8_t* src_ptr = base_host_ptr + src_offset;
-            xla::Future<> future = shard_hold.CopyRawHostToDevice(
-                src_ptr, dst_offset, size_to_copy);
-            shard_futures.push_back(std::move(future));
-          }
-        }
-        logical_futures[layer_idx * num_shards_ + i] =
-            raiden::CreateBufferFuture(std::move(shard_futures),
-                                       shard_hold.c_hold,
-                                       shard_hold.common_hold);
-      }
-    }
-    return logical_futures;
-  }
-
   // Group work by NUMA node
-  struct CopyWork {
-    size_t layer_idx;
-    size_t shard_idx;
-  };
   std::map<int, std::vector<CopyWork>> grouped_work;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     if (target_layer_idx.has_value() && *target_layer_idx != layer_idx) {
@@ -421,6 +356,14 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
     }
   }
 
+  size_t total_works = 0;
+  for (const auto& [node, works] : grouped_work) {
+    total_works += works.size();
+  }
+
+  VLOG(1) << "H2d: grouped work into " << grouped_work.size()
+          << " NUMA groups. Total works: " << total_works;
+
   struct PendingFuture {
     std::future<absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>>
         future;
@@ -428,95 +371,65 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
   };
   std::vector<PendingFuture> pending_futures;
 
-  for (const auto& [node, works] : grouped_work) {
-    auto future = numa_pool_->Schedule(
-        node,
-        [this, works, is_partial, src_offsets_major_dim, dst_offsets_major_dim,
-         copy_sizes_major_dim, slot_idx]()
-            -> absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> {
-          std::vector<xla::Future<raiden::BufferHolder>> local_futures;
-          for (const auto& work : works) {
-            const auto& layer_info = layers_[work.layer_idx];
-            const auto& shard_hold =
-                buffer_holds_[work.layer_idx][work.shard_idx];
-            const auto& shard_info = layer_info.shards[work.shard_idx];
-
-            // Determine the source host pointer
-            const uint8_t* base_host_ptr = nullptr;
-            size_t host_size = 0;
-            if (slot_idx.has_value()) {
-              TF_ASSIGN_OR_RETURN(
-                  KVCacheHostSpan span,
-                  HostSpan(work.layer_idx, work.shard_idx, *slot_idx,
-                           staging_max_major_per_slot_));
-              base_host_ptr = span.ptr;
-              host_size = span.nbytes;
-            } else {
-              base_host_ptr = shard_info.host_ptr;
-              host_size = shard_info.host_size;
-            }
-
-            std::vector<xla::Future<>> shard_futures;
-            if (!is_partial) {
-              if (base_host_ptr == nullptr) {
-                return absl::FailedPreconditionError(
-                    "Source host pointer is null");
-              }
-              if (physical_size_ > host_size) {
-                return absl::InvalidArgumentError(
-                    "Source host buffer is too small");
-              }
-              xla::Future<> future = shard_hold.CopyRawHostToDevice(
-                  base_host_ptr, 0, physical_size_);
-              shard_futures.push_back(std::move(future));
-            } else {
-              for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
-                int64_t src_major_dim_offset = src_offsets_major_dim[j];
-                int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
-                int64_t major_dim_size = copy_sizes_major_dim[j];
-
-                int64_t src_offset = src_major_dim_offset * slice_byte_size_;
-                int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
-                int64_t size_to_copy = major_dim_size * slice_byte_size_;
-
-                if (src_offset + size_to_copy >
-                    static_cast<int64_t>(host_size)) {
-                  return absl::InvalidArgumentError(
-                      "Copy range exceeds source host buffer size");
-                }
-                if (dst_offset + size_to_copy > shard_info.device_size) {
-                  return absl::InvalidArgumentError(
-                      "Copy range exceeds destination device buffer size");
-                }
-
-                const uint8_t* src_ptr = base_host_ptr + src_offset;
-                xla::Future<> future = shard_hold.CopyRawHostToDevice(
-                    src_ptr, dst_offset, size_to_copy);
-                shard_futures.push_back(std::move(future));
-              }
-            }
-            local_futures.push_back(raiden::CreateBufferFuture(
-                std::move(shard_futures), shard_hold.c_hold,
-                shard_hold.common_hold));
-          }
-          return local_futures;
-        });
-    pending_futures.push_back({std::move(future), works});
-  }
-
-  for (auto& pf : pending_futures) {
-    auto status_or_local_futures = pf.future.get();
-    if (!status_or_local_futures.ok()) {
-      return status_or_local_futures.status();
+  if (total_works <= 1) {
+    // OPTIMIZATION: Single work item. Execute inline to avoid pool overhead.
+    VLOG(1) << "H2d: Executing inline (single work). Thread: "
+            << std::this_thread::get_id();
+    for (const auto& [node, works] : grouped_work) {
+      VLOG(1) << "H2d: Executing inline dispatch for NUMA node " << node
+              << ", works count: " << works.size();
+      auto status_or_local_futures =
+          DispatchH2dWork(works, slot_idx, is_partial, src_offsets_major_dim,
+                          dst_offsets_major_dim, copy_sizes_major_dim);
+      if (!status_or_local_futures.ok()) {
+        VLOG(1) << "H2d: Inline dispatch failed: "
+                << status_or_local_futures.status().ToString();
+        return status_or_local_futures.status();
+      }
+      auto local_futures = std::move(status_or_local_futures).value();
+      for (size_t i = 0; i < works.size(); ++i) {
+        const auto& work = works[i];
+        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
+            std::move(local_futures[i]);
+      }
     }
-    auto local_futures = std::move(status_or_local_futures).value();
-    for (size_t i = 0; i < pf.works.size(); ++i) {
-      const auto& work = pf.works[i];
-      logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
-          std::move(local_futures[i]);
+  } else {
+    // Safe to parallelize via the dedicated dma_pool_.
+    VLOG(1) << "H2d: Parallelizing dispatches on dma_pool_. Thread: "
+            << std::this_thread::get_id();
+    for (const auto& [node, works] : grouped_work) {
+      VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
+              << ", works count: " << works.size();
+      auto future = dma_pool_->Schedule(
+          node >= 0 ? std::optional<int>(node) : std::nullopt,
+          [this, works, is_partial, src_offsets_major_dim,
+           dst_offsets_major_dim, copy_sizes_major_dim, slot_idx]() {
+            return DispatchH2dWork(works, slot_idx, is_partial,
+                                   src_offsets_major_dim, dst_offsets_major_dim,
+                                   copy_sizes_major_dim);
+          });
+      pending_futures.push_back({std::move(future), works});
+    }
+
+    VLOG(1) << "H2d: Awaiting scheduled dispatches...";
+    for (auto& pf : pending_futures) {
+      auto status_or_local_futures = pf.future.get();
+      if (!status_or_local_futures.ok()) {
+        VLOG(1) << "H2d: Scheduled dispatch failed: "
+                << status_or_local_futures.status().ToString();
+        return status_or_local_futures.status();
+      }
+      VLOG(1) << "H2d: Scheduled dispatch completed successfully.";
+      auto local_futures = std::move(status_or_local_futures).value();
+      for (size_t i = 0; i < pf.works.size(); ++i) {
+        const auto& work = pf.works[i];
+        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
+            std::move(local_futures[i]);
+      }
     }
   }
 
+  VLOG(1) << "KVCacheManagerBase::H2d completed. Returning logical futures.";
   return logical_futures;
 }
 
@@ -528,6 +441,17 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
                                       std::optional<size_t> target_layer_idx,
                                       std::optional<size_t> target_shard_idx,
                                       int64_t device_id) {
+  VLOG(1) << "KVCacheManagerBase::DispatchD2hChunks called. Thread: "
+          << std::this_thread::get_id() << ", slot_idx: "
+          << (slot_idx.has_value() ? std::to_string(*slot_idx) : "none")
+          << ", target_layer: "
+          << (target_layer_idx.has_value() ? std::to_string(*target_layer_idx)
+                                           : "all")
+          << ", target_shard: "
+          << (target_shard_idx.has_value() ? std::to_string(*target_shard_idx)
+                                           : "all")
+          << ", device_id: " << device_id;
+
   if (buffer_holds_.empty()) {
     return absl::FailedPreconditionError(
         "D2h requires a device-backed KVCacheManagerBase");
@@ -545,87 +469,6 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   std::vector<xla::Future<raiden::BufferHolder>> logical_futures(num_layers_ *
                                                                  num_shards_);
 
-  if (!numa_pool_) {
-    // Fallback
-    for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
-      if (target_layer_idx.has_value() && *target_layer_idx != layer_idx) {
-        continue;
-      }
-      const auto& layer_info = layers_[layer_idx];
-      const auto& layer_holds = buffer_holds_[layer_idx];
-      for (size_t i = 0; i < num_shards_; ++i) {
-        if (target_shard_idx.has_value() && *target_shard_idx != i) {
-          continue;
-        }
-        if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
-          continue;
-        }
-        const auto& shard_info = layer_info.shards[i];
-        const auto& shard_hold = layer_holds[i];
-
-        // Determine destination host pointer
-        uint8_t* dst_host_ptr = nullptr;
-        size_t host_size = 0;
-        if (slot_idx.has_value()) {
-          TF_ASSIGN_OR_RETURN(
-              KVCacheHostSpan span,
-              HostSpan(layer_idx, i, *slot_idx, staging_max_major_per_slot_));
-          dst_host_ptr = span.ptr;
-          host_size = span.nbytes;
-        } else {
-          dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
-          host_size = shard_info.host_size;
-        }
-
-        std::vector<xla::Future<>> shard_futures;
-        if (!is_partial) {
-          if (dst_host_ptr == nullptr) {
-            return absl::FailedPreconditionError(
-                "Destination host pointer is null");
-          }
-          if (physical_size_ > host_size) {
-            return absl::OutOfRangeError(
-                "Copy range exceeds destination host buffer size");
-          }
-          xla::Future<> future =
-              shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
-          shard_futures.push_back(std::move(future));
-        } else {
-          shard_futures.reserve(src_offsets.size());
-          for (size_t j = 0; j < src_offsets.size(); ++j) {
-            int64_t src_offset = src_offsets[j] * slice_byte_size_;
-            int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
-            int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
-
-            if (src_offset + size_to_copy > shard_info.device_size) {
-              return absl::InvalidArgumentError(
-                  "Copy range exceeds source device buffer size");
-            }
-            if (dst_offset + size_to_copy > static_cast<int64_t>(host_size)) {
-              return absl::InvalidArgumentError(
-                  "Copy range exceeds destination host buffer size");
-            }
-
-            uint8_t* dst_ptr = dst_host_ptr + dst_offset;
-            xla::Future<> future = shard_hold.CopyRawDeviceToHost(
-                dst_ptr, src_offset, size_to_copy);
-            shard_futures.push_back(std::move(future));
-          }
-        }
-        logical_futures[layer_idx * num_shards_ + i] =
-            raiden::CreateBufferFuture(std::move(shard_futures),
-                                       shard_hold.c_hold,
-                                       shard_hold.common_hold);
-      }
-    }
-    return logical_futures;
-  }
-
-  // Group work by NUMA node
-  struct CopyWork {
-    size_t layer_idx;
-    size_t shard_idx;
-  };
   std::map<int, std::vector<CopyWork>> grouped_work;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     if (target_layer_idx.has_value() && *target_layer_idx != layer_idx) {
@@ -650,6 +493,14 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     }
   }
 
+  size_t total_works = 0;
+  for (const auto& [node, works] : grouped_work) {
+    total_works += works.size();
+  }
+
+  VLOG(1) << "DispatchD2hChunks: grouped work into " << grouped_work.size()
+          << " NUMA groups. Total works: " << total_works;
+
   struct PendingFuture {
     std::future<absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>>
         future;
@@ -657,92 +508,66 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   };
   std::vector<PendingFuture> pending_futures;
 
-  for (const auto& [node, works] : grouped_work) {
-    auto future = numa_pool_->Schedule(
-        node,
-        [this, works, is_partial, src_offsets, dst_offsets, copy_sizes,
-         slot_idx]()
-            -> absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> {
-          std::vector<xla::Future<raiden::BufferHolder>> local_futures;
-          for (const auto& work : works) {
-            const auto& layer_info = layers_[work.layer_idx];
-            const auto& shard_hold =
-                buffer_holds_[work.layer_idx][work.shard_idx];
-            const auto& shard_info = layer_info.shards[work.shard_idx];
-
-            // Determine destination host pointer
-            uint8_t* dst_host_ptr = nullptr;
-            size_t host_size = 0;
-            if (slot_idx.has_value()) {
-              TF_ASSIGN_OR_RETURN(
-                  KVCacheHostSpan span,
-                  HostSpan(work.layer_idx, work.shard_idx, *slot_idx,
-                           staging_max_major_per_slot_));
-              dst_host_ptr = span.ptr;
-              host_size = span.nbytes;
-            } else {
-              dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
-              host_size = shard_info.host_size;
-            }
-
-            std::vector<xla::Future<>> shard_futures;
-            if (!is_partial) {
-              if (dst_host_ptr == nullptr) {
-                return absl::FailedPreconditionError(
-                    "Destination host pointer is null");
-              }
-              if (physical_size_ > host_size) {
-                return absl::OutOfRangeError(
-                    "Copy range exceeds destination host buffer size");
-              }
-              xla::Future<> future = shard_hold.CopyRawDeviceToHost(
-                  dst_host_ptr, 0, physical_size_);
-              shard_futures.push_back(std::move(future));
-            } else {
-              shard_futures.reserve(src_offsets.size());
-              for (size_t j = 0; j < src_offsets.size(); ++j) {
-                int64_t src_offset = src_offsets[j] * slice_byte_size_;
-                int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
-                int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
-
-                if (src_offset + size_to_copy > shard_info.device_size) {
-                  return absl::InvalidArgumentError(
-                      "Copy range exceeds source device buffer size");
-                }
-                if (dst_offset + size_to_copy >
-                    static_cast<int64_t>(host_size)) {
-                  return absl::InvalidArgumentError(
-                      "Copy range exceeds destination host buffer size");
-                }
-
-                uint8_t* dst_ptr = dst_host_ptr + dst_offset;
-                xla::Future<> future = shard_hold.CopyRawDeviceToHost(
-                    dst_ptr, src_offset, size_to_copy);
-                shard_futures.push_back(std::move(future));
-              }
-            }
-            local_futures.push_back(raiden::CreateBufferFuture(
-                std::move(shard_futures), shard_hold.c_hold,
-                shard_hold.common_hold));
-          }
-          return local_futures;
-        });
-    pending_futures.push_back({std::move(future), works});
-  }
-
-  for (auto& pf : pending_futures) {
-    auto status_or_local_futures = pf.future.get();
-    if (!status_or_local_futures.ok()) {
-      return status_or_local_futures.status();
+  if (total_works <= 1) {
+    // OPTIMIZATION: Single work item. Execute inline to avoid pool overhead.
+    VLOG(1) << "DispatchD2hChunks: Executing inline (single work). Thread: "
+            << std::this_thread::get_id();
+    for (const auto& [node, works] : grouped_work) {
+      VLOG(1) << "DispatchD2hChunks: Executing inline dispatch for NUMA node "
+              << node << ", works count: " << works.size();
+      auto status_or_local_futures = DispatchD2hWork(
+          works, slot_idx, is_partial, src_offsets, dst_offsets, copy_sizes);
+      if (!status_or_local_futures.ok()) {
+        VLOG(1) << "DispatchD2hChunks: Inline dispatch failed: "
+                << status_or_local_futures.status().ToString();
+        return status_or_local_futures.status();
+      }
+      auto local_futures = std::move(status_or_local_futures).value();
+      for (size_t i = 0; i < works.size(); ++i) {
+        const auto& work = works[i];
+        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
+            std::move(local_futures[i]);
+      }
     }
-    auto local_futures = std::move(status_or_local_futures).value();
-    for (size_t i = 0; i < pf.works.size(); ++i) {
-      const auto& work = pf.works[i];
-      logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
-          std::move(local_futures[i]);
+  } else {
+    // Safe to parallelize via the dedicated dma_pool_.
+    VLOG(1)
+        << "DispatchD2hChunks: Parallelizing dispatches on dma_pool_. Thread: "
+        << std::this_thread::get_id();
+    for (const auto& [node, works] : grouped_work) {
+      VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
+              << ", works count: " << works.size();
+      auto future = dma_pool_->Schedule(
+          node >= 0 ? std::optional<int>(node) : std::nullopt,
+          [this, works, is_partial, src_offsets, dst_offsets, copy_sizes,
+           slot_idx]() {
+            return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
+                                   dst_offsets, copy_sizes);
+          });
+      pending_futures.push_back({std::move(future), works});
+    }
+
+    VLOG(1) << "DispatchD2hChunks: Awaiting scheduled dispatches...";
+    for (auto& pf : pending_futures) {
+      auto status_or_local_futures = pf.future.get();
+      if (!status_or_local_futures.ok()) {
+        VLOG(1) << "DispatchD2hChunks: Scheduled dispatch failed: "
+                << status_or_local_futures.status().ToString();
+        return status_or_local_futures.status();
+      }
+      VLOG(1)
+          << "DispatchD2hChunks: Scheduled dispatch completed successfully.";
+      auto local_futures = std::move(status_or_local_futures).value();
+      for (size_t i = 0; i < pf.works.size(); ++i) {
+        const auto& work = pf.works[i];
+        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
+            std::move(local_futures[i]);
+      }
     }
   }
 
+  VLOG(1) << "KVCacheManagerBase::DispatchD2hChunks completed. Returning "
+             "logical futures.";
   return logical_futures;
 }
 
@@ -784,7 +609,7 @@ KVCacheManagerBase::D2hAutoAllocate(
   }
 
   ASSIGN_OR_RETURN(std::vector<int> allocated_block_ids,
-                        AllocateBlocks(total_blocks_to_allocate, entity_id));
+                   AllocateBlocks(total_blocks_to_allocate, entity_id));
 
   std::vector<int64_t> flat_src_offsets;
   std::vector<int64_t> flat_dst_offsets;
@@ -818,7 +643,7 @@ KVCacheManagerBase::H2hWrite(std::string peer,
                              const std::vector<int>& src_block_ids,
                              int64_t entity_id) {
   ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                        H2hWriteDirect(peer, src_block_ids, entity_id));
+                   H2hWriteDirect(peer, src_block_ids, entity_id));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
@@ -829,7 +654,7 @@ KVCacheManagerBase::H2hRead(std::string peer,
                             const std::vector<int>& src_block_ids,
                             int64_t entity_id) {
   ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                        H2hReadDirect(peer, src_block_ids, entity_id));
+                   H2hReadDirect(peer, src_block_ids, entity_id));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
@@ -1038,8 +863,6 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
   return xla::JoinFutures(absl::MakeSpan(futures));
 }
 
-
-
 absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(
     int64_t num_slots, int64_t max_major_per_slot) {
   if (num_slots <= 0) {
@@ -1048,9 +871,9 @@ absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(
   if (max_major_per_slot <= 0) {
     return absl::InvalidArgumentError("max_major_per_slot must be positive");
   }
-  const size_t required_size =
-      static_cast<size_t>(num_slots) *
-      static_cast<size_t>(max_major_per_slot) * slice_byte_size_;
+  const size_t required_size = static_cast<size_t>(num_slots) *
+                               static_cast<size_t>(max_major_per_slot) *
+                               slice_byte_size_;
   for (size_t l = 0; l < layers_.size(); ++l) {
     const auto& layer_info = layers_[l];
     for (size_t s = 0; s < layer_info.shards.size(); ++s) {
@@ -1085,8 +908,7 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
     return absl::OutOfRangeError("HostSpan layer or shard index out of range");
   }
   const int64_t base_major = slot_idx * staging_max_major_per_slot_;
-  const size_t byte_offset =
-      static_cast<size_t>(base_major) * slice_byte_size_;
+  const size_t byte_offset = static_cast<size_t>(base_major) * slice_byte_size_;
   const size_t nbytes = static_cast<size_t>(num_major) * slice_byte_size_;
   const auto& shard_info = layers_[layer_idx].shards[shard_idx];
   if (byte_offset + nbytes > shard_info.host_size) {
@@ -1102,13 +924,175 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
       .shard_idx = shard_idx};
 }
 
-
-
 size_t KVCacheManagerBase::bytes_per_block() const {
   if (is_blocked_layout_) {
     return slice_byte_size_;
   }
   return block_size_ * slice_byte_size_;
+}
+
+absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+KVCacheManagerBase::DispatchH2dWork(
+    const std::vector<CopyWork>& works, std::optional<int64_t> slot_idx,
+    bool is_partial, const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim) {
+  VLOG(1) << "KVCacheManagerBase::DispatchH2dWork started. Works count: "
+          << works.size() << ", Thread: " << std::this_thread::get_id();
+  std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+  for (const auto& work : works) {
+    const auto& layer_info = layers_[work.layer_idx];
+    const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
+    const auto& shard_info = layer_info.shards[work.shard_idx];
+
+    const uint8_t* base_host_ptr = nullptr;
+    size_t host_size = 0;
+    if (slot_idx.has_value()) {
+      TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
+                          HostSpan(work.layer_idx, work.shard_idx, *slot_idx,
+                                   staging_max_major_per_slot_));
+      base_host_ptr = span.ptr;
+      host_size = span.nbytes;
+    } else {
+      base_host_ptr = shard_info.host_ptr;
+      host_size = shard_info.host_size;
+    }
+
+    std::vector<xla::Future<>> shard_futures;
+    if (!is_partial) {
+      if (base_host_ptr == nullptr) {
+        return absl::FailedPreconditionError("Source host pointer is null");
+      }
+      if (physical_size_ > host_size) {
+        return absl::InvalidArgumentError("Source host buffer is too small");
+      }
+      VLOG(1) << "DispatchH2dWork: calling CopyRawHostToDevice (Full). Layer: "
+              << work.layer_idx << ", Shard: " << work.shard_idx
+              << ", Size: " << physical_size_
+              << ", Thread: " << std::this_thread::get_id();
+      xla::Future<> future =
+          shard_hold.CopyRawHostToDevice(base_host_ptr, 0, physical_size_);
+      shard_futures.push_back(std::move(future));
+    } else {
+      for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
+        int64_t src_major_dim_offset = src_offsets_major_dim[j];
+        int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
+        int64_t major_dim_size = copy_sizes_major_dim[j];
+
+        int64_t src_offset = src_major_dim_offset * slice_byte_size_;
+        int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
+        int64_t size_to_copy = major_dim_size * slice_byte_size_;
+
+        if (src_offset + size_to_copy > static_cast<int64_t>(host_size)) {
+          return absl::InvalidArgumentError(
+              "Copy range exceeds source host buffer size");
+        }
+        if (dst_offset + size_to_copy > shard_info.device_size) {
+          return absl::InvalidArgumentError(
+              "Copy range exceeds destination device buffer size");
+        }
+
+        const uint8_t* src_ptr = base_host_ptr + src_offset;
+        VLOG(1)
+            << "DispatchH2dWork: calling CopyRawHostToDevice (Partial). Layer: "
+            << work.layer_idx << ", Shard: " << work.shard_idx
+            << ", SrcOffset: " << src_offset << ", DstOffset: " << dst_offset
+            << ", Size: " << size_to_copy
+            << ", Thread: " << std::this_thread::get_id();
+        xla::Future<> future =
+            shard_hold.CopyRawHostToDevice(src_ptr, dst_offset, size_to_copy);
+        shard_futures.push_back(std::move(future));
+      }
+    }
+    local_futures.push_back(raiden::CreateBufferFuture(
+        std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+  }
+  VLOG(1) << "KVCacheManagerBase::DispatchH2dWork completed. Dispatched "
+          << local_futures.size()
+          << " buffer futures. Thread: " << std::this_thread::get_id();
+  return local_futures;
+}
+
+absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
+                                    std::optional<int64_t> slot_idx,
+                                    bool is_partial,
+                                    const std::vector<int64_t>& src_offsets,
+                                    const std::vector<int64_t>& dst_offsets,
+                                    const std::vector<int64_t>& copy_sizes) {
+  VLOG(1) << "KVCacheManagerBase::DispatchD2hWork started. Works count: "
+          << works.size() << ", Thread: " << std::this_thread::get_id();
+  std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+  for (const auto& work : works) {
+    const auto& layer_info = layers_[work.layer_idx];
+    const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
+    const auto& shard_info = layer_info.shards[work.shard_idx];
+
+    uint8_t* dst_host_ptr = nullptr;
+    size_t host_size = 0;
+    if (slot_idx.has_value()) {
+      TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
+                          HostSpan(work.layer_idx, work.shard_idx, *slot_idx,
+                                   staging_max_major_per_slot_));
+      dst_host_ptr = span.ptr;
+      host_size = span.nbytes;
+    } else {
+      dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
+      host_size = shard_info.host_size;
+    }
+
+    std::vector<xla::Future<>> shard_futures;
+    if (!is_partial) {
+      if (dst_host_ptr == nullptr) {
+        return absl::FailedPreconditionError(
+            "Destination host pointer is null");
+      }
+      if (physical_size_ > host_size) {
+        return absl::OutOfRangeError(
+            "Copy range exceeds destination host buffer size");
+      }
+      VLOG(1) << "DispatchD2hWork: calling CopyRawDeviceToHost (Full). Layer: "
+              << work.layer_idx << ", Shard: " << work.shard_idx
+              << ", Size: " << physical_size_
+              << ", Thread: " << std::this_thread::get_id();
+      xla::Future<> future =
+          shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
+      shard_futures.push_back(std::move(future));
+    } else {
+      shard_futures.reserve(src_offsets.size());
+      for (size_t j = 0; j < src_offsets.size(); ++j) {
+        int64_t src_offset = src_offsets[j] * slice_byte_size_;
+        int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
+        int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
+
+        if (src_offset + size_to_copy > shard_info.device_size) {
+          return absl::InvalidArgumentError(
+              "Copy range exceeds source device buffer size");
+        }
+        if (dst_offset + size_to_copy > static_cast<int64_t>(host_size)) {
+          return absl::InvalidArgumentError(
+              "Copy range exceeds destination host buffer size");
+        }
+
+        uint8_t* dst_ptr = dst_host_ptr + dst_offset;
+        VLOG(1)
+            << "DispatchD2hWork: calling CopyRawDeviceToHost (Partial). Layer: "
+            << work.layer_idx << ", Shard: " << work.shard_idx
+            << ", SrcOffset: " << src_offset << ", DstOffset: " << dst_offset
+            << ", Size: " << size_to_copy
+            << ", Thread: " << std::this_thread::get_id();
+        xla::Future<> future =
+            shard_hold.CopyRawDeviceToHost(dst_ptr, src_offset, size_to_copy);
+        shard_futures.push_back(std::move(future));
+      }
+    }
+    local_futures.push_back(raiden::CreateBufferFuture(
+        std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+  }
+  VLOG(1) << "KVCacheManagerBase::DispatchD2hWork completed. Dispatched "
+          << local_futures.size()
+          << " buffer futures. Thread: " << std::this_thread::get_id();
+  return local_futures;
 }
 
 }  // namespace kv_cache

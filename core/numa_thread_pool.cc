@@ -14,143 +14,72 @@
 
 #include "core/numa_thread_pool.h"
 
+#include <cstddef>
 #include <functional>
-#include <memory>
-#include <stdexcept>
-#include <thread>  // NOLINT(build/c++11)
+#include <mutex>
+#include <thread>
 #include <utility>
-#include <vector>
 
-#include "absl/log/log.h"
-#include "absl/status/status.h"
-#include "absl/synchronization/mutex.h"
+#include "xla/tsl/platform/logging.h"
 #include "core/tpu_utils.h"
 
 namespace tpu_raiden {
 
-absl::StatusOr<std::unique_ptr<NumaThreadPool>> NumaThreadPool::Create(
-    const std::vector<int>& numa_nodes) {
-  auto pool = std::unique_ptr<NumaThreadPool>(new NumaThreadPool(numa_nodes));
-  auto status = pool->Initialize();
-  if (!status.ok()) {
-    return status;
+namespace {
+// Thread-local flag to identify worker threads.
+thread_local bool is_worker_thread = false;
+}  // namespace
+
+NumaThreadPool::NumaThreadPool(size_t threads) : stop(false) {
+  VLOG(1) << "NumaThreadPool created with " << threads
+          << " threads. Pool instance: " << this;
+  for (size_t i = 0; i < threads; ++i) {
+    workers.emplace_back([this, i] {
+      is_worker_thread = true;  // Mark this thread as a worker
+      VLOG(1) << "NumaThreadPool worker thread " << i
+              << " started. Thread ID: " << std::this_thread::get_id()
+              << ", Pool: " << this;
+      this->WorkerLoop();
+      VLOG(1) << "NumaThreadPool worker thread " << i
+              << " exiting. Thread ID: " << std::this_thread::get_id();
+    });
   }
-  return pool;
 }
 
-NumaThreadPool::NumaThreadPool(const std::vector<int>& numa_nodes)
-    : numa_nodes_(numa_nodes) {}
-
-absl::Status NumaThreadPool::Initialize() {
-  // 1. Initialize pinned workers for each unique NUMA node
-  for (int node : numa_nodes_) {
-    if (node < 0) continue;
-    if (workers_.contains(node)) continue;  // Skip duplicates
-
-    auto worker = std::make_unique<Worker>(node);
-    worker->thread = std::thread(&NumaThreadPool::WorkerLoop, this,
-                                 worker.get());  // NOLINT(build/c++11)
-    workers_[node] = std::move(worker);
+void NumaThreadPool::WorkerLoop() {
+  for (;;) {
+    std::function<void()> task;
+    {
+      std::unique_lock<std::mutex> lock(this->queue_mutex);
+      this->condition.wait(
+          lock, [this] { return this->stop || !this->tasks.empty(); });
+      if (this->stop && this->tasks.empty()) {
+        return;
+      }
+      task = std::move(this->tasks.front());
+      this->tasks.pop();
+    }
+    VLOG(1) << "NumaThreadPool worker " << std::this_thread::get_id()
+            << " executing task. Pool: " << this;
+    task();
+    VLOG(1) << "NumaThreadPool worker " << std::this_thread::get_id()
+            << " finished task. Pool: " << this;
   }
-
-  // 2. Initialize fallback worker (unpinned)
-  fallback_worker_ = std::make_unique<Worker>(-1);
-  fallback_worker_->thread =
-      std::thread(&NumaThreadPool::WorkerLoop, this,
-                  fallback_worker_.get());  // NOLINT(build/c++11)
-
-  return absl::OkStatus();
 }
 
 NumaThreadPool::~NumaThreadPool() {
-  // Stop all pinned workers
-  for (auto& [node, worker] : workers_) {
-    {
-      absl::MutexLock lock(worker->queue_mutex);
-      worker->stop = true;
-    }
-    if (worker->thread.joinable()) {
-      worker->thread.join();
-    }
-  }
-
-  // Stop fallback worker
-  if (fallback_worker_) {
-    {
-      absl::MutexLock lock(fallback_worker_->queue_mutex);
-      fallback_worker_->stop = true;
-    }
-    if (fallback_worker_->thread.joinable()) {
-      fallback_worker_->thread.join();
-    }
-  }
-}
-
-void NumaThreadPool::EnqueueTask(int numa_node, std::function<void()> task) {
-  Worker* worker = nullptr;
-  auto it = workers_.find(numa_node);
-  if (it != workers_.end()) {
-    worker = it->second.get();
-  } else {
-    worker = fallback_worker_.get();
-  }
-
   {
-    absl::MutexLock lock(worker->queue_mutex);
-    if (worker->stop) {
-      throw std::runtime_error("Enqueue on stopped NumaThreadPool");
+    std::unique_lock<std::mutex> lock(queue_mutex);
+    stop = true;
+  }
+  condition.notify_all();
+  for (std::thread& worker : workers) {
+    if (worker.joinable()) {
+      worker.join();
     }
-    worker->tasks.push(std::move(task));
   }
 }
 
-bool NumaThreadPool::WorkerCondition(Worker* worker) {
-  return worker->stop || !worker->tasks.empty();
-}
-
-void NumaThreadPool::WorkerLoop(Worker* worker) {
-  // Pin this thread to the NUMA node's CPU cores (if valid)
-  if (worker->numa_node >= 0) {
-    std::vector<int> cores = GetNumaNodeCpuCores(worker->numa_node);
-    if (!cores.empty()) {
-      int rc = PinCurrentThreadToCores(cores);
-      if (rc == 0) {
-        VLOG(1) << "[NUMA POOL] Successfully pinned worker thread to NUMA Node "
-                << worker->numa_node << " (" << cores.size() << " cores)";
-      } else {
-        LOG(ERROR) << "[NUMA POOL] Failed to pin worker thread to NUMA Node "
-                   << worker->numa_node;
-      }
-    } else {
-      LOG(WARNING) << "[NUMA POOL] No CPU cores found for NUMA Node "
-                   << worker->numa_node << ", running unpinned";
-    }
-
-    // Bind memory allocations of this thread to the NUMA node as well
-    SetThreadMempolicy(2, worker->numa_node);  // MPOL_BIND
-  } else {
-    VLOG(1) << "[NUMA POOL] Initialized unpinned fallback worker thread";
-  }
-
-  // Task loop
-  while (true) {
-    std::function<void()> task;
-    {
-      absl::MutexLock lock(worker->queue_mutex);
-      worker->queue_mutex.Await(absl::Condition(&NumaThreadPool::WorkerCondition, worker));
-      if (worker->stop && worker->tasks.empty()) {
-        break;
-      }
-      task = std::move(worker->tasks.front());
-      worker->tasks.pop();
-    }
-    task();
-  }
-
-  // Restore memory policy on exit (just in case)
-  if (worker->numa_node >= 0) {
-    SetThreadMempolicy(0);  // MPOL_DEFAULT
-  }
-}
+bool NumaThreadPool::IsCurrentThreadWorker() { return is_worker_thread; }
 
 }  // namespace tpu_raiden

@@ -15,70 +15,86 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_CORE_NUMA_THREAD_POOL_H_
 #define THIRD_PARTY_TPU_RAIDEN_CORE_NUMA_THREAD_POOL_H_
 
+#include <condition_variable>
 #include <functional>
-#include <future>  // NOLINT(build/c++11)
+#include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <queue>
-#include <thread>  // NOLINT(build/c++11)
+#include <thread>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
-#include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
-#include "absl/status/status.h"
-#include "absl/status/statusor.h"
-#include "absl/synchronization/mutex.h"
+#include "xla/tsl/platform/logging.h"
+#include "core/tpu_utils.h"
 
 namespace tpu_raiden {
 
 class NumaThreadPool {
  public:
-  // Creates a thread pool with one worker thread per specified NUMA node.
-  // Pins each worker thread to the CPU cores of its corresponding NUMA node.
-  static absl::StatusOr<std::unique_ptr<NumaThreadPool>> Create(
-      const std::vector<int>& numa_nodes);
-
+  explicit NumaThreadPool(size_t threads);
   ~NumaThreadPool();
 
-  // Enqueues a task to be executed on the worker thread of a specific NUMA
-  // node. Returns a std::future that will contain the result of the task. If
-  // the numa_node is not in the pool (e.g. -1 or invalid), it executes on a
-  // fallback worker (or the first worker).
-  template <typename F, typename... Args>
-  auto Schedule(int numa_node, F&& f, Args&&... args)
+  // Schedule a task, optionally targeting a specific NUMA node.
+  // The pool automatically handles pinning the worker thread to the target node
+  // before executing the task.
+  template <class F, class... Args>
+  auto Schedule(std::optional<int> numa_node, F&& f, Args&&... args)
       -> std::future<typename std::invoke_result<F, Args...>::type> {
     using return_type = typename std::invoke_result<F, Args...>::type;
 
+    VLOG(1) << "NumaThreadPool::Schedule: scheduling task. Target NUMA: "
+            << (numa_node.has_value() ? std::to_string(*numa_node) : "none")
+            << ", from thread: " << std::this_thread::get_id();
+
+    // Wrap the user task to inject the pinning logic before execution.
+    auto task_wrapper =
+        [numa_node, f = std::forward<F>(f),
+         args_tuple = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+          if (numa_node.has_value() && *numa_node >= 0) {
+            PinCurrentThreadToNumaNode(*numa_node);
+          }
+          return std::apply(f, std::move(args_tuple));
+        };
+
     auto task = std::make_shared<std::packaged_task<return_type()>>(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        std::move(task_wrapper));
 
     std::future<return_type> res = task->get_future();
-
-    EnqueueTask(numa_node, [task]() { (*task)(); });
-
+    {
+      std::unique_lock<std::mutex> lock(queue_mutex);
+      if (stop) {
+        throw std::runtime_error("Schedule on stopped NumaThreadPool");
+      }
+      tasks.emplace([task]() { (*task)(); });
+    }
+    condition.notify_one();
     return res;
   }
 
+  // Overload for scheduling without a specific NUMA node.
+  template <class F, class... Args>
+  auto Schedule(F&& f, Args&&... args)
+      -> std::future<typename std::invoke_result<F, Args...>::type> {
+    return Schedule(std::nullopt, std::forward<F>(f),
+                    std::forward<Args>(args)...);
+  }
+
+  // Returns true if the current thread is a worker thread of ANY
+  // NumaThreadPool.
+  static bool IsCurrentThreadWorker();
+
  private:
-  struct Worker {
-    int numa_node;
-    std::thread thread;  // NOLINT(build/c++11)
-    std::queue<std::function<void()>> tasks ABSL_GUARDED_BY(queue_mutex);
-    absl::Mutex queue_mutex;
-    bool stop ABSL_GUARDED_BY(queue_mutex) = false;
+  void WorkerLoop();
 
-    Worker(int node) : numa_node(node) {}
-  };
-
-  explicit NumaThreadPool(const std::vector<int>& numa_nodes);
-  absl::Status Initialize();
-  void EnqueueTask(int numa_node, std::function<void()> task);
-  void WorkerLoop(Worker* worker);
-  static bool WorkerCondition(Worker* worker) ABSL_NO_THREAD_SAFETY_ANALYSIS;
-
-  std::vector<int> numa_nodes_;
-  absl::flat_hash_map<int, std::unique_ptr<Worker>> workers_;
-  std::unique_ptr<Worker> fallback_worker_;  // For invalid NUMA nodes (e.g. -1)
+  std::vector<std::thread> workers;
+  std::queue<std::function<void()>> tasks;
+  std::mutex queue_mutex;
+  std::condition_variable condition;
+  bool stop;
 };
 
 }  // namespace tpu_raiden

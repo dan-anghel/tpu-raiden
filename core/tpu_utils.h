@@ -41,6 +41,10 @@ std::vector<int> GetNumaNodeCpuCores(int numa_node);
 // Returns 0 on success, or a negative error code on failure.
 int PinCurrentThreadToCores(const std::vector<int>& cores);
 
+// Pins the current thread to the given NUMA node and binds its memory
+// allocations. Returns 0 on success, or a negative error code on failure.
+int PinCurrentThreadToNumaNode(int node);
+
 // Scans the PCI bus and returns all detected TPU PCI devices, sorted by BDF.
 const std::vector<TpuPciDevice>& GetTpuPciDevices();
 
