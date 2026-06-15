@@ -89,10 +89,9 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransfer) {
   std::string remote_endpoint = "127.0.0.1:" + std::to_string(port);
 
   // Start read: pull Block 0 (remote) and store it in Block 1 (local)
-  int64_t op_id = engine->StartRead(req_id, uuid, remote_endpoint,
-                                    /*remote_block_ids=*/{0},
-                                    /*local_block_ids=*/{1});
-  ASSERT_GT(op_id, 0);
+  engine->StartRead(req_id, uuid, remote_endpoint,
+                    /*remote_block_ids=*/{0},
+                    /*local_block_ids=*/{1});
 
   // Wait for transfer to complete by polling CompleteReadRaw
   bool done = false;
@@ -157,9 +156,8 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
 
   // Calling StartRead with a non-existent port throws or returns an op that
   // fails
-  int64_t op_id = engine->StartRead("req_parallel", 99999, "127.0.0.1:8888",
-                                    {0}, {0}, /*parallelism=*/2);
-  EXPECT_GT(op_id, 0);
+  engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
+                    /*parallelism=*/2);
 }
 
 }  // namespace

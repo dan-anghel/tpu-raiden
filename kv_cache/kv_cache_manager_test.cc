@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <vector>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
@@ -21,82 +26,80 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
+// Helper subclass to pretend we are device-backed for validation tests
+class TestKVCacheManager : public KVCacheManagerBase {
+ public:
+  TestKVCacheManager(size_t num_layers, size_t num_shards,
+                     size_t slice_byte_size)
+      : KVCacheManagerBase(num_layers, num_shards, slice_byte_size) {
+    buffer_holds_.resize(num_layers);
+    for (size_t l = 0; l < num_layers; ++l) {
+      buffer_holds_[l].resize(num_shards);
+    }
+  }
+};
+
 TEST(KVCacheManagerTest, CompilesAndLinksSuccessfully) {
-  // Fulfills the cc_test verification requirement. Runtime logic and IFRT array
-  // extraction from live Python objects are fully validated via the end-to-end
-  // Python unit tests (kv_cache_manager_test_gl and kv_cache_manager_test_gf).
   EXPECT_TRUE(true);
 }
 
-TEST(KVCacheManagerTest, D2hToFailsWithMismatchedCopySpecLengths) {
-  KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
+TEST(KVCacheManagerTest, D2hFailsWithMismatchedCopySpecLengths) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
                              /*slice_byte_size=*/128);
-  KVCacheCopySpec spec;
-  spec.src_offsets = {0};
-  spec.dst_offsets = {0, 1};  // Mismatch
-  spec.sizes = {1};
+  std::vector<int64_t> src_offsets = {0};
+  std::vector<int64_t> dst_offsets = {0, 1};  // Mismatch
+  std::vector<int64_t> sizes = {1};
 
-  char buf[128];
-  auto status = manager.D2hTo(0, buf, 128, spec, 0);
+  auto status = manager.D2h(src_offsets, dst_offsets, sizes);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.status().code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(status.status().message(),
               testing::HasSubstr("must have the same length"));
 }
 
-TEST(KVCacheManagerTest, H2dFromFailsWithNegativeOffsets) {
-  KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
+TEST(KVCacheManagerTest, H2dFailsWithNegativeOffsets) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
                              /*slice_byte_size=*/128);
-  KVCacheCopySpec spec;
-  spec.src_offsets = {-1};
-  spec.dst_offsets = {0};
-  spec.sizes = {1};
+  std::vector<int64_t> src_offsets = {-1};  // Negative
+  std::vector<int64_t> dst_offsets = {0};
+  std::vector<int64_t> sizes = {1};
 
-  char buf[128];
-  auto status = manager.H2dFrom(0, buf, 128, spec, 0);
+  auto status = manager.H2d(src_offsets, dst_offsets, sizes);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.status().code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(status.status().message(),
               testing::HasSubstr("must be non-negative"));
 }
 
-TEST(KVCacheManagerTest, D2hToFailsWithCpuOnlyManager) {
+TEST(KVCacheManagerTest, D2hFailsWithCpuOnlyManager) {
+  // Use the base class directly to test CPU-only behavior
   KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
                              /*slice_byte_size=*/128);
-  KVCacheCopySpec spec;  // Empty spec is valid
+  std::vector<int64_t> src_offsets = {0};
+  std::vector<int64_t> dst_offsets = {0};
+  std::vector<int64_t> sizes = {1};
 
-  char buf[128];
-  auto status = manager.D2hTo(0, buf, 128, spec, 0);
+  auto status = manager.D2h(src_offsets, dst_offsets, sizes);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.status().code(), absl::StatusCode::kFailedPrecondition);
   EXPECT_THAT(status.status().message(),
-              testing::HasSubstr("device-backed KVCacheManagerBase"));
+              testing::HasSubstr("requires a device-backed"));
 }
 
-TEST(KVCacheManagerTest, H2dFromFailsWithOutOfRangeLayer) {
-  KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
+TEST(KVCacheManagerTest, H2dFailsWithOutOfRangeLayer) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
                              /*slice_byte_size=*/128);
-  KVCacheCopySpec spec;
+  std::vector<int64_t> src_offsets;
+  std::vector<int64_t> dst_offsets;
+  std::vector<int64_t> sizes;
 
-  char buf[128];
-  auto status = manager.H2dFrom(1, buf, 128, spec, 0);
+  auto status = manager.H2d(src_offsets, dst_offsets, sizes,
+                            /*slot_idx=*/std::nullopt,
+                            /*layer_idx=*/1, /*shard_idx=*/0);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.status().code(), absl::StatusCode::kOutOfRange);
   EXPECT_THAT(status.status().message(),
               testing::HasSubstr("layer or shard index out of range"));
-}
-
-TEST(KVCacheManagerTest, D2hToFailsWithNullPointerWhenSizeIsPositive) {
-  KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
-                             /*slice_byte_size=*/128);
-  KVCacheCopySpec spec;
-
-  auto status = manager.D2hTo(0, nullptr, 128, spec, 0);
-  EXPECT_FALSE(status.ok());
-  EXPECT_EQ(status.status().code(), absl::StatusCode::kFailedPrecondition);
-  // Fails at CPU-only check before null check in this sequence.
-  EXPECT_THAT(status.status().message(),
-              testing::HasSubstr("device-backed KVCacheManagerBase"));
 }
 
 TEST(KVCacheManagerTest, H2hReadExplicitAcceptsParallelism) {

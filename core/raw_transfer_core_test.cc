@@ -23,6 +23,7 @@
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "core/raiden_future.h"
 #include "core/tpu_pjrt_manager.h"
 
 namespace raiden {
@@ -109,6 +110,43 @@ TEST(RawTransferCoreTest, AcquireHoldAndRawCopy) {
   EXPECT_EQ(read_back[1], 8.8f);
   EXPECT_EQ(read_back[2], 7.7f);
   EXPECT_EQ(read_back[3], 6.6f);
+}
+
+TEST(RawTransferCoreTest, RaidenFutureBasic) {
+  TF_ASSERT_OK_AND_ASSIGN(tpu_raiden::TpuPjrtManager * manager,
+                          tpu_raiden::TpuPjrtManager::GetDefault());
+
+  std::vector<float> host_data = {1.1f, 2.2f, 3.3f, 4.4f};
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      manager->BufferFromHost(host_data.data(), xla::F32, {4}));
+
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  TF_ASSERT_OK_AND_ASSIGN(BufferHoldAndAlias hold,
+                          BufferHoldAndAlias::Acquire(buffer.get()));
+
+  std::vector<float> read_data(4, 0.0f);
+  xla::Future<> read_future = hold.CopyRawDeviceToHost(
+      read_data.data(), /*device_offset=*/0, /*size=*/4 * sizeof(float));
+
+  std::vector<xla::Future<raiden::BufferHolder>> read_futures = {
+      raiden::CreateBufferFuture({std::move(read_future)}, hold.c_hold,
+                                 hold.common_hold)};
+  PjRtCopyFuture read_copy_future =
+      xla::JoinFutures(absl::MakeSpan(read_futures));
+
+  // Wrap in RaidenFuture
+  tpu_raiden::RaidenFuture raiden_future{std::move(read_copy_future)};
+
+  // Await it
+  EXPECT_THAT(raiden_future.Await(), IsOk());
+  EXPECT_TRUE(raiden_future.IsReady());
+
+  EXPECT_EQ(read_data[0], 1.1f);
+  EXPECT_EQ(read_data[1], 2.2f);
+  EXPECT_EQ(read_data[2], 3.3f);
+  EXPECT_EQ(read_data[3], 4.4f);
 }
 
 }  // namespace

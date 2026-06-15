@@ -26,6 +26,7 @@
 #include "nanobind/stl/vector.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "core/raiden_future.h"
 #include "core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
@@ -38,19 +39,29 @@ using ::tpu_raiden::torch::WeightSynchronizer;
 
 NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
-  // 1. Bind PjRtCopyFuture (shared between both)
+  // 1. Bind RaidenFuture
   // =========================================================================
-  nb::class_<::raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+  nb::class_<tpu_raiden::RaidenFuture>(m, "RaidenFuture")
       .def("Await",
-           [](::raiden::PjRtCopyFuture& future) {
+           [](tpu_raiden::RaidenFuture& self) {
              nb::gil_scoped_release release;
-             absl::Status status = future.Await().status();
+             absl::Status status = self.Await();
              if (!status.ok()) {
-               throw std::runtime_error(std::string("Async copy failed: ") +
+               throw std::runtime_error("Async copy failed: " +
                                         std::string(status.message()));
              }
            })
-      .def("IsReady", &::raiden::PjRtCopyFuture::IsReady);
+      .def("wait",
+           [](tpu_raiden::RaidenFuture& self) {
+             nb::gil_scoped_release release;
+             absl::Status status = self.Await();
+             if (!status.ok()) {
+               throw std::runtime_error("Async copy failed: " +
+                                        std::string(status.message()));
+             }
+           })
+      .def("IsReady", &tpu_raiden::RaidenFuture::IsReady)
+      .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
 
   // =========================================================================
   // 2. Bind KVCacheManager
@@ -85,7 +96,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager H2d failed: " +
                   std::string(status_or.status().message()));
             }
-            return status_or.value();
+            auto joined = xla::JoinFutures(absl::MakeSpan(status_or.value()));
+            return tpu_raiden::RaidenFuture{std::move(joined)};
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
@@ -104,7 +116,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager D2h failed: " +
                   std::string(status_or.status().message()));
             }
-            return status_or.value();
+            auto joined = xla::JoinFutures(absl::MakeSpan(status_or.value()));
+            return tpu_raiden::RaidenFuture{std::move(joined)};
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
@@ -122,7 +135,9 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager D2hAutoAllocate failed: " +
                   std::string(status_or.status().message()));
             }
-            return status_or.value();
+            return std::make_pair(
+                status_or.value().first,
+                tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
@@ -138,7 +153,9 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager H2hWrite failed: " +
                   std::string(status_or.status().message()));
             }
-            return status_or.value();
+            return std::make_pair(
+                status_or.value().first,
+                tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
           },
           nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0,
           nb::call_guard<nb::gil_scoped_release>())
@@ -153,7 +170,9 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager H2hRead failed: " +
                   std::string(status_or.status().message()));
             }
-            return status_or.value();
+            return std::make_pair(
+                status_or.value().first,
+                tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
           },
           nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0,
           nb::call_guard<nb::gil_scoped_release>())

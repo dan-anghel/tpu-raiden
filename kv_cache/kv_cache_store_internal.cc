@@ -29,6 +29,9 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
+#include "third_party/grpc/include/grpcpp/security/credentials.h"
+#include "xla/future.h"
 #include "core/raw_transfer_core.h"
 #include "core/status_macros.h"
 #include "kv_cache/global_registry/global_registry_client.h"
@@ -209,7 +212,8 @@ KVCacheStoreInternal::LookupAndFetch(
       if (!fut_or.ok()) {
         return fut_or.status();
       }
-      futures_to_join.push_back(std::move(fut_or.value()));
+      auto joined_future = xla::JoinFutures(absl::MakeSpan(fut_or.value()));
+      futures_to_join.push_back(std::move(joined_future));
     } else {
       miss_index = i;
       break;
@@ -455,19 +459,23 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
           static_cast<int64_t>(dst_offsets_major_dim[chunk_idx])};
       copy_spec.sizes = {static_cast<int64_t>(needed)};
 
-      std::vector<raiden::PjRtCopyFuture> shard_futures;
+      std::vector<const uint8_t*> host_ptrs;
+      host_ptrs.reserve(num_layers_ * num_shards_);
+      std::vector<size_t> host_sizes;
+      host_sizes.reserve(num_layers_ * num_shards_);
       for (size_t l = 0; l < num_layers_; ++l) {
         for (size_t sh = 0; sh < num_shards_; ++sh) {
-          ASSIGN_OR_RETURN(
-              auto fut,
-              manager.H2dFrom(l, (*host_buffers)[l * num_shards_ + sh].data(),
-                              needed * bytes_per_block, copy_spec, sh));
-          shard_futures.push_back(std::move(fut));
+          host_ptrs.push_back((*host_buffers)[l * num_shards_ + sh].data());
+          host_sizes.push_back(needed * bytes_per_block);
         }
       }
+      manager.SetExternalHostPointers(host_ptrs, host_sizes);
 
-      raiden::PjRtCopyFuture chunk_insert_future = raiden::FlattenPjRtFutures(
-          xla::JoinFutures(absl::MakeSpan(shard_futures)));
+      ASSIGN_OR_RETURN(auto futures,
+                       manager.H2d(copy_spec.src_offsets, copy_spec.dst_offsets,
+                                   copy_spec.sizes));
+      raiden::PjRtCopyFuture chunk_insert_future =
+          xla::JoinFutures(absl::MakeSpan(futures));
 
       // To add user hold, we need to map the future
       chunk_insert_future = chunk_insert_future.Map(

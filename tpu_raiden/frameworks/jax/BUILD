@@ -117,7 +117,6 @@ nanobind_extension(
         ":kv_cache_manager_jax",
         ":nb_statusor",
         ":weight_synchronizer_jax",
-        "//core:kv_cache_manager_with_transfer",
         "//core:raw_transfer_core",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",

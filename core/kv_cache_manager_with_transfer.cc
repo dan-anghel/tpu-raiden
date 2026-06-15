@@ -29,9 +29,12 @@
 #include "core/kv_cache_manager_with_transfer.h"
 
 #include <arpa/inet.h>
+#include <asm-generic/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdio.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -43,30 +46,30 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
-#include <future>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ratio>
 #include <set>
 #include <sstream>
-#include <exception>
-#include <ratio>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <utility>
-
-#include "xla/pjrt/pjrt_client.h"
-#include "core/host_memory_allocator.h"
 #include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "xla/future.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/kv_cache_manager_base.h"
 #include "transport/block_transport.h"
@@ -467,12 +470,11 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   return static_cast<int64_t>(uuid);
 }
 
-int64_t KVCacheManagerWithTransfer::StartRead(
+void KVCacheManagerWithTransfer::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism) {
-  auto load_promise = std::make_shared<std::promise<void>>();
   const auto submit_start = std::chrono::steady_clock::now();
   CopyPlan load_plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
   {
@@ -480,7 +482,7 @@ int64_t KVCacheManagerWithTransfer::StartRead(
     worker_threads_.emplace_back([this, req_id, uuid, remote_endpoint,
                                   submit_start,
                                   load_plan = std::move(load_plan),
-                                  load_promise, parallelism]() {
+                                  parallelism]() {
       const auto worker_start = std::chrono::steady_clock::now();
       bool failed = false;
       bool report_recv_done = true;
@@ -599,13 +601,20 @@ int64_t KVCacheManagerWithTransfer::StartRead(
                 h2d_started = true;
                 h2d_started_at = issue_one_start;
               }
-              absl::StatusOr<raiden::PjRtCopyFuture> future_or =
-                  H2dFromHostSlot(layer_idx, slot_idx, load_plan.num_blocks,
-                                  h2d_transfer_spec, shard_idx);
+              auto future_or = H2d(
+                  h2d_transfer_spec.src_offsets, h2d_transfer_spec.dst_offsets,
+                  h2d_transfer_spec.sizes, slot_idx, layer_idx, shard_idx);
               if (!future_or.ok()) {
                 return future_or.status();
               }
-              h2d_future->Add(std::move(future_or).value());
+              auto single_future =
+                  std::move(future_or)
+                      .value()[layer_idx * num_shards() + shard_idx];
+              std::vector<xla::Future<raiden::BufferHolder>> single_future_vec;
+              single_future_vec.push_back(std::move(single_future));
+              auto pjrt_future =
+                  xla::JoinFutures(absl::MakeSpan(single_future_vec));
+              h2d_future->Add(std::move(pjrt_future));
               h2d_issued[span_idx] = true;
               h2d_bytes += static_cast<int64_t>(local_spans[span_idx].nbytes);
               h2d_issue_ms += DurationMs(issue_one_start,
@@ -671,17 +680,13 @@ int64_t KVCacheManagerWithTransfer::StartRead(
                                                       sizeof(ack_request)));
           ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
         }
-        load_promise->set_value();
       } catch (const std::exception& e) {
         LOG(ERROR) << "Raiden consumer error during pull pipeline: "
                    << e.what();
         failed = true;
-        load_promise->set_exception(std::current_exception());
       } catch (...) {
         LOG(ERROR) << "Raiden consumer unknown error during pull pipeline";
         failed = true;
-        load_promise->set_exception(
-            std::make_exception_ptr(std::runtime_error("unknown error")));
       }
       if (slot_idx >= 0) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -721,39 +726,6 @@ int64_t KVCacheManagerWithTransfer::StartRead(
       EmitTimingLog(timing.str());
     });
   }
-  PendingOperation op;
-  op.load_promise = load_promise;
-  return StorePending(std::move(op));
-}
-
-std::vector<int64_t> KVCacheManagerWithTransfer::PollTransferOps() {
-  std::vector<int64_t> done;
-  for (auto it = pending_.begin(); it != pending_.end();) {
-    if (!it->second.future || it->second.future->IsReady()) {
-      if (it->second.future) {
-        it->second.future->Await();
-      }
-      done.push_back(it->first);
-      it = pending_.erase(it);
-    } else {
-      ++it;
-    }
-  }
-  return done;
-}
-
-void KVCacheManagerWithTransfer::WaitTransfer(int64_t op_id) {
-  auto it = pending_.find(op_id);
-  if (it == pending_.end()) {
-    throw std::invalid_argument("unknown Raiden transfer op id");
-  }
-  if (it->second.future) {
-    it->second.future->Await();
-  }
-  if (it->second.load_promise) {
-    it->second.load_promise->get_future().wait();
-  }
-  pending_.erase(it);
 }
 
 std::tuple<std::vector<std::string>, std::vector<std::string>,
@@ -799,11 +771,15 @@ StageResult KVCacheManagerWithTransfer::IssueH2D(
   int64_t total_bytes = 0;
   for (const kv_cache::KVCacheHostSpan& span : host_spans) {
     total_bytes += static_cast<int64_t>(span.nbytes);
-    future->Add(
-        ValueOrThrow("Failed to issue H2D transfer",
-                     H2dFromHostSlot(span.layer_idx, slot_idx, num_blocks,
-                                     transfer_spec, span.shard_idx)));
   }
+  auto fut_or = H2d(transfer_spec.src_offsets, transfer_spec.dst_offsets,
+                    transfer_spec.sizes, slot_idx);
+  if (!fut_or.ok()) {
+    throw std::runtime_error("Failed to issue H2D transfer: " +
+                             std::string(fut_or.status().message()));
+  }
+  auto joined_future = xla::JoinFutures(absl::MakeSpan(fut_or.value()));
+  future->Add(std::move(joined_future));
   return {.future = std::move(future),
           .host_spans = std::move(host_spans),
           .total_bytes = total_bytes,
@@ -932,7 +908,8 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
     return absl::OkStatus();
   }
   if (layer_idx >= state->num_layers || shard_idx >= state->num_shards) {
-    return absl::OutOfRangeError("staging readiness layer or shard out of range");
+    return absl::OutOfRangeError(
+        "staging readiness layer or shard out of range");
   }
   const size_t layer_state_idx = layer_idx * state->num_shards + shard_idx;
   std::unique_lock<std::mutex> lock(state->mu);
@@ -1121,16 +1098,25 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   int64_t d2h_total_bytes = 0;
   for (const kv_cache::KVCacheHostSpan& span : host_spans) {
     d2h_total_bytes += static_cast<int64_t>(span.nbytes);
-    absl::StatusOr<raiden::PjRtCopyFuture> future_or =
-        D2hToHostSlot(span.layer_idx, slot_idx, entry->num_blocks,
-                      d2h_transfer_spec, span.shard_idx);
-    if (!future_or.ok()) {
+  }
+  auto d2h_futures_or =
+      D2h(d2h_transfer_spec.src_offsets, d2h_transfer_spec.dst_offsets,
+          d2h_transfer_spec.sizes, slot_idx);
+  if (!d2h_futures_or.ok()) {
+    for (const kv_cache::KVCacheHostSpan& span : host_spans) {
       MarkStagingLayerReady(readiness, span.layer_idx, span.shard_idx,
-                            future_or.status());
-      ThrowStatus("Failed to issue D2H transfer", future_or.status());
+                            d2h_futures_or.status());
     }
-    raiden::PjRtCopyFuture future = std::move(future_or).value();
-    future.OnReady(
+    ThrowStatus("Failed to issue D2H transfer", d2h_futures_or.status());
+  }
+  auto& d2h_futures = d2h_futures_or.value();
+  for (const kv_cache::KVCacheHostSpan& span : host_spans) {
+    size_t flat_idx = span.layer_idx * num_shards() + span.shard_idx;
+    auto& single_future = d2h_futures[flat_idx];
+    std::vector<xla::Future<raiden::BufferHolder>> single_future_vec;
+    single_future_vec.push_back(std::move(single_future));
+    auto pjrt_future = xla::JoinFutures(absl::MakeSpan(single_future_vec));
+    pjrt_future.OnReady(
         [this, readiness, layer_idx = span.layer_idx,
          shard_idx = span.shard_idx](
             const absl::StatusOr<raiden::BufferHolders>& status_or) {
@@ -1138,7 +1124,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
                                 status_or.ok() ? absl::OkStatus()
                                                : status_or.status());
         });
-    d2h_future->Add(std::move(future));
+    d2h_future->Add(std::move(pjrt_future));
   }
   entry->total_bytes = d2h_total_bytes;
   entry->copy_segments = static_cast<int64_t>(d2h_copy.sizes.size());
@@ -1265,12 +1251,6 @@ void KVCacheManagerWithTransfer::AckSend(uint64_t uuid) {
          << DurationMs(entry->register_start, ack_done)
          << " failed=" << (entry->failed ? 1 : 0);
   EmitTimingLog(timing.str());
-}
-
-int64_t KVCacheManagerWithTransfer::StorePending(PendingOperation op) {
-  const int64_t op_id = next_op_id_++;
-  pending_[op_id] = std::move(op);
-  return op_id;
 }
 
 std::chrono::steady_clock::time_point

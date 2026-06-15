@@ -190,6 +190,7 @@ cc_library(
 cc_library(
     name = "raw_transfer_core",
     hdrs = [
+        "raiden_future.h",
         "raw_transfer_core.h",
     ],
     copts = [
@@ -247,14 +248,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
-        ":numa_thread_pool",
         ":raw_transfer_core",
-        ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
         "//transport:block_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla:future",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
@@ -517,11 +518,50 @@ cc_test(
     ],
     deps = [
         ":host_memory_allocator",
+        ":raw_transfer_core",
         ":tpu_pjrt_manager",
         ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla:future",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_manager_with_transfer_perf_test",
+    srcs = ["kv_cache_manager_with_transfer_perf_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    tags = [
+        "no_oss",
+        "requires-ghostfish:4",
+    ],
+    deps = [
+        ":host_memory_allocator",
+        ":kv_cache_manager_with_transfer",
+        ":raw_transfer_core",
+        ":tpu_pjrt_manager",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla:future",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",

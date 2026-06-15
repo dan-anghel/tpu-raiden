@@ -24,6 +24,7 @@
 #include <nanobind/stl/pair.h>  // IWYU pragma: keep
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
 #include <nanobind/stl/vector.h>  // IWYU pragma: keep
+#include "core/raiden_future.h"
 #include "core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
@@ -33,35 +34,34 @@ namespace nb = nanobind;
 
 using ::tpu_raiden::jax::WeightSynchronizer;
 
-// Define a wrapper struct to avoid exposing PjRtCopyFuture directly,
-// which would force a dependency on the _raw_transfer module.
-struct KVCacheManagerFuture {
-  raiden::PjRtCopyFuture future;
-
-  void Await() {
-    nb::gil_scoped_release release;
-    absl::Status status = future.Await().status();
-    if (!status.ok()) {
-      throw std::runtime_error(std::string("Async copy failed: ") +
-                               std::string(status.message()));
-    }
-  }
-
-  bool IsReady() const { return future.IsReady(); }
-};
-
 NB_MODULE(_tpu_raiden_jax, m) {
   // =========================================================================
   // 1. Bind KVCacheManager
   // =========================================================================
-  
+
   // Bind the new Future class as RaidenFuture to maintain duck-typing
   // compatibility.
-  nb::class_<KVCacheManagerFuture>(m, "RaidenFuture")
-      .def("Await", &KVCacheManagerFuture::Await)
-      .def("wait", &KVCacheManagerFuture::Await)
-      .def("IsReady", &KVCacheManagerFuture::IsReady)
-      .def("is_ready", &KVCacheManagerFuture::IsReady);
+  nb::class_<tpu_raiden::RaidenFuture>(m, "RaidenFuture")
+      .def("Await",
+           [](tpu_raiden::RaidenFuture& self) {
+             nb::gil_scoped_release release;
+             absl::Status status = self.Await();
+             if (!status.ok()) {
+               throw std::runtime_error("Async copy failed: " +
+                                        std::string(status.message()));
+             }
+           })
+      .def("wait",
+           [](tpu_raiden::RaidenFuture& self) {
+             nb::gil_scoped_release release;
+             absl::Status status = self.Await();
+             if (!status.ok()) {
+               throw std::runtime_error("Async copy failed: " +
+                                        std::string(status.message()));
+             }
+           })
+      .def("IsReady", &tpu_raiden::RaidenFuture::IsReady)
+      .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, int, std::optional<int>, std::optional<int>,
@@ -87,10 +87,11 @@ NB_MODULE(_tpu_raiden_jax, m) {
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& dst_offsets,
              const std::vector<int64_t>& copy_sizes)
-               -> absl::StatusOr<KVCacheManagerFuture> {
+              -> absl::StatusOr<tpu_raiden::RaidenFuture> {
             auto res = self.H2d(src_offsets, dst_offsets, copy_sizes);
             if (!res.ok()) return res.status();
-            return KVCacheManagerFuture{std::move(res.value())};
+            auto joined_future = xla::JoinFutures(absl::MakeSpan(res.value()));
+            return tpu_raiden::RaidenFuture{std::move(joined_future)};
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
@@ -102,10 +103,11 @@ NB_MODULE(_tpu_raiden_jax, m) {
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& dst_offsets,
              const std::vector<int64_t>& copy_sizes)
-               -> absl::StatusOr<KVCacheManagerFuture> {
+              -> absl::StatusOr<tpu_raiden::RaidenFuture> {
             auto res = self.D2h(src_offsets, dst_offsets, copy_sizes);
             if (!res.ok()) return res.status();
-            return KVCacheManagerFuture{std::move(res.value())};
+            auto joined_future = xla::JoinFutures(absl::MakeSpan(res.value()));
+            return tpu_raiden::RaidenFuture{std::move(joined_future)};
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
@@ -116,13 +118,13 @@ NB_MODULE(_tpu_raiden_jax, m) {
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& copy_sizes, int64_t entity_id)
-               -> absl::StatusOr<
-                   std::pair<std::vector<int>, KVCacheManagerFuture>> {
+              -> absl::StatusOr<
+                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
             auto res = self.D2hAutoAllocate(src_offsets, copy_sizes, entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
-                KVCacheManagerFuture{std::move(res.value().second)});
+                tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("copy_sizes_major_dim") = nb::list(),
@@ -132,13 +134,13 @@ NB_MODULE(_tpu_raiden_jax, m) {
           "h2h_write",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id)
-               -> absl::StatusOr<
-                   std::pair<std::vector<int>, KVCacheManagerFuture>> {
+              -> absl::StatusOr<
+                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
             auto res = self.H2hWrite(peer, src_block_ids, entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
-                KVCacheManagerFuture{std::move(res.value().second)});
+                tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
           nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0)
 
@@ -146,13 +148,13 @@ NB_MODULE(_tpu_raiden_jax, m) {
           "h2h_read",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id)
-               -> absl::StatusOr<
-                   std::pair<std::vector<int>, KVCacheManagerFuture>> {
+              -> absl::StatusOr<
+                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
             auto res = self.H2hRead(peer, src_block_ids, entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
-                KVCacheManagerFuture{std::move(res.value().second)});
+                tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
           nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0)
 

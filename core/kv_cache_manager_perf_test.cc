@@ -42,12 +42,17 @@
 #include <vector>
 
 #include "absl/flags/flag.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
+#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 #include "core/host_memory_allocator.h"
+#include "core/raw_transfer_core.h"
 #include "core/tpu_pjrt_manager.h"
 #include "core/tpu_utils.h"
 #include "kv_cache/kv_cache_manager_base.h"
@@ -59,6 +64,12 @@ ABSL_FLAG(int64_t, num_blocks, 16,
 
 namespace tpu_raiden {
 namespace {
+
+absl::Status AwaitAll(
+    absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>& future_or) {
+  if (!future_or.ok()) return future_or.status();
+  return xla::JoinFutures(absl::MakeSpan(future_or.value())).Await().status();
+}
 
 // Static initializer to load and initialize libtpu.so in OSS environment.
 bool InitializeLibtpuOnce() {
@@ -247,13 +258,11 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
   for (int iter = 0; iter < kWarmupIterations; ++iter) {
     auto d2h_future_or =
         engine->D2h(d2h_src_offsets, d2h_dst_offsets, copy_sizes);
-    ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(d2h_future_or));
 
     auto h2d_future_or =
         engine->H2d(h2d_src_offsets, h2d_dst_offsets, copy_sizes);
-    ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(h2d_future_or));
   }
 
   // 5. Timed Benchmark Loop (D2H)
@@ -265,8 +274,7 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
     absl::Time start = absl::Now();
     auto d2h_future_or =
         engine->D2h(d2h_src_offsets, d2h_dst_offsets, copy_sizes);
-    ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(d2h_future_or));
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -286,8 +294,7 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
     absl::Time start = absl::Now();
     auto h2d_future_or =
         engine->H2d(h2d_src_offsets, h2d_dst_offsets, copy_sizes);
-    ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(h2d_future_or));
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -432,13 +439,11 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
   for (int iter = 0; iter < kWarmupIterations; ++iter) {
     auto d2h_future_or =
         engine->D2h(d2h_src_offsets, d2h_dst_offsets, copy_sizes);
-    ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(d2h_future_or));
 
     auto h2d_future_or =
         engine->H2d(h2d_src_offsets, h2d_dst_offsets, copy_sizes);
-    ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(h2d_future_or));
   }
 
   // 5. Timed Benchmark Loop (D2H)
@@ -450,8 +455,7 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
     absl::Time start = absl::Now();
     auto d2h_future_or =
         engine->D2h(d2h_src_offsets, d2h_dst_offsets, copy_sizes);
-    ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(d2h_future_or));
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -471,8 +475,7 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
     absl::Time start = absl::Now();
     auto h2d_future_or =
         engine->H2d(h2d_src_offsets, h2d_dst_offsets, copy_sizes);
-    ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(AwaitAll(h2d_future_or));
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =

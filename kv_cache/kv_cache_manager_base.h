@@ -25,6 +25,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -82,16 +83,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   ~KVCacheManagerBase() override;
 
   // Async on-chip H2D offloads returning PJRT copy future E2E
-  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
+  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> H2d(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt);
 
   // Async on-chip D2H offloads E2E
-  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
+  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> D2h(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt);
 
   // Auto-allocating offloads E2E
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -147,16 +154,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // NOTE: These functions are temporary. Long-term, KVCacheManager should own
   // these host buffers to enable serving prefix cache lookups directly from
   // RAM.
-  absl::StatusOr<raiden::PjRtCopyFuture> D2hTo(size_t layer_idx,
-                                               void* dst_host_ptr,
-                                               size_t dst_size,
-                                               const KVCacheCopySpec& copy_spec,
-                                               size_t shard_idx = 0);
 
-  // NOTE: This function is temporary. See D2hTo() for details.
-  absl::StatusOr<raiden::PjRtCopyFuture> H2dFrom(
-      size_t layer_idx, const void* src_host_ptr, size_t src_size,
-      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
 
   absl::Status ConfigureHostStagingSlots(int64_t num_slots,
                                          int64_t max_major_per_slot);
@@ -165,13 +163,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
                                            int64_t slot_idx,
                                            int64_t num_major);
 
-  absl::StatusOr<raiden::PjRtCopyFuture> D2hToHostSlot(
-      size_t layer_idx, int64_t slot_idx, int64_t num_major,
-      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
 
-  absl::StatusOr<raiden::PjRtCopyFuture> H2dFromHostSlot(
-      size_t layer_idx, int64_t slot_idx, int64_t num_major,
-      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
 
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
@@ -202,10 +194,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     return block_manager_->Allocate(num_blocks, entity_id, /*lock=*/true);
   }
 
-  absl::StatusOr<raiden::PjRtCopyFuture> DispatchD2hChunks(
-      const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
-      const std::vector<int64_t>& copy_sizes, int64_t device_id = -1);
+  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+  DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
+                    const std::vector<int64_t>& dst_offsets,
+                    const std::vector<int64_t>& copy_sizes,
+                    std::optional<int64_t> slot_idx = std::nullopt,
+                    std::optional<size_t> layer_idx = std::nullopt,
+                    std::optional<size_t> shard_idx = std::nullopt,
+                    int64_t device_id = -1);
 };
 
 }  // namespace kv_cache

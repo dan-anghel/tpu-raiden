@@ -32,20 +32,25 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/kv_cache_manager_base.h"
 
@@ -153,15 +158,11 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
                         const std::vector<int64_t>& block_ids);
 
-  int64_t StartRead(const std::string& req_id, uint64_t uuid,
-                    const std::string& remote_endpoint,
-                    const std::vector<int64_t>& remote_block_ids,
-                    const std::vector<int64_t>& local_block_ids,
-                    int parallelism = 1);
-
-  std::vector<int64_t> PollTransferOps();
-
-  void WaitTransfer(int64_t op_id);
+  void StartRead(const std::string& req_id, uint64_t uuid,
+                 const std::string& remote_endpoint,
+                 const std::vector<int64_t>& remote_block_ids,
+                 const std::vector<int64_t>& local_block_ids,
+                 int parallelism = 1);
 
   std::tuple<std::vector<std::string>, std::vector<std::string>,
              std::vector<std::string>>
@@ -171,14 +172,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   int64_t tp_rank() const { return tp_rank_; }
 
  protected:
-  struct PendingOperation {
-    // TransferFuture is shared because it is exported to Python via nanobind.
-    // Python garbage collection and C++ pending operations list share ownership
-    // of the future.
-    std::shared_ptr<TransferFuture> future;
-    std::shared_ptr<std::promise<void>> load_promise;
-  };
-
   struct SendEntry {
     std::string req_id;
     uint64_t uuid = 0;
@@ -270,7 +263,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       size_t shard_idx, absl::Status status);
   void RemoveStagingReadinessLocked(int64_t slot_idx);
 
-  int64_t StorePending(PendingOperation op);
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 
   static CopySpec Offsets(const std::vector<int64_t>& block_ids,
@@ -285,8 +277,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   double timeout_s_ = 120.0;
   bool unsafe_skip_buffer_lock_ = true;
 
-  int64_t next_op_id_ = 1;
-  std::map<int64_t, PendingOperation> pending_;
   std::deque<int64_t> free_slots_;
   // SendEntry is shared across threads: created/timed-out/cleaned-up on the
   // main thread, but accessed asynchronously in control worker threads
