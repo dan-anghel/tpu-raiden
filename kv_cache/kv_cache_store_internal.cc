@@ -114,7 +114,7 @@ uint8_t* KVCacheStoreInternal::GetBlockHostPointer(size_t layer_idx,
 }
 
 absl::StatusOr<std::vector<int>> KVCacheStoreInternal::AllocateBlocks(
-    size_t num_blocks, int64_t entity_id) {
+    size_t num_blocks, int64_t entity_id, uint64_t uuid) {
   absl::MutexLock lock(mutex_);
   if (!block_manager_) {
     return absl::FailedPreconditionError("Block manager is not initialized");

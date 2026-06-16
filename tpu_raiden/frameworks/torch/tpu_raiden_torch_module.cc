@@ -142,8 +142,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
           "H2hWrite",
           [](KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id) {
-            auto status_or =
-                self.H2hWrite(std::move(peer), src_block_ids, entity_id);
+            auto status_or = self.H2hWrite(std::move(peer), src_block_ids,
+                                           /*dst_block_ids=*/{}, entity_id);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager H2hWrite failed: " +

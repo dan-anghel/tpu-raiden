@@ -516,8 +516,7 @@ absl::Status WeightSynchronizerBase::PushWeights(
   // 2. Run high-speed parallel sockets H2H write to push host weights to peers!
   std::vector<int> weights_block_id = {0};
   for (const std::string& peer : peers) {
-    TF_RETURN_IF_ERROR(
-        H2hWriteDirect(peer, weights_block_id, /*entity_id=*/0).status());
+    TF_RETURN_IF_ERROR(H2hWriteDirect(peer, weights_block_id).status());
   }
   return absl::OkStatus();
 }

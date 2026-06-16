@@ -631,9 +631,11 @@ KVCacheManagerBase::D2hAutoAllocate(
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hWrite(std::string peer,
                              const std::vector<int>& src_block_ids,
-                             int64_t entity_id) {
-  ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                   H2hWriteDirect(peer, src_block_ids, entity_id));
+                             const std::vector<int>& dst_block_ids,
+                             int64_t entity_id, uint64_t uuid) {
+  ASSIGN_OR_RETURN(
+      std::vector<int> allocated_ids,
+      H2hWriteDirect(peer, src_block_ids, dst_block_ids, entity_id, uuid));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));

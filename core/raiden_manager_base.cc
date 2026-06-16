@@ -133,11 +133,12 @@ absl::Status RaidenManagerBase::WaitForBlockRead(size_t layer_idx,
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
     const std::string& peer, const std::vector<int>& src_block_ids,
-    int64_t entity_id) {
+    const std::vector<int>& dst_block_ids, int64_t entity_id, uint64_t uuid) {
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  return server_->Push(peer, src_block_ids, parallelism_);
+  return server_->Push(peer, src_block_ids, dst_block_ids, parallelism_,
+                       tpu_raiden::transport::MajorOrder::kLayerMajor, uuid);
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(

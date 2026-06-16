@@ -134,7 +134,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
              const std::vector<int>& src_block_ids, int64_t entity_id)
               -> absl::StatusOr<
                   std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.H2hWrite(peer, src_block_ids, entity_id);
+            auto res = self.H2hWrite(peer, src_block_ids, /*dst_block_ids=*/{},
+                                     entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,

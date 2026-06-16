@@ -48,9 +48,14 @@ class BlockTransportDelegate {
   virtual ~BlockTransportDelegate() = default;
 
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(
-      size_t num_blocks, int64_t entity_id) = 0;
+      size_t num_blocks, int64_t entity_id, uint64_t uuid = 0) = 0;
 
   virtual absl::Status OnDataReceived() = 0;
+
+  virtual absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
+                                        uint64_t uuid = 0) {
+    return OnDataReceived();
+  }
 
   virtual absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) {
     return OnDataReceived();
@@ -95,6 +100,7 @@ class BlockTransport {
     uint32_t remote_block_id;
     uint32_t local_block_id;
     uint32_t num_blocks;
+    uint64_t uuid;
   };
 
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
@@ -104,9 +110,11 @@ class BlockTransport {
   // Push block data to remote peer (H2H Write)
   absl::StatusOr<std::vector<int>> Push(const std::string& peer,
                                         const std::vector<int>& src_block_ids,
+                                        const std::vector<int>& dst_block_ids = {},
                                         int parallelism = 1,
                                         MajorOrder major_order =
-                                            MajorOrder::kLayerMajor);
+                                            MajorOrder::kLayerMajor,
+                                        uint64_t uuid = 0);
 
   // Pull block data from remote peer (H2H Read)
   absl::StatusOr<std::vector<int>> Pull(
@@ -170,9 +178,10 @@ class BlockTransport {
   void H2hWriteWorker(int stream_idx, const std::string& peer,
                       size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
+                      const std::vector<int>& dst_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses,
-                      MajorOrder major_order);
+                      MajorOrder major_order, uint64_t uuid = 0);
 
   void H2hReadWorker(int stream_idx, const std::string& peer,
                      size_t local_block_offset, size_t local_block_count,

@@ -68,7 +68,8 @@ class KVCacheStoreInternal
                                int block_id) override;
 
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id) override;
+                                                  int64_t entity_id,
+                                                  uint64_t uuid = 0) override;
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     return base_remote_id + chunk_k;
   }

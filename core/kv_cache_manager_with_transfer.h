@@ -219,6 +219,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     uint32_t op = 0;
     uint64_t uuid = 0;
     uint64_t num_blocks = 0;
+    uint32_t consumer_data_port = 0;
   };
 
   struct alignas(8) ControlResponseHeader {
@@ -263,6 +264,22 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       const std::shared_ptr<StagingReadinessState>& state, size_t layer_idx,
       size_t shard_idx, absl::Status status);
   void RemoveStagingReadinessLocked(int64_t slot_idx);
+
+  absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
+                                uint64_t uuid = 0) override;
+
+  struct RecvEntry {
+    std::string req_id;
+    std::vector<int64_t> chip_block_ids;
+  };
+  absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
+
+  void StartPushInternal(
+      uint64_t uuid,
+      const std::string& remote_data_endpoint,
+      const std::vector<int64_t>& src_block_ids,
+      const std::vector<int64_t>& dst_block_ids
+  );
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 

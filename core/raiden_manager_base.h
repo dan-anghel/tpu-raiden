@@ -69,7 +69,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   // Direct C++ H2H network write (Push)
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
       const std::string& peer, const std::vector<int>& src_block_ids,
-      int64_t entity_id = 0);
+      const std::vector<int>& dst_block_ids = {}, int64_t entity_id = 0,
+      uint64_t uuid = 0);
 
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(
@@ -131,8 +132,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   std::vector<LayerInfoBase> layers_;
 
   // Delegate allocator overrides
-  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id) override {
+  absl::StatusOr<std::vector<int>> AllocateBlocks(
+      size_t num_blocks, int64_t entity_id, uint64_t uuid = 0) override {
     return absl::UnimplementedError("Block allocator is not available");
   }
 

@@ -47,7 +47,8 @@ class MockDelegate : public BlockTransportDelegate {
   }
 
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id) override {
+                                                  int64_t entity_id,
+                                                  uint64_t uuid = 0) override {
     std::vector<int> ids;
     for (size_t i = 0; i < num_blocks; ++i) {
       ids.push_back(i % max_blocks_);

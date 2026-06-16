@@ -29,7 +29,6 @@
 #include "core/kv_cache_manager_with_transfer.h"
 
 #include <arpa/inet.h>
-#include <asm-generic/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -173,6 +172,20 @@ int ConnectTcp(const std::string& endpoint) {
   return fd;
 }
 
+static std::string GetPeerIp(int fd) {
+  sockaddr_in addr;
+  socklen_t len = sizeof(addr);
+  if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
+    throw std::runtime_error("getpeername() failed: " +
+                             std::string(std::strerror(errno)));
+  }
+  char ip_buf[INET_ADDRSTRLEN];
+  if (inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf)) == nullptr) {
+    throw std::runtime_error("inet_ntop() failed: " +
+                             std::string(std::strerror(errno)));
+  }
+  return std::string(ip_buf);
+}
 static void WriteBlockIds(int fd, const std::vector<int64_t>& block_ids) {
   if (block_ids.empty()) return;
   CheckStatus(
@@ -513,291 +526,65 @@ void KVCacheManagerWithTransfer::StartRead(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
-  VLOG(1) << "KVCacheManagerWithTransfer::StartRead called. req_id: " << req_id
+  VLOG(1) << "KVCacheManagerWithTransfer::StartRead (Hybrid Bridge) called. req_id: " << req_id
           << ", uuid: " << uuid << ", remote: " << remote_endpoint
           << ", Thread: " << std::this_thread::get_id();
-  const auto submit_start = std::chrono::steady_clock::now();
   std::vector<int64_t> host_block_ids =
       local_host_block_ids.value_or(local_block_ids);
   CopyPlan load_plan =
       BuildLoadCopyPlan(remote_block_ids, local_block_ids, host_block_ids);
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    active_recv_entries_[uuid] =
+        RecvEntry{req_id, load_plan.h2d_local_block_ids};
+  }
+
+  if (load_plan.num_blocks == 0) {
+    std::lock_guard<std::mutex> lock(mu_);
+    done_recving_.insert(req_id);
+    active_recv_entries_.erase(uuid);
+    return;
+  }
+
   xla::PjRtBuffer* representative_buf = nullptr;
   if (!buffer_holds_.empty() && !buffer_holds_[0].empty()) {
     representative_buf = buffer_holds_[0][0].buffer;
   }
   std::optional<int> target_node = GetLocalTpuNumaNode(representative_buf);
 
-  VLOG(1) << "StartRead: scheduling pipeline task on push_pool_. Target NUMA: "
-          << (target_node.has_value() ? std::to_string(*target_node) : "none");
-  push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
-                                     submit_start,
-                                     load_plan = std::move(load_plan),
-                                     parallelism]() {
-    VLOG(1) << "StartRead pipeline task started in worker thread. req_id: "
-            << req_id << ", Thread: " << std::this_thread::get_id();
-    const auto worker_start = std::chrono::steady_clock::now();
-    bool failed = false;
-    bool report_recv_done = true;
-    bool release_only = false;
-    int64_t slot_idx = -1;
-    int64_t h2h_bytes = 0;
-    int64_t h2d_bytes = 0;
-    int64_t h2d_segments = 0;
-    size_t h2h_layers = 0;
-    double slot_ms = 0.0;
-    double control_setup_ms = 0.0;
-    double descriptor_ms = 0.0;
-    double h2h_ms = 0.0;
-    double host_reorder_ms = 0.0;
-    double h2d_issue_ms = 0.0;
-    double h2d_wait_ms = 0.0;
-    double h2d_total_ms = 0.0;
-    double ack_ms = 0.0;
+  push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint, load_plan = std::move(load_plan)]() {
     try {
-      if (load_plan.num_blocks == 0) {
-        report_recv_done = false;
-        release_only = true;
-        const auto ack_start = std::chrono::steady_clock::now();
-        AckRemote(remote_endpoint, uuid);
-        ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
-      } else {
-        const auto slot_start = std::chrono::steady_clock::now();
-        slot_idx = AcquireSlot();
-        slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
+      int control_fd = ConnectTcp(remote_endpoint);
+      auto control_cleanup =
+          std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
+            if (p && *p >= 0) close(*p);
+          });
 
-        const auto control_start = std::chrono::steady_clock::now();
-        int control_fd = ConnectTcp(remote_endpoint);
-        auto control_cleanup =
-            std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
-              if (p && *p >= 0) close(*p);
-            });
-        ControlRequestHeader stream_request;
-        stream_request.magic = kControlMagic;
-        stream_request.op = kOpPullStream;
-        stream_request.uuid = uuid;
-        stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
-        CheckStatus(
-            "control pull stream write",
-            WriteExact(control_fd, &stream_request, sizeof(stream_request)));
-        WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
-        ControlResponseHeader response = ReadControlResponseHeader(control_fd);
-        control_setup_ms =
-            DurationMs(control_start, std::chrono::steady_clock::now());
+      ControlRequestHeader stream_request;
+      stream_request.magic = kControlMagic;
+      stream_request.op = kOpPullStream;
+      stream_request.uuid = uuid;
+      stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
+      stream_request.consumer_data_port = static_cast<uint32_t>(local_data_port_);
+      CheckStatus(
+          "control pull stream write",
+          WriteExact(control_fd, &stream_request, sizeof(stream_request)));
+      WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
+      WriteBlockIds(control_fd, load_plan.transport_host_block_ids);
 
-        std::vector<kv_cache::KVCacheHostSpan> local_spans =
-            LayerSpans(slot_idx, static_cast<int64_t>(load_plan.num_blocks));
-        if (response.num_layers != local_spans.size()) {
-          throw std::runtime_error("remote layer descriptor count mismatch");
-        }
-        PullBlockDescriptor block_descriptor;
-        const auto descriptor_start = std::chrono::steady_clock::now();
-        CheckStatus(
-            "control stream block descriptor read",
-            ReadExact(control_fd, &block_descriptor, sizeof(block_descriptor)));
-        descriptor_ms +=
-            DurationMs(descriptor_start, std::chrono::steady_clock::now());
-        if (block_descriptor.num_blocks !=
-            static_cast<uint64_t>(load_plan.num_blocks)) {
-          throw std::runtime_error("remote block descriptor size mismatch");
-        }
-
-        std::vector<uint8_t*> explicit_dst_ptrs;
-        explicit_dst_ptrs.reserve(local_spans.size());
-        for (const kv_cache::KVCacheHostSpan& span : local_spans) {
-          explicit_dst_ptrs.push_back(span.ptr);
-          ++h2h_layers;
-          h2h_bytes += static_cast<int64_t>(span.nbytes);
-        }
-
-        std::vector<int> remote_staging_block_ids = ContiguousBlockIds(
-            block_descriptor.remote_block_base, block_descriptor.num_blocks);
-        std::vector<int> local_compact_block_ids =
-            ContiguousBlockIds(/*base=*/0, block_descriptor.num_blocks);
-        const bool overlap_h2d = !load_plan.RequiresHostReorder();
-        kv_cache::KVCacheCopySpec h2d_transfer_spec =
-            ToKVCacheCopySpec(load_plan.h2d_copy);
-        auto h2d_future = std::make_shared<TransferFuture>();
-        std::mutex h2d_mu;
-        std::vector<size_t> h2d_received_counts(local_spans.size(), 0);
-        std::vector<bool> h2d_issued(local_spans.size(), false);
-        bool h2d_started = false;
-        std::chrono::steady_clock::time_point h2d_started_at;
-        transport::BlockReceivedCallback on_block_received;
-        if (overlap_h2d) {
-          h2d_segments = static_cast<int64_t>(load_plan.h2d_copy.sizes.size());
-          on_block_received = [&](size_t layer_idx, size_t shard_idx,
-                                  int /*block_id*/,
-                                  size_t /*size_bytes*/) -> absl::Status {
-            const size_t span_idx = layer_idx * num_shards() + shard_idx;
-            if (span_idx >= local_spans.size()) {
-              return absl::OutOfRangeError(
-                  "received block layer or shard out of range");
-            }
-            std::lock_guard<std::mutex> lock(h2d_mu);
-            size_t received = ++h2d_received_counts[span_idx];
-            VLOG(1) << "on_block_received: Layer: " << layer_idx
-                    << ", Shard: " << shard_idx
-                    << ", Received blocks for this shard: " << received << "/"
-                    << load_plan.num_blocks
-                    << ", Thread: " << std::this_thread::get_id();
-            if (received < static_cast<size_t>(load_plan.num_blocks)) {
-              return absl::OkStatus();
-            }
-            if (received > static_cast<size_t>(load_plan.num_blocks)) {
-              return absl::FailedPreconditionError(
-                  "received too many blocks for H2D layer");
-            }
-            if (h2d_issued[span_idx]) {
-              return absl::OkStatus();
-            }
-            const auto issue_one_start = std::chrono::steady_clock::now();
-            if (!h2d_started) {
-              h2d_started = true;
-              h2d_started_at = issue_one_start;
-            }
-            VLOG(1) << "on_block_received: Triggering H2d for Layer: "
-                    << layer_idx << ", Shard: " << shard_idx
-                    << ", Thread: " << std::this_thread::get_id();
-            auto future_or = H2d(
-                h2d_transfer_spec.src_offsets, h2d_transfer_spec.dst_offsets,
-                h2d_transfer_spec.sizes, /*slot_idx=*/std::nullopt, layer_idx,
-                shard_idx);
-            if (!future_or.ok()) {
-              VLOG(1) << "on_block_received: H2d failed: "
-                      << future_or.status().ToString();
-              return future_or.status();
-            }
-            VLOG(1) << "on_block_received: H2d triggered successfully. Adding "
-                       "to h2d_future. Thread: "
-                    << std::this_thread::get_id();
-            h2d_future->Add(std::move(future_or.value()));
-            h2d_issued[span_idx] = true;
-            h2d_bytes += static_cast<int64_t>(local_spans[span_idx].nbytes);
-            h2d_issue_ms +=
-                DurationMs(issue_one_start, std::chrono::steady_clock::now());
-            return absl::OkStatus();
-          };
-        }
-        const auto h2h_start = std::chrono::steady_clock::now();
-        std::vector<int> remote_block_ids_int(
-            load_plan.producer_remote_block_ids.begin(),
-            load_plan.producer_remote_block_ids.end());
-        std::vector<int> local_host_block_ids_int(
-            load_plan.transport_host_block_ids.begin(),
-            load_plan.transport_host_block_ids.end());
-        auto h2h_future_or = H2hReadExplicit(
-            EndpointWithPort(remote_endpoint, response.data_port),
-            remote_block_ids_int, local_host_block_ids_int,
-            /*explicit_dst_ptrs=*/{}, parallelism,
-            transport::MajorOrder::kLayerMajor, on_block_received);
-        if (!h2h_future_or.ok()) {
-          ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
-        }
-        absl::Status h2h_status = h2h_future_or.value().Await();
-        if (!h2h_status.ok()) {
-          ThrowStatus("BlockTransport pull failed", h2h_status);
-        }
-        h2h_ms += DurationMs(h2h_start, std::chrono::steady_clock::now());
-
-        if (load_plan.RequiresHostReorder()) {
-          const auto reorder_start = std::chrono::steady_clock::now();
-          for (const kv_cache::KVCacheHostSpan& span : local_spans) {
-            ReorderCompactBlocks(span, load_plan.host_dst_to_src);
-          }
-          host_reorder_ms +=
-              DurationMs(reorder_start, std::chrono::steady_clock::now());
-          const auto h2d_start = std::chrono::steady_clock::now();
-          VLOG(1) << "StartRead (Sequential): Issuing H2D. Thread: "
-                  << std::this_thread::get_id();
-          StageResult h2d =
-              IssueH2D(slot_idx, static_cast<int64_t>(load_plan.num_blocks),
-                       load_plan.h2d_local_block_ids);
-          const auto h2d_issued_time = std::chrono::steady_clock::now();
-          VLOG(1) << "StartRead (Sequential): Awaiting H2D future... Thread: "
-                  << std::this_thread::get_id();
-          h2d.future->Await();
-          VLOG(1) << "StartRead (Sequential): H2D future completed. Thread: "
-                  << std::this_thread::get_id();
-          const auto h2d_done = std::chrono::steady_clock::now();
-
-          h2d_bytes = h2d.total_bytes;
-          h2d_segments = h2d.copy_segments;
-          h2d_issue_ms = DurationMs(h2d_start, h2d_issued_time);
-          h2d_wait_ms = DurationMs(h2d_issued_time, h2d_done);
-          h2d_total_ms = DurationMs(h2d_start, h2d_done);
-        } else {
-          for (size_t i = 0; i < h2d_issued.size(); ++i) {
-            if (!h2d_issued[i]) {
-              throw std::runtime_error("H2D layer was not issued");
-            }
-          }
-          const auto h2d_wait_start = std::chrono::steady_clock::now();
-          VLOG(1) << "StartRead (Overlapped): Awaiting h2d_future... Thread: "
-                  << std::this_thread::get_id();
-          h2d_future->Await();
-          VLOG(1) << "StartRead (Overlapped): h2d_future completed. Thread: "
-                  << std::this_thread::get_id();
-          const auto h2d_done = std::chrono::steady_clock::now();
-          h2d_wait_ms = DurationMs(h2d_wait_start, h2d_done);
-          h2d_total_ms =
-              h2d_started ? DurationMs(h2d_started_at, h2d_done) : 0.0;
-        }
-
-        const auto ack_start = std::chrono::steady_clock::now();
-        ControlRequestHeader ack_request;
-        ack_request.magic = kControlMagic;
-        ack_request.op = kOpAck;
-        ack_request.uuid = uuid;
-        VLOG(1) << "StartRead: Sending ACK to remote. Thread: "
-                << std::this_thread::get_id();
-        CheckStatus("control ack write",
-                    WriteExact(control_fd, &ack_request, sizeof(ack_request)));
-        ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
+      ControlResponseHeader response = ReadControlResponseHeader(control_fd);
+      if (response.status != 0) {
+        throw std::runtime_error("Remote producer rejected Hybrid Bridge read request");
       }
+      VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull request with Producer. req_id: "
+              << req_id;
     } catch (const std::exception& e) {
-      LOG(ERROR) << "Raiden consumer error during pull pipeline: " << e.what();
-      failed = true;
-    } catch (...) {
-      LOG(ERROR) << "Raiden consumer unknown error during pull pipeline";
-      failed = true;
-    }
-    if (slot_idx >= 0) {
+      LOG(ERROR) << "Raiden consumer error during Hybrid Bridge StartRead connect: " << e.what();
       std::lock_guard<std::mutex> lock(mu_);
-      ReleaseSlotLocked(slot_idx);
+      failed_recving_.insert(req_id);
+      active_recv_entries_.erase(uuid);
     }
-
-    const auto worker_done = std::chrono::steady_clock::now();
-    VLOG(1) << "StartRead pipeline task finished. req_id: " << req_id
-            << ", failed: " << failed
-            << ", Thread: " << std::this_thread::get_id();
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      if (failed) {
-        failed_recving_.insert(req_id);
-      } else if (report_recv_done) {
-        done_recving_.insert(req_id);
-      }
-    }
-
-    std::ostringstream timing;
-    timing << "RAIDEN_TIMING event=consumer_pipeline"
-           << " req_id=" << req_id << " uuid=" << uuid << " node_id=" << node_id_
-           << " release_only=" << (release_only ? 1 : 0)
-           << " total_blocks=" << load_plan.num_blocks
-           << " total_bytes=" << (h2h_bytes + h2d_bytes)
-           << " h2h_bytes=" << h2h_bytes << " h2d_bytes=" << h2d_bytes
-           << " h2h_layers=" << h2h_layers << " h2d_segments=" << h2d_segments
-           << " enqueue_to_start_ms=" << DurationMs(submit_start, worker_start)
-           << " slot_acquire_ms=" << slot_ms
-           << " control_setup_ms=" << control_setup_ms
-           << " descriptors_ms=" << descriptor_ms << " h2h_ms=" << h2h_ms
-           << " host_reorder_ms=" << host_reorder_ms
-           << " h2d_issue_ms=" << h2d_issue_ms << " h2d_wait_ms=" << h2d_wait_ms
-           << " h2d_total_ms=" << h2d_total_ms << " ack_ms=" << ack_ms
-           << " start_to_done_ms=" << DurationMs(worker_start, worker_done)
-           << " enqueue_to_done_ms=" << DurationMs(submit_start, worker_done)
-           << " failed=" << (failed ? 1 : 0);
-    EmitTimingLog(timing.str());
   });
 }
 
@@ -1130,9 +917,7 @@ void KVCacheManagerWithTransfer::HandleControlConnection(int fd) {
 
 void KVCacheManagerWithTransfer::ProcessPullStream(
     int fd, const ControlRequestHeader& req) {
-  const auto pull_start = std::chrono::steady_clock::now();
   std::shared_ptr<SendEntry> entry;
-  const auto wait_producer_start = std::chrono::steady_clock::now();
   {
     std::unique_lock<std::mutex> lock(mu_);
     cv_.wait(lock, [this, &entry, &req]() {
@@ -1144,83 +929,17 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
       return stopping_.load();
     });
   }
-  const auto wait_producer_ms =
-      DurationMs(wait_producer_start, std::chrono::steady_clock::now());
   if (stopping_) return;
   if (!entry) {
     throw std::runtime_error(
         "KVCacheManagerWithTransfer is stopping during wait for send entry");
   }
 
-  const auto parse_start = std::chrono::steady_clock::now();
-  std::vector<int64_t> requested_block_ids = ReadBlockIds(fd, req.num_blocks);
-  ValidateRequestedBlocks(*entry, requested_block_ids);
-  const auto parse_ms =
-      DurationMs(parse_start, std::chrono::steady_clock::now());
+  std::vector<int64_t> src_block_ids = ReadBlockIds(fd, req.num_blocks);
+  std::vector<int64_t> dst_block_ids = ReadBlockIds(fd, req.num_blocks);
+  ValidateRequestedBlocks(*entry, src_block_ids);
 
-  const auto slot_start = std::chrono::steady_clock::now();
-  int64_t slot_idx = AcquireSlot();
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    entry->slot_idx = slot_idx;
-    entry->num_blocks = static_cast<int64_t>(req.num_blocks);
-    entry->pull_started = true;
-  }
-  const auto slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
-
-  const auto issue_start = std::chrono::steady_clock::now();
-  // Use BuildH2dCopySpec for identity copy (device X to host X)
-  CopySpec d2h_copy =
-      BuildH2dCopySpec(requested_block_ids, requested_block_ids);
-  kv_cache::KVCacheCopySpec d2h_transfer_spec = ToKVCacheCopySpec(d2h_copy);
-
-  auto readiness = CreateStagingReadiness(slot_idx, entry->num_blocks);
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    for (int64_t block_id : requested_block_ids) {
-      active_producer_blocks_[block_id] = readiness;
-    }
-  }
-  auto d2h_future = std::make_shared<TransferFuture>();
-  int64_t d2h_total_bytes = entry->num_blocks * bytes_per_block();
-
-  // Pass std::nullopt to D2h for slotless direct copy
-  auto d2h_futures_or =
-      D2h(d2h_transfer_spec.src_offsets, d2h_transfer_spec.dst_offsets,
-          d2h_transfer_spec.sizes, /*slot_idx=*/std::nullopt);
-  if (!d2h_futures_or.ok()) {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      for (int64_t block_id : requested_block_ids) {
-        active_producer_blocks_.erase(block_id);
-      }
-    }
-    for (size_t l = 0; l < num_layers(); ++l) {
-      for (size_t s = 0; s < num_shards(); ++s) {
-        MarkStagingLayerReady(readiness, l, s, d2h_futures_or.status());
-      }
-    }
-    ThrowStatus("Failed to issue D2H transfer", d2h_futures_or.status());
-  }
-  auto pjrt_future = std::move(d2h_futures_or.value());
-  pjrt_future.OnReady(
-      [this,
-       readiness](const absl::StatusOr<raiden::BufferHolders>& status_or) {
-        for (size_t l = 0; l < num_layers(); ++l) {
-          for (size_t s = 0; s < num_shards(); ++s) {
-            MarkStagingLayerReady(
-                readiness, l, s,
-                status_or.ok() ? absl::OkStatus() : status_or.status());
-          }
-        }
-      });
-  d2h_future->Add(std::move(pjrt_future));
-  entry->total_bytes = d2h_total_bytes;
-  entry->copy_segments = static_cast<int64_t>(d2h_copy.sizes.size());
-  const auto issue_ms =
-      DurationMs(issue_start, std::chrono::steady_clock::now());
-
-  const auto response_start = std::chrono::steady_clock::now();
+  // Acknowledge acceptance to consumer immediately
   ControlResponseHeader response;
   response.magic = kResponseMagic;
   response.status = 0;
@@ -1229,47 +948,113 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
-  PullBlockDescriptor descriptor;
-  descriptor.remote_block_base = 0;  // Slotless: ignored by consumer
-  descriptor.num_blocks = static_cast<uint64_t>(entry->num_blocks);
-  CheckStatus("control stream block descriptor write",
-              WriteExact(fd, &descriptor, sizeof(descriptor)));
-  const auto response_ms =
-      DurationMs(response_start, std::chrono::steady_clock::now());
+  std::string peer_ip = GetPeerIp(fd);
+  std::string remote_data_endpoint =
+      peer_ip + ":" + std::to_string(req.consumer_data_port);
 
-  d2h_future->Await();
-  const auto d2h_ms = DurationMs(issue_start, std::chrono::steady_clock::now());
+  VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged consumer. Intercepting and launching StartPushInternal to "
+          << remote_data_endpoint;
+
+  // Intercept and Execute Hybrid Push on behalf of remote consumer!
+  StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids, dst_block_ids);
+}
+
+void KVCacheManagerWithTransfer::StartPushInternal(
+    uint64_t uuid, const std::string& remote_data_endpoint,
+    const std::vector<int64_t>& src_block_ids,
+    const std::vector<int64_t>& dst_block_ids) {
+  std::vector<int64_t> sizes(src_block_ids.size(), 1);
+  auto future_or = D2h(src_block_ids, src_block_ids, sizes, /*slot_idx=*/std::nullopt);
+  if (!future_or.ok()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      done_sending_.insert(it->second->req_id);
+      send_entries_.erase(it);
+    }
+    ThrowStatus("Failed to issue D2H in StartPushInternal", future_or.status());
+  }
+
+  auto future = std::move(future_or.value());
+  future.OnReady([this, uuid, remote_data_endpoint, src_block_ids, dst_block_ids](
+                     const absl::StatusOr<raiden::BufferHolders>& s) {
+    if (!s.ok()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        done_sending_.insert(it->second->req_id);
+        send_entries_.erase(it);
+      }
+      return;
+    }
+    std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
+    std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
+    // Push across Data Plane socket!
+    auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints,
+                           /*entity_id=*/0, uuid);
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      done_sending_.insert(it->second->req_id);
+      send_entries_.erase(it);
+    }
+  });
+}
+
+absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
+    const std::vector<int>& block_ids, uint64_t uuid) {
+  std::vector<int64_t> chip_dst_blocks;
+  std::string target_req_id;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    entry->stage_done = true;
-    entry->d2h_done = std::chrono::steady_clock::now();
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) {
+      return absl::NotFoundError(
+          "No active RecvEntry matching incoming Push UUID");
+    }
+    chip_dst_blocks = it->second.chip_block_ids;
+    target_req_id = it->second.req_id;
   }
 
-  const auto wait_ack_start = std::chrono::steady_clock::now();
-  ControlRequestHeader ack_req;
-  CheckStatus("control ack read", ReadExact(fd, &ack_req, sizeof(ack_req)));
-  if (ack_req.magic != kControlMagic || ack_req.op != kOpAck) {
-    throw std::runtime_error("bad control ack magic or op");
+  VLOG(1) << "OnBlocksReceived (Hybrid Bridge) triggered for UUID " << uuid
+          << " with " << block_ids.size()
+          << " blocks. Launching decoupled autonomous H2D copy for req_id "
+          << target_req_id;
+
+  std::vector<int64_t> host_src_blocks(block_ids.begin(), block_ids.end());
+  std::vector<int64_t> copy_sizes(host_src_blocks.size(), 1);
+
+  if (host_src_blocks.size() != chip_dst_blocks.size()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failed_recving_.insert(target_req_id);
+    active_recv_entries_.erase(uuid);
+    return absl::FailedPreconditionError(
+        "Received block count does not match requested chip destination block "
+        "count");
   }
-  const auto wait_ack_ms =
-      DurationMs(wait_ack_start, std::chrono::steady_clock::now());
 
-  AckSend(req.uuid);
+  auto future_or = H2d(host_src_blocks, chip_dst_blocks, copy_sizes,
+                       /*slot_idx=*/std::nullopt);
+  if (!future_or.ok()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failed_recving_.insert(target_req_id);
+    active_recv_entries_.erase(uuid);
+    return future_or.status();
+  }
 
-  std::ostringstream timing;
-  timing << "RAIDEN_TIMING event=producer_pipeline"
-         << " req_id=" << entry->req_id << " uuid=" << entry->uuid
-         << " node_id=" << node_id_ << " total_blocks=" << entry->num_blocks
-         << " total_bytes=" << entry->total_bytes
-         << " total_layers=" << num_layers()
-         << " copy_segments=" << entry->copy_segments
-         << " wait_producer_ms=" << wait_producer_ms << " parse_ms=" << parse_ms
-         << " slot_acquire_ms=" << slot_ms << " d2h_issue_ms=" << issue_ms
-         << " d2h_total_ms=" << d2h_ms << " response_ms=" << response_ms
-         << " wait_ack_ms=" << wait_ack_ms << " start_to_done_ms="
-         << DurationMs(pull_start, std::chrono::steady_clock::now())
-         << " failed=0";
-  EmitTimingLog(timing.str());
+  auto future = std::move(future_or.value());
+  future.OnReady(
+      [this, uuid,
+       target_req_id](const absl::StatusOr<raiden::BufferHolders>& s) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (s.ok()) {
+          done_recving_.insert(target_req_id);
+        } else {
+          failed_recving_.insert(target_req_id);
+        }
+        active_recv_entries_.erase(uuid);
+      });
+  return absl::OkStatus();
 }
 
 std::string KVCacheManagerWithTransfer::EndpointWithPort(

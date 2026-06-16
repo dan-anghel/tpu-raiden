@@ -113,7 +113,8 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
   // Override parent AllocateBlocks as simple identity indices since we sync
   // entire buffers E2E!
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id) override {
+                                                  int64_t entity_id,
+                                                  uint64_t uuid = 0) override {
     std::vector<int> ids(num_blocks);
     for (size_t i = 0; i < num_blocks; ++i) ids[i] = static_cast<int>(i);
     return ids;

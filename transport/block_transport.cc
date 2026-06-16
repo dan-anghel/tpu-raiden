@@ -362,7 +362,8 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
                           ParseMajorOrder(header.major_order));
     TF_ASSIGN_OR_RETURN(
         std::vector<int> allocated_ids,
-        delegate_->AllocateBlocks(header.num_blocks, /*entity_id=*/0));
+        delegate_->AllocateBlocks(header.num_blocks, /*entity_id=*/0,
+                                  header.uuid));
 
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
                                     header.num_blocks * sizeof(int)));
@@ -380,7 +381,30 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
 
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-    RETURN_IF_ERROR(delegate_->OnDataReceived());
+    RETURN_IF_ERROR(delegate_->OnBlocksReceived(allocated_ids, header.uuid));
+  } else if (header.op == 6) {  // Explicit Multi-Block Targeted Push
+    TF_ASSIGN_OR_RETURN(MajorOrder major_order,
+                        ParseMajorOrder(header.major_order));
+    std::vector<int> allocated_ids(header.num_blocks, 0);
+    RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
+                              header.num_blocks * sizeof(int)));
+    uint8_t ack = 1;
+    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+
+    RETURN_IF_ERROR(ForEachPayload(
+        major_order, delegate_->num_layers(), delegate_->num_shards(),
+        header.num_blocks, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          ABSL_DCHECK_LT(k, allocated_ids.size());
+          const int dst_id = allocated_ids[k];
+          RETURN_IF_ERROR(ValidateBlockRange(
+              delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
+          uint8_t* dest_ptr = delegate_->GetBlockHostPointer(l, sh, dst_id);
+          return ReadExact(client_fd, dest_ptr, bytes_per_block);
+        }));
+
+    ack = 1;
+    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+    RETURN_IF_ERROR(delegate_->OnBlocksReceived(allocated_ids, header.uuid));
   } else if (header.op == 2) {  // Pull request
     TF_ASSIGN_OR_RETURN(MajorOrder major_order,
                           ParseMajorOrder(header.major_order));
@@ -557,7 +581,8 @@ void BlockTransport::ListenerLoop() {
 
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
     const std::string& peer, const std::vector<int>& src_block_ids,
-    int parallelism, MajorOrder major_order) {
+    const std::vector<int>& dst_block_ids, int parallelism,
+    MajorOrder major_order, uint64_t uuid) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
     return absl::InvalidArgumentError("Block list cannot be empty");
@@ -580,11 +605,10 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   for (int i = 0; i < P; ++i) {
     const size_t block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
-    threads.push_back(std::thread(&BlockTransport::H2hWriteWorker, this, i,
-                                  peer, block_offset, block_count,
-                                  std::ref(src_block_ids),
-                                  std::ref(allocated_ids), std::ref(statuses),
-                                  major_order));
+    threads.push_back(std::thread(
+        &BlockTransport::H2hWriteWorker, this, i, peer, block_offset,
+        block_count, std::ref(src_block_ids), std::ref(dst_block_ids),
+        std::ref(allocated_ids), std::ref(statuses), major_order, uuid));
     block_offset += block_count;
   }
 
@@ -723,9 +747,10 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
 void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
                                     size_t block_offset, size_t block_count,
                                     const std::vector<int>& src_block_ids,
+                                    const std::vector<int>& dst_block_ids,
                                     std::vector<int>& allocated_ids,
                                     std::vector<absl::Status>& statuses,
-                                    MajorOrder major_order) {
+                                    MajorOrder major_order, uint64_t uuid) {
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -743,10 +768,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   });
 
   BlockPacketHeader header = {};
-  header.op = 1;  // Push
+  header.op = dst_block_ids.empty() ? 1 : 6;
   header.major_order = static_cast<uint8_t>(major_order);
   header.remote_block_id = 0;
   header.local_block_id = 0;
+  header.uuid = uuid;
   if (block_count > std::numeric_limits<uint32_t>::max()) {
     statuses[stream_idx] = absl::OutOfRangeError("Block count exceeds uint32");
     return;
@@ -759,17 +785,37 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
     return;
   }
 
-  std::vector<int> stream_allocated_ids(block_count, 0);
-  s = ReadExact(fd, stream_allocated_ids.data(), block_count * sizeof(int));
-  if (!s.ok()) {
-    statuses[stream_idx] = s;
-    return;
-  }
+  if (header.op == 6) {
+    ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
+    s = WriteExact(fd, &dst_block_ids[block_offset],
+                   block_count * sizeof(int));
+    if (!s.ok()) {
+      statuses[stream_idx] = s;
+      return;
+    }
+    uint8_t ack = 0;
+    s = ReadExact(fd, &ack, 1);
+    if (!s.ok() || ack != 1) {
+      statuses[stream_idx] =
+          absl::InternalError("Explicit push destination handshake failed");
+      return;
+    }
+    for (size_t k = 0; k < block_count; ++k) {
+      allocated_ids[block_offset + k] = dst_block_ids[block_offset + k];
+    }
+  } else {
+    std::vector<int> stream_allocated_ids(block_count, 0);
+    s = ReadExact(fd, stream_allocated_ids.data(), block_count * sizeof(int));
+    if (!s.ok()) {
+      statuses[stream_idx] = s;
+      return;
+    }
 
-  for (size_t k = 0; k < block_count; ++k) {
-    ABSL_DCHECK_LT(block_offset + k, allocated_ids.size());
-    ABSL_DCHECK_LT(k, stream_allocated_ids.size());
-    allocated_ids[block_offset + k] = stream_allocated_ids[k];
+    for (size_t k = 0; k < block_count; ++k) {
+      ABSL_DCHECK_LT(block_offset + k, allocated_ids.size());
+      ABSL_DCHECK_LT(k, stream_allocated_ids.size());
+      allocated_ids[block_offset + k] = stream_allocated_ids[k];
+    }
   }
 
   size_t bytes_per_block = delegate_->bytes_per_block();
