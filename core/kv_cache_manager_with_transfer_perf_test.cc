@@ -174,7 +174,6 @@ void RunSlotBenchmark(TpuPjrtManager* manager,
       layer_buffers,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/kNumBlocks,  // 1 slot capacity
-      /*external_host_ptrs=*/std::nullopt,
       /*unsafe_skip_buffer_lock=*/true,
       /*parallelism=*/1,
       /*host_allocator=*/allocator_fn,

@@ -46,12 +46,10 @@ std::vector<std::vector<at::Tensor>> SingleShardLayers(
 KVCacheManager::KVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(device_tensors), local_port,
           host_blocks_to_allocate,
-          tpu_raiden::CastExternalPointers(external_host_ptrs),
           unsafe_skip_buffer_lock, parallelism,
           tpu_raiden::CreateHostMemoryAllocator(
               device_tensors.empty() || device_tensors[0].empty()
@@ -73,7 +71,7 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
           UnpackTorchTensors(SingleShardLayers(kv_caches)),
           /*local_port=*/std::nullopt,
           /*host_blocks_to_allocate=*/std::nullopt,
-          /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
+          unsafe_skip_buffer_lock,
           /*parallelism=*/1,
           tpu_raiden::CreateHostMemoryAllocator(
               kv_caches.empty()

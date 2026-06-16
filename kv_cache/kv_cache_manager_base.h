@@ -67,8 +67,6 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
-      std::optional<std::vector<const uint8_t*>> external_host_ptrs =
-          std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
       HostBufferAllocator host_allocator = nullptr);
 

@@ -65,12 +65,11 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
-      .def(nb::init<nb::list, std::optional<int>, std::optional<int>,
-                    std::optional<std::vector<uintptr_t>>, bool, int>(),
+      .def(nb::init<nb::list, std::optional<int>, std::optional<int>, bool,
+                    int>(),
            nb::arg("device_arrays"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
-           nb::arg("external_host_ptrs") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,

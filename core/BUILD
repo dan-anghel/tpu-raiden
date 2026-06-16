@@ -504,6 +504,7 @@ cc_test(
 
 cc_test(
     name = "kv_cache_manager_perf_test",
+    timeout = "long",
     srcs = ["kv_cache_manager_perf_test.cc"],
     copts = [
         "-fno-strict-aliasing",
@@ -515,6 +516,7 @@ cc_test(
     ],
     tags = [
         "no_oss",
+        "notap",
         "requires-ghostfish:4",
     ],
     deps = [
@@ -538,6 +540,7 @@ cc_test(
 
 cc_test(
     name = "kv_cache_manager_with_transfer_perf_test",
+    timeout = "long",
     srcs = ["kv_cache_manager_with_transfer_perf_test.cc"],
     copts = [
         "-fno-strict-aliasing",
@@ -549,6 +552,7 @@ cc_test(
     ],
     tags = [
         "no_oss",
+        "notap",
         "requires-ghostfish:4",
     ],
     deps = [

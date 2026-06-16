@@ -48,7 +48,6 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
       nanobind::list device_arrays,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
-      std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
@@ -79,7 +78,6 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   KVCacheManager(UnpackedCache&& cache,
                  std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
-                 std::optional<std::vector<uintptr_t>> external_host_ptrs,
                  bool unsafe_skip_buffer_lock, int parallelism);
 
   // Private constructor for flat (transfer-enabled)

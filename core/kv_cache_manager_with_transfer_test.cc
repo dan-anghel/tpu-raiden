@@ -64,7 +64,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransfer) {
       layer_buffers,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/std::nullopt,
-      /*external_host_ptrs=*/std::nullopt,
       /*unsafe_skip_buffer_lock=*/true,
       /*parallelism=*/1,
       /*host_allocator=*/nullptr,
@@ -141,7 +140,6 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
       layer_buffers,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/std::nullopt,
-      /*external_host_ptrs=*/std::nullopt,
       /*unsafe_skip_buffer_lock=*/true,
       /*parallelism=*/1,
       /*host_allocator=*/nullptr,
@@ -187,7 +185,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
       layer_buffers,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/2,  // Allocate 2 blocks in host
-      /*external_host_ptrs=*/std::nullopt,
       /*unsafe_skip_buffer_lock=*/true,
       /*parallelism=*/1,
       /*host_allocator=*/nullptr,

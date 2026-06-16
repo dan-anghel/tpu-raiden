@@ -59,7 +59,6 @@ TEST(KVCacheStoreInternalTest, LocalInsertAndLookup) {
     return std::make_unique<kv_cache::KVCacheManagerBase>(
         layer_buffers, /*local_port=*/std::nullopt,
         /*host_blocks_to_allocate=*/4,
-        /*external_host_ptrs=*/std::nullopt,
         /*unsafe_skip_buffer_lock=*/true);
   };
 
@@ -124,7 +123,6 @@ TEST(KVCacheStoreInternalTest, LruEviction) {
     return std::make_unique<kv_cache::KVCacheManagerBase>(
         layer_buffers, /*local_port=*/std::nullopt,
         /*host_blocks_to_allocate=*/4,
-        /*external_host_ptrs=*/std::nullopt,
         /*unsafe_skip_buffer_lock=*/true);
   };
 

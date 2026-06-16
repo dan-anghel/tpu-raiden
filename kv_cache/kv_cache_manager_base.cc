@@ -79,7 +79,6 @@ KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
-    std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator)
     : RaidenManagerBase(layer_buffers.size(),
@@ -109,11 +108,7 @@ KVCacheManagerBase::KVCacheManagerBase(
   }
 
   int num_host_blocks = host_blocks_to_allocate.value_or(64);
-  if (external_host_ptrs.has_value()) {
-    num_host_blocks = total_blocks;
-  }
 
-  size_t shard_idx = 0;
   layers_.reserve(num_layers_);
   buffer_holds_.reserve(num_layers_);
 
@@ -139,15 +134,7 @@ KVCacheManagerBase::KVCacheManagerBase(
       }
 
       size_t alloc_size = num_host_blocks * bytes_per_block();
-      if (external_host_ptrs.has_value()) {
-        if (shard_idx < external_host_ptrs->size()) {
-          shard_info.host_ptr = (*external_host_ptrs)[shard_idx];
-        } else {
-          throw std::invalid_argument("External host pointers size mismatch");
-        }
-        shard_info.host_size = alloc_size;
-        shard_idx++;
-      } else if (host_allocator) {
+      if (host_allocator) {
         auto status_or_allocation =
             host_allocator(alloc_size, dst_buffer->device());
         if (!status_or_allocation.ok()) {

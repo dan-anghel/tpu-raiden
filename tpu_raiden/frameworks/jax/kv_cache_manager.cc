@@ -37,7 +37,6 @@ UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
 KVCacheManager::KVCacheManager(
     nb::list device_arrays, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
-    std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
     // NOTE: To achieve zero-copy initialization while remaining robust against
     // unspecified C++ function/constructor argument evaluation order (Clang
@@ -47,17 +46,15 @@ KVCacheManager::KVCacheManager(
     // that `UnpackJaxArrays` is fully evaluated before the Python list handle
     // is moved into ownership, preventing use-after-move segfaults.
     : KVCacheManager(UnpackAndMove(std::move(device_arrays)),
-                     local_port, host_blocks_to_allocate, external_host_ptrs,
+                     local_port, host_blocks_to_allocate,
                      unsafe_skip_buffer_lock, parallelism) {}
 
 KVCacheManager::KVCacheManager(
     UnpackedCache&& cache, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
-    std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
     : KVCacheManagerWithTransfer(
           cache.layer_buffers, local_port, host_blocks_to_allocate,
-          tpu_raiden::CastExternalPointers(external_host_ptrs),
           unsafe_skip_buffer_lock, parallelism,
           tpu_raiden::CreateHostMemoryAllocator(
               cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
@@ -86,7 +83,7 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
           cache.layer_buffers,
           /*local_port=*/std::nullopt,
           /*host_blocks_to_allocate=*/std::nullopt,
-          /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
+          unsafe_skip_buffer_lock,
           /*parallelism=*/1,
           tpu_raiden::CreateHostMemoryAllocator(
               cache.layer_buffers.empty() || cache.layer_buffers[0].empty()

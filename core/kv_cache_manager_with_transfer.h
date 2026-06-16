@@ -138,7 +138,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
       std::optional<int> local_port,
       std::optional<int> host_blocks_to_allocate,
-      std::optional<std::vector<const uint8_t*>> external_host_ptrs,
       bool unsafe_skip_buffer_lock, int parallelism,
       HostBufferAllocator host_allocator, int64_t tp_rank = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,

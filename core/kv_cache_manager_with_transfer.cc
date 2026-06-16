@@ -380,7 +380,6 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
-    std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t tp_rank,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
@@ -389,7 +388,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
                          host_blocks_to_allocate.has_value()
                              ? *host_blocks_to_allocate
                              : num_slots * max_blocks,
-                         external_host_ptrs, unsafe_skip_buffer_lock,
+                         unsafe_skip_buffer_lock,
                          parallelism, host_allocator),
       tp_rank_(tp_rank),
       local_control_port_(static_cast<int>(local_control_port)),

@@ -68,12 +68,10 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
-                    std::optional<int>, std::optional<int>,
-                    std::optional<std::vector<uintptr_t>>, bool, int>(),
+                    std::optional<int>, std::optional<int>, bool, int>(),
            nb::arg("device_tensors"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
-           nb::arg("external_host_ptrs") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
