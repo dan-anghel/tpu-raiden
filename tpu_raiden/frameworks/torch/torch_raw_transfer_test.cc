@@ -128,7 +128,7 @@ TEST_F(TorchRawTransferTest, BatchTransferD2HAndH2D) {
 
   // D2H Batch Async
   auto future = TransferD2HBatchAsync({tpu_tensor}, {host_tensor}, {}, {}, {});
-  ASSERT_OK(future.Await().status());
+  ASSERT_OK(future.Await());
 
   float* host_data = reinterpret_cast<float*>(host_tensor.data_ptr());
   for (int i = 0; i < 256; ++i) {
@@ -142,7 +142,7 @@ TEST_F(TorchRawTransferTest, BatchTransferD2HAndH2D) {
 
   // H2D Batch Async
   auto future2 = TransferH2DBatchAsync({host_tensor}, {tpu_tensor}, {}, {}, {});
-  ASSERT_OK(future2.Await().status());
+  ASSERT_OK(future2.Await());
 
   // Verify
   std::vector<float> readback_data(256);

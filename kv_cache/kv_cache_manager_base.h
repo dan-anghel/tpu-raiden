@@ -83,7 +83,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   ~KVCacheManagerBase() override;
 
   // Async on-chip H2D offloads returning PJRT copy future E2E
-  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> H2d(
+  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
       const std::vector<int64_t>& copy_sizes_major_dim = {},
@@ -92,7 +92,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt);
 
   // Async on-chip D2H offloads E2E
-  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> D2h(
+  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
       const std::vector<int64_t>& copy_sizes_major_dim = {},

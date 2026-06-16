@@ -53,10 +53,9 @@ ABSL_FLAG(int64_t, num_blocks, 16,
 namespace tpu_raiden {
 namespace {
 
-absl::Status AwaitAll(
-    absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>& future_or) {
+absl::Status AwaitAll(absl::StatusOr<raiden::PjRtCopyFuture>& future_or) {
   if (!future_or.ok()) return future_or.status();
-  return xla::JoinFutures(absl::MakeSpan(future_or.value())).Await().status();
+  return future_or.value().Await();
 }
 
 // Static initializer to load and initialize libtpu.so in OSS environment.

@@ -80,9 +80,9 @@ TEST(RawTransferCoreTest, AcquireHoldAndRawCopy) {
   std::vector<xla::Future<raiden::BufferHolder>> read_futures = {
       raiden::CreateBufferFuture({std::move(read_future)}, hold.c_hold,
                                  hold.common_hold)};
-  PjRtCopyFuture read_copy_future =
-      xla::JoinFutures(absl::MakeSpan(read_futures));
-  ASSERT_OK(read_copy_future.Await().status());
+  PjRtCopyFuture read_copy_future = raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(read_futures)));
+  ASSERT_OK(read_copy_future.Await());
 
   EXPECT_EQ(read_data[0], 1.1f);
   EXPECT_EQ(read_data[1], 2.2f);
@@ -97,9 +97,9 @@ TEST(RawTransferCoreTest, AcquireHoldAndRawCopy) {
   std::vector<xla::Future<raiden::BufferHolder>> write_futures = {
       raiden::CreateBufferFuture({std::move(write_future)}, hold.c_hold,
                                  hold.common_hold)};
-  PjRtCopyFuture write_copy_future =
-      xla::JoinFutures(absl::MakeSpan(write_futures));
-  ASSERT_OK(write_copy_future.Await().status());
+  PjRtCopyFuture write_copy_future = raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(write_futures)));
+  ASSERT_OK(write_copy_future.Await());
 
   // 5. Read back again using normal ToLiteralSync to verify it actually
   // modified the buffer!
@@ -133,8 +133,8 @@ TEST(RawTransferCoreTest, RaidenFutureBasic) {
   std::vector<xla::Future<raiden::BufferHolder>> read_futures = {
       raiden::CreateBufferFuture({std::move(read_future)}, hold.c_hold,
                                  hold.common_hold)};
-  PjRtCopyFuture read_copy_future =
-      xla::JoinFutures(absl::MakeSpan(read_futures));
+  PjRtCopyFuture read_copy_future = raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(read_futures)));
 
   // Wrap in RaidenFuture
   tpu_raiden::RaidenFuture raiden_future{std::move(read_copy_future)};

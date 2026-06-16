@@ -22,15 +22,6 @@
 
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
-#else
-namespace nanobind {
-struct list {
-  list() = default;
-  ~list() = default;
-  list(const list&) = default;
-  list& operator=(const list&) = default;
-};
-}  // namespace nanobind
 #endif
 #include "core/kv_cache_manager_with_transfer.h"
 
@@ -44,11 +35,14 @@ namespace jax {
 
 struct UnpackedCache {
   std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers;
+#ifndef WITHOUT_PYTHON
   nanobind::list device_arrays;
+#endif
 };
 
 class KVCacheManager : public KVCacheManagerWithTransfer {
  public:
+#ifndef WITHOUT_PYTHON
   // JAX sharded constructor E2E (cache-only by default)
   KVCacheManager(
       nanobind::list device_arrays,
@@ -63,6 +57,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock);
+#endif
 
   // FFI metadata constructor (cache-only by default)
   KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
@@ -72,11 +67,14 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   ~KVCacheManager() override;
 
+#ifndef WITHOUT_PYTHON
   nanobind::list kv_caches() const {
     return device_arrays_.value_or(nanobind::list());
   }
+#endif
 
  private:
+#ifndef WITHOUT_PYTHON
   // Private constructor for sharded (cache-only)
   KVCacheManager(UnpackedCache&& cache,
                  std::optional<int> local_port,
@@ -91,6 +89,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  bool unsafe_skip_buffer_lock);
 
   std::optional<nanobind::list> device_arrays_;
+#endif
 };
 
 }  // namespace jax

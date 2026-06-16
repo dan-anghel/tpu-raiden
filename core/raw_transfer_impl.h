@@ -45,7 +45,7 @@ using ::xla::PjRtCApiBuffer;
 using ::xla::Shape;
 
 // Pure C++ implementation of D2H transfer core
-inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
+inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
     const std::vector<PjRtBuffer*>& src_buffers,
     const std::vector<uint8_t*>& dst_ptrs, const std::vector<size_t>& dst_sizes,
     absl::Span<const int64_t> src_offsets_major_dim,
@@ -55,7 +55,7 @@ inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
   size_t num_shards = src_buffers.size();
 
   if (num_shards == 0) {
-    return xla::Future<BufferHolders>(std::vector<BufferHolder>{});
+    return PjRtCopyFuture(std::vector<BufferHolder>{});
   }
 
   if (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
@@ -111,14 +111,16 @@ inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
         "of tile size (4KB) on device for partial copies");
   }
 
-  std::vector<xla::Future<BufferHolder>> shard_futures_to_join;
-  shard_futures_to_join.reserve(num_shards);
+  std::vector<xla::Future<>> all_futures;
+  BufferHolders holds;
+  holds.reserve(num_shards);
+  all_futures.reserve(num_shards);
+
   for (size_t i = 0; i < num_shards; ++i) {
     uint8_t* dst_data = dst_ptrs[i];
     size_t dst_size = dst_sizes[i];
 
     PjRtBuffer* src_buffer = src_buffers[i];
-    std::vector<xla::Future<>> shard_futures;
 
     BufferHoldAndAlias hold;
     ASSIGN_OR_RETURN(
@@ -133,7 +135,7 @@ inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
       }
       xla::Future<> future =
           hold.CopyRawDeviceToHost(dst_data, 0, physical_size);
-      shard_futures.push_back(std::move(future));
+      all_futures.push_back(std::move(future));
     } else {
       for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
         int64_t src_major_dim_offset = src_offsets_major_dim[j];
@@ -157,16 +159,16 @@ inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
         uint8_t* dst_ptr = dst_data + dst_offset;
         xla::Future<> future =
             hold.CopyRawDeviceToHost(dst_ptr, physical_offset, size_to_copy);
-        shard_futures.push_back(std::move(future));
+        all_futures.push_back(std::move(future));
       }
     }
-    shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-        std::move(shard_futures), hold.c_hold, hold.common_hold));
+    holds.push_back(BufferHolder{hold.c_hold, hold.common_hold,
+                                 /*ext_hold=*/nullptr, /*user_hold=*/nullptr});
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  return PjRtCopyFuture(xla::JoinFutures(all_futures), std::move(holds));
 }
 
-// Pure C++ implementation of H2D transfer core
+// Pure H2D transfer core
 inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
     const std::vector<PjRtBuffer*>& dst_buffers,
     const std::vector<const uint8_t*>& src_ptrs,
@@ -237,14 +239,16 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
         "of tile size (4KB) on device for partial copies");
   }
 
-  std::vector<xla::Future<BufferHolder>> shard_futures_to_join;
-  shard_futures_to_join.reserve(num_shards);
+  std::vector<xla::Future<>> all_futures;
+  BufferHolders holds;
+  holds.reserve(num_shards);
+  all_futures.reserve(num_shards);
+
   for (size_t i = 0; i < num_shards; ++i) {
     const uint8_t* src_data = src_ptrs[i];
     size_t src_size = src_sizes[i];
 
     PjRtBuffer* dst_buffer = dst_buffers[i];
-    std::vector<xla::Future<>> shard_futures;
 
     BufferHoldAndAlias hold;
     ASSIGN_OR_RETURN(
@@ -259,7 +263,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
       }
       xla::Future<> future =
           hold.CopyRawHostToDevice(src_data, 0, physical_size);
-      shard_futures.push_back(std::move(future));
+      all_futures.push_back(std::move(future));
     } else {
       for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
         int64_t src_major_dim_offset = src_offsets_major_dim[j];
@@ -280,13 +284,13 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
         const uint8_t* src_ptr = src_data + src_offset;
         xla::Future<> future =
             hold.CopyRawHostToDevice(src_ptr, physical_offset, size_to_copy);
-        shard_futures.push_back(std::move(future));
+        all_futures.push_back(std::move(future));
       }
     }
-    shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-        std::move(shard_futures), hold.c_hold, hold.common_hold));
+    holds.push_back(BufferHolder{hold.c_hold, hold.common_hold,
+                                 /*ext_hold=*/nullptr, /*user_hold=*/nullptr});
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  return PjRtCopyFuture(xla::JoinFutures(all_futures), std::move(holds));
 }
 
 }  // namespace raiden

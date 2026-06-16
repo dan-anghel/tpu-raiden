@@ -96,8 +96,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager H2d failed: " +
                   std::string(status_or.status().message()));
             }
-            auto joined = xla::JoinFutures(absl::MakeSpan(status_or.value()));
-            return tpu_raiden::RaidenFuture{std::move(joined)};
+            return tpu_raiden::RaidenFuture{std::move(status_or.value())};
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
@@ -116,8 +115,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "KVCacheManager D2h failed: " +
                   std::string(status_or.status().message()));
             }
-            auto joined = xla::JoinFutures(absl::MakeSpan(status_or.value()));
-            return tpu_raiden::RaidenFuture{std::move(joined)};
+            return tpu_raiden::RaidenFuture{std::move(status_or.value())};
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
@@ -186,7 +184,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def("start_read", &KVCacheManager::StartRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("remote_endpoint"),
            nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1,
+           nb::arg("local_host_block_ids") = nb::none())
       .def("complete_read", [](KVCacheManager& self) {
         auto [done_sending, done_recving, failed_recving] =
             self.CompleteReadRaw();
@@ -232,7 +231,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "WeightSynchronizer D2H failed: " +
                   std::string(status_or_future.status().message()));
             }
-            absl::Status status = status_or_future.value().Await().status();
+            absl::Status status = status_or_future.value().Await();
             if (!status.ok()) {
               throw std::runtime_error("WeightSynchronizer D2H copy failed: " +
                                        std::string(status.message()));
@@ -251,7 +250,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
                   "WeightSynchronizer H2dChunk failed: " +
                   std::string(status_or_future.status().message()));
             }
-            absl::Status status = status_or_future.value().Await().status();
+            absl::Status status = status_or_future.value().Await();
             if (!status.ok()) {
               throw std::runtime_error(
                   "WeightSynchronizer H2dChunk copy failed: " +

@@ -671,14 +671,7 @@ void KVCacheManagerWithTransfer::StartRead(
             VLOG(1) << "on_block_received: H2d triggered successfully. Adding "
                        "to h2d_future. Thread: "
                     << std::this_thread::get_id();
-            auto single_future =
-                std::move(future_or)
-                    .value()[layer_idx * num_shards() + shard_idx];
-            std::vector<xla::Future<raiden::BufferHolder>> single_future_vec;
-            single_future_vec.push_back(std::move(single_future));
-            auto pjrt_future =
-                xla::JoinFutures(absl::MakeSpan(single_future_vec));
-            h2d_future->Add(std::move(pjrt_future));
+            h2d_future->Add(std::move(future_or.value()));
             h2d_issued[span_idx] = true;
             h2d_bytes += static_cast<int64_t>(local_spans[span_idx].nbytes);
             h2d_issue_ms +=
@@ -701,7 +694,7 @@ void KVCacheManagerWithTransfer::StartRead(
         if (!h2h_future_or.ok()) {
           ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
         }
-        absl::Status h2h_status = h2h_future_or.value().Await().status();
+        absl::Status h2h_status = h2h_future_or.value().Await();
         if (!h2h_status.ok()) {
           ThrowStatus("BlockTransport pull failed", h2h_status);
         }
@@ -859,8 +852,7 @@ StageResult KVCacheManagerWithTransfer::IssueH2D(
     throw std::runtime_error("Failed to issue H2D transfer: " +
                              std::string(fut_or.status().message()));
   }
-  auto joined_future = xla::JoinFutures(absl::MakeSpan(fut_or.value()));
-  future->Add(std::move(joined_future));
+  future->Add(std::move(fut_or.value()));
   return {.future = std::move(future),
           .host_spans = std::move(host_spans),
           .total_bytes = total_bytes,
@@ -1211,24 +1203,19 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
     }
     ThrowStatus("Failed to issue D2H transfer", d2h_futures_or.status());
   }
-  auto& d2h_futures = d2h_futures_or.value();
-  for (size_t l = 0; l < num_layers(); ++l) {
-    for (size_t s = 0; s < num_shards(); ++s) {
-      size_t flat_idx = l * num_shards() + s;
-      auto& single_future = d2h_futures[flat_idx];
-      std::vector<xla::Future<raiden::BufferHolder>> single_future_vec;
-      single_future_vec.push_back(std::move(single_future));
-      auto pjrt_future = xla::JoinFutures(absl::MakeSpan(single_future_vec));
-      pjrt_future.OnReady(
-          [this, readiness, l, s](
-              const absl::StatusOr<raiden::BufferHolders>& status_or) {
+  auto pjrt_future = std::move(d2h_futures_or.value());
+  pjrt_future.OnReady(
+      [this,
+       readiness](const absl::StatusOr<raiden::BufferHolders>& status_or) {
+        for (size_t l = 0; l < num_layers(); ++l) {
+          for (size_t s = 0; s < num_shards(); ++s) {
             MarkStagingLayerReady(
                 readiness, l, s,
                 status_or.ok() ? absl::OkStatus() : status_or.status());
-          });
-      d2h_future->Add(std::move(pjrt_future));
-    }
-  }
+          }
+        }
+      });
+  d2h_future->Add(std::move(pjrt_future));
   entry->total_bytes = d2h_total_bytes;
   entry->copy_segments = static_cast<int64_t>(d2h_copy.sizes.size());
   const auto issue_ms =
@@ -1238,7 +1225,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   ControlResponseHeader response;
   response.magic = kResponseMagic;
   response.status = 0;
-  response.num_layers = static_cast<uint32_t>(num_layers());
+  response.num_layers = static_cast<uint32_t>(num_layers() * num_shards());
   response.data_port = static_cast<uint32_t>(local_data_port_);
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));

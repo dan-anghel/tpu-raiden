@@ -304,13 +304,12 @@ KVCacheManagerBase::~KVCacheManagerBase() {
   block_manager_.reset();
 }
 
-absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
-KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
-                        const std::vector<int64_t>& dst_offsets_major_dim,
-                        const std::vector<int64_t>& copy_sizes_major_dim,
-                        std::optional<int64_t> slot_idx,
-                        std::optional<size_t> target_layer_idx,
-                        std::optional<size_t> target_shard_idx) {
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::optional<int64_t> slot_idx, std::optional<size_t> target_layer_idx,
+    std::optional<size_t> target_shard_idx) {
   VLOG(1) << "KVCacheManagerBase::H2d called. Thread: "
           << std::this_thread::get_id() << ", slot_idx: "
           << (slot_idx.has_value() ? std::to_string(*slot_idx) : "none")
@@ -434,7 +433,8 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
   }
 
   VLOG(1) << "KVCacheManagerBase::H2d completed. Returning logical futures.";
-  return logical_futures;
+  auto joined_future = xla::JoinFutures(absl::MakeSpan(logical_futures));
+  return raiden::PjRtCopyFuture::FromFuture(std::move(joined_future));
 }
 
 absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
@@ -575,16 +575,18 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   return logical_futures;
 }
 
-absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
-KVCacheManagerBase::D2h(const std::vector<int64_t>& src_offsets_major_dim,
-                        const std::vector<int64_t>& dst_offsets_major_dim,
-                        const std::vector<int64_t>& copy_sizes_major_dim,
-                        std::optional<int64_t> slot_idx,
-                        std::optional<size_t> layer_idx,
-                        std::optional<size_t> shard_idx) {
-  return DispatchD2hChunks(src_offsets_major_dim, dst_offsets_major_dim,
-                           copy_sizes_major_dim, slot_idx, layer_idx,
-                           shard_idx);
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::optional<int64_t> slot_idx, std::optional<size_t> layer_idx,
+    std::optional<size_t> shard_idx) {
+  ASSIGN_OR_RETURN(
+      auto logical_futures,
+      DispatchD2hChunks(src_offsets_major_dim, dst_offsets_major_dim,
+                        copy_sizes_major_dim, slot_idx, layer_idx, shard_idx));
+  auto joined_future = xla::JoinFutures(absl::MakeSpan(logical_futures));
+  return raiden::PjRtCopyFuture::FromFuture(std::move(joined_future));
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -635,7 +637,8 @@ KVCacheManagerBase::D2hAutoAllocate(
       auto futures,
       DispatchD2hChunks(flat_src_offsets, flat_dst_offsets, flat_copy_sizes));
   auto future = xla::JoinFutures(absl::MakeSpan(futures));
-  return std::make_pair(allocated_block_ids, std::move(future));
+  return std::make_pair(allocated_block_ids,
+                        raiden::PjRtCopyFuture::FromFuture(std::move(future)));
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -848,7 +851,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
           std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  return raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
@@ -860,7 +864,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
       DispatchD2hChunks(src_offsets, dst_offsets, copy_sizes,
                         /*slot_idx=*/std::nullopt, /*layer_idx=*/std::nullopt,
                         /*shard_idx=*/std::nullopt, device_id));
-  return xla::JoinFutures(absl::MakeSpan(futures));
+  return raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(futures)));
 }
 
 absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(

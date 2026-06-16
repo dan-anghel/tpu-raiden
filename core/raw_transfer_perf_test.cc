@@ -293,13 +293,13 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(d2h_future_or.value().Await());
 
     auto h2d_future_or =
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(h2d_future_or.value().Await());
   }
 
   // 4. Timed Benchmark Loop (D2H) - Measure each iteration
@@ -313,7 +313,7 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(d2h_future_or.value().Await());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -334,7 +334,7 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(h2d_future_or.value().Await());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -511,13 +511,13 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(d2h_future_or.value().Await());
 
     auto h2d_future_or =
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(h2d_future_or.value().Await());
   }
 
   // 4. Timed Benchmark Loop (D2H) - Measure each iteration
@@ -531,7 +531,7 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(d2h_future_or.status());
-    ASSERT_OK(d2h_future_or.value().Await().status());
+    ASSERT_OK(d2h_future_or.value().Await());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -552,7 +552,7 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
     ASSERT_OK(h2d_future_or.status());
-    ASSERT_OK(h2d_future_or.value().Await().status());
+    ASSERT_OK(h2d_future_or.value().Await());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =

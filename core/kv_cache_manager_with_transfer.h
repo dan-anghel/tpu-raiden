@@ -72,7 +72,7 @@ class TransferFuture {
   void Await() {
     for (auto& future : futures_) {
       if (future.IsValid()) {
-        absl::Status status = future.Await().status();
+        absl::Status status = future.Await();
         if (!status.ok()) {
           throw std::runtime_error("Async transfer failed: " +
                                    std::string(status.message()));

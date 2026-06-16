@@ -211,8 +211,7 @@ KVCacheStoreInternal::LookupAndFetch(
       if (!fut_or.ok()) {
         return fut_or.status();
       }
-      auto joined_future = xla::JoinFutures(absl::MakeSpan(fut_or.value()));
-      futures_to_join.push_back(std::move(joined_future));
+      futures_to_join.push_back(std::move(fut_or.value()));
     } else {
       miss_index = i;
       break;
@@ -226,8 +225,8 @@ KVCacheStoreInternal::LookupAndFetch(
   }
 
   return std::pair<std::vector<bool>, raiden::PjRtCopyFuture>{
-      std::move(hits), raiden::FlattenPjRtFutures(
-                           xla::JoinFutures(absl::MakeSpan(futures_to_join)))};
+      std::move(hits),
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(futures_to_join))};
 }
 
 absl::Status KVCacheStoreInternal::Insert(
@@ -470,23 +469,10 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
       }
       manager.SetExternalHostPointers(host_ptrs, host_sizes);
 
-      ASSIGN_OR_RETURN(auto futures,
+      ASSIGN_OR_RETURN(auto chunk_insert_future,
                        manager.H2d(copy_spec.src_offsets, copy_spec.dst_offsets,
                                    copy_spec.sizes));
-      raiden::PjRtCopyFuture chunk_insert_future =
-          xla::JoinFutures(absl::MakeSpan(futures));
-
-      // To add user hold, we need to map the future
-      chunk_insert_future = chunk_insert_future.Map(
-          [host_buffers](std::vector<raiden::BufferHolder> holders) {
-            // host_buffers is captured by value, keeping it alive until this
-            // map completes. We need to store host_buffers in at least one
-            // holder to be sure it stays alive if holders are moved.
-            if (!holders.empty()) {
-              holders[0].user_hold = host_buffers;
-            }
-            return holders;
-          });
+      chunk_insert_future.AddKeepAlive(host_buffers);
 
       futures_to_join.push_back(chunk_insert_future);
       hits[chunk_idx] = true;

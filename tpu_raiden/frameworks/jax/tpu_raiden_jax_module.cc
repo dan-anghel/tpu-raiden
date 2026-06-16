@@ -28,6 +28,7 @@
 #include "core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
+#include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 
 namespace nb = nanobind;
@@ -90,8 +91,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
               -> absl::StatusOr<tpu_raiden::RaidenFuture> {
             auto res = self.H2d(src_offsets, dst_offsets, copy_sizes);
             if (!res.ok()) return res.status();
-            auto joined_future = xla::JoinFutures(absl::MakeSpan(res.value()));
-            return tpu_raiden::RaidenFuture{std::move(joined_future)};
+            return tpu_raiden::RaidenFuture{std::move(res.value())};
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
@@ -106,8 +106,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
               -> absl::StatusOr<tpu_raiden::RaidenFuture> {
             auto res = self.D2h(src_offsets, dst_offsets, copy_sizes);
             if (!res.ok()) return res.status();
-            auto joined_future = xla::JoinFutures(absl::MakeSpan(res.value()));
-            return tpu_raiden::RaidenFuture{std::move(joined_future)};
+            return tpu_raiden::RaidenFuture{std::move(res.value())};
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
@@ -180,7 +179,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def("start_read", &tpu_raiden::kv_cache::jax::KVCacheManager::StartRead,
            nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
            nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1,
+           nb::arg("local_host_block_ids") = nb::none())
       .def("complete_read",
            [](tpu_raiden::kv_cache::jax::KVCacheManager& self) {
              auto [done_sending, done_recving, failed_recving] =
@@ -217,7 +217,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
                   "Weight sync D2H failed: " +
                   std::string(status_or_future.status().message()));
             }
-            absl::Status status = status_or_future.value().Await().status();
+            absl::Status status = status_or_future.value().Await();
             if (!status.ok()) {
               throw std::runtime_error("Weight sync D2H copy failed: " +
                                        std::string(status.message()));
@@ -233,7 +233,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
                   "Weight sync H2D failed: " +
                   std::string(status_or_future.status().message()));
             }
-            absl::Status status = status_or_future.value().Await().status();
+            absl::Status status = status_or_future.value().Await();
             if (!status.ok()) {
               throw std::runtime_error("Weight sync H2D copy failed: " +
                                        std::string(status.message()));
@@ -254,7 +254,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
                   "Weight sync H2DChunk failed: " +
                   std::string(status_or_future.status().message()));
             }
-            absl::Status status = status_or_future.value().Await().status();
+            absl::Status status = status_or_future.value().Await();
             if (!status.ok()) {
               throw std::runtime_error("Weight sync H2DChunk copy failed: " +
                                        std::string(status.message()));

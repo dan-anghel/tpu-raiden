@@ -90,6 +90,11 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
         val = float(l + 10.0)  # Layer 0=10.0, Layer 1=11.0
         src_tensors[l][sh].fill_(val)
 
+    # Force execution of fill_ on source tensors to ensure TPU memory is updated
+    for l in range(self.num_layers):
+      for sh in range(self.num_shards):
+        _ = src_tensors[l][sh].cpu()
+
     # Recreate/Instantiate ws_source to capture filled buffers!
     ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)
     self.assertIsNotNone(ws_source.local_port)
@@ -117,6 +122,11 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
       for sh in range(self.num_shards):
         val = float(l + 20.0)  # Layer 0=20.0, Layer 1=21.0
         src_tensors[l][sh].fill_(val)
+
+    # Force execution of fill_ on source tensors to ensure TPU memory is updated
+    for l in range(self.num_layers):
+      for sh in range(self.num_shards):
+        _ = src_tensors[l][sh].cpu()
 
     # Recreate ws_source to capture new buffers!
     ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)

@@ -35,7 +35,7 @@ void AwaitAll(nb::object futures) {
   if (nb::isinstance<PjRtCopyFuture>(futures)) {
     PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(futures);
     nb::gil_scoped_release release;
-    absl::Status status = future.Await().status();
+    absl::Status status = future.Await();
     if (!status.ok()) {
       throw std::runtime_error(std::string("Async copy failed: ") +
                                std::string(status.message()));
@@ -45,7 +45,7 @@ void AwaitAll(nb::object futures) {
   for (nb::handle item : futures) {
     PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(item);
     nb::gil_scoped_release release;
-    absl::Status status = future.Await().status();
+    absl::Status status = future.Await();
     if (!status.ok()) {
       throw std::runtime_error(std::string("Async copy failed: ") +
                                std::string(status.message()));
@@ -79,7 +79,7 @@ NB_MODULE(_torch_raw_transfer, m) {
           .def("Await",
                [](PjRtCopyFuture& future) {
                  nb::gil_scoped_release release;
-                 absl::Status status = future.Await().status();
+                 absl::Status status = future.Await();
                  if (!status.ok()) {
                    throw std::runtime_error(std::string("Async copy failed: ") +
                                             std::string(status.message()));
@@ -88,7 +88,7 @@ NB_MODULE(_torch_raw_transfer, m) {
           .def("wait",
                [](PjRtCopyFuture& future) {
                  nb::gil_scoped_release release;
-                 absl::Status status = future.Await().status();
+                 absl::Status status = future.Await();
                  if (!status.ok()) {
                    throw std::runtime_error(std::string("Async copy failed: ") +
                                             std::string(status.message()));
@@ -143,7 +143,7 @@ NB_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferD2HAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await().status();
+        absl::Status status = future.Await();
         if (!status.ok()) {
           throw std::runtime_error(std::string("Async copy failed: ") +
                                    std::string(status.message()));
@@ -163,7 +163,7 @@ NB_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferH2DAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await().status();
+        absl::Status status = future.Await();
         if (!status.ok()) {
           throw std::runtime_error(std::string("Async copy failed: ") +
                                    std::string(status.message()));
@@ -196,7 +196,7 @@ NB_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferD2HBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await().status();
+        absl::Status status = future.Await();
         if (!status.ok()) {
           throw std::runtime_error(std::string("Async copy failed: ") +
                                    std::string(status.message()));
@@ -216,7 +216,7 @@ NB_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferH2DBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await().status();
+        absl::Status status = future.Await();
         if (!status.ok()) {
           throw std::runtime_error(std::string("Async copy failed: ") +
                                    std::string(status.message()));

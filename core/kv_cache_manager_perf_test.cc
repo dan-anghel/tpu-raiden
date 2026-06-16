@@ -51,6 +51,7 @@
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "xla/types.h"
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/tpu_pjrt_manager.h"
@@ -65,10 +66,9 @@ ABSL_FLAG(int64_t, num_blocks, 16,
 namespace tpu_raiden {
 namespace {
 
-absl::Status AwaitAll(
-    absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>& future_or) {
+absl::Status AwaitAll(absl::StatusOr<raiden::PjRtCopyFuture>& future_or) {
   if (!future_or.ok()) return future_or.status();
-  return xla::JoinFutures(absl::MakeSpan(future_or.value())).Await().status();
+  return future_or.value().Await();
 }
 
 // Static initializer to load and initialize libtpu.so in OSS environment.
@@ -571,9 +571,9 @@ TEST_P(ParameterizedKVCacheManagerPerfTest, ScenarioA_FragmentedBatch) {
   int64_t num_blocks = absl::GetFlag(FLAGS_num_blocks);
   switch (params.primitive_type) {
     case xla::BF16:
-      RunBenchmarkScenarioA<uint16_t>(manager_, devices_, params.primitive_type,
-                                      params.type_label, num_layers,
-                                      num_blocks);
+      RunBenchmarkScenarioA<xla::bfloat16>(
+          manager_, devices_, params.primitive_type, params.type_label,
+          num_layers, num_blocks);
       break;
     case xla::F32:
       RunBenchmarkScenarioA<float>(manager_, devices_, params.primitive_type,
@@ -584,8 +584,9 @@ TEST_P(ParameterizedKVCacheManagerPerfTest, ScenarioA_FragmentedBatch) {
                                      params.type_label, num_layers, num_blocks);
       break;
     case xla::F8E4M3FN:
-      RunBenchmarkScenarioA<uint8_t>(manager_, devices_, params.primitive_type,
-                                     params.type_label, num_layers, num_blocks);
+      RunBenchmarkScenarioA<xla::float8_e4m3fn>(
+          manager_, devices_, params.primitive_type, params.type_label,
+          num_layers, num_blocks);
       break;
     default:
       FAIL() << "Unsupported primitive type: " << params.primitive_type;
@@ -599,9 +600,9 @@ TEST_P(ParameterizedKVCacheManagerPerfTest, ScenarioB_BakedInTensor) {
   int64_t num_blocks = absl::GetFlag(FLAGS_num_blocks);
   switch (params.primitive_type) {
     case xla::BF16:
-      RunBenchmarkScenarioB<uint16_t>(manager_, devices_, params.primitive_type,
-                                      params.type_label, num_layers,
-                                      num_blocks);
+      RunBenchmarkScenarioB<xla::bfloat16>(
+          manager_, devices_, params.primitive_type, params.type_label,
+          num_layers, num_blocks);
       break;
     case xla::F32:
       RunBenchmarkScenarioB<float>(manager_, devices_, params.primitive_type,
@@ -612,8 +613,9 @@ TEST_P(ParameterizedKVCacheManagerPerfTest, ScenarioB_BakedInTensor) {
                                      params.type_label, num_layers, num_blocks);
       break;
     case xla::F8E4M3FN:
-      RunBenchmarkScenarioB<uint8_t>(manager_, devices_, params.primitive_type,
-                                     params.type_label, num_layers, num_blocks);
+      RunBenchmarkScenarioB<xla::float8_e4m3fn>(
+          manager_, devices_, params.primitive_type, params.type_label,
+          num_layers, num_blocks);
       break;
     default:
       FAIL() << "Unsupported primitive type: " << params.primitive_type;

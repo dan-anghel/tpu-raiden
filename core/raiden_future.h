@@ -39,7 +39,7 @@ namespace tpu_raiden {
 struct RaidenFuture {
   raiden::PjRtCopyFuture future;
 
-  absl::Status Await() { return future.Await().status(); }
+  absl::Status Await() { return future.Await(); }
 
   bool IsReady() const { return future.IsReady(); }
 };

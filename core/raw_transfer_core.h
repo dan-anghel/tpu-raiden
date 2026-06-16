@@ -25,6 +25,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/layout.h"
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
@@ -36,6 +37,7 @@
 #include "xla/pjrt/raw_buffer.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
+#include "xla/tsl/concurrency/async_value.h"
 #include "xla/tsl/concurrency/ref_count.h"
 
 namespace raiden {
@@ -208,7 +210,6 @@ struct BufferHolder {
 };
 
 using BufferHolders = std::vector<BufferHolder>;
-using PjRtCopyFuture = xla::Future<BufferHolders>;
 
 inline xla::Future<BufferHolder> CreateBufferFuture(
     std::vector<xla::Future<>> futures,
@@ -245,6 +246,96 @@ inline xla::Future<BufferHolders> FlattenPjRtFutures(
     }
     return result;
   });
+}
+
+struct PjRtCopyFuture {
+  xla::Future<> future;
+  BufferHolders holds;
+  std::shared_ptr<void> keep_alive;
+
+  PjRtCopyFuture() = default;
+  PjRtCopyFuture(xla::Future<> f, BufferHolders h,
+                 std::shared_ptr<void> k = nullptr)
+      : future(std::move(f)), holds(std::move(h)), keep_alive(std::move(k)) {}
+
+  explicit PjRtCopyFuture(BufferHolders h)
+      : future(xla::Future<>()), holds(std::move(h)) {}
+
+  template <typename T>
+  static PjRtCopyFuture FromFuture(xla::Future<T> f) {
+    auto ready_future = f.GetReadyFuture();
+    auto keep_alive = std::make_shared<xla::Future<T>>(std::move(f));
+    return PjRtCopyFuture(std::move(ready_future), {}, std::move(keep_alive));
+  }
+
+  bool IsValid() const { return future.IsValid(); }
+
+  bool IsReady() const {
+    if (!future.IsValid()) return true;
+    return future.IsReady();
+  }
+
+  template <typename F>
+  void OnReady(F&& f) {
+    if (!future.IsValid()) {
+      std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
+      return;
+    }
+    future.OnReady([holds = holds, keep_alive = keep_alive,
+                    f = std::forward<F>(f)](absl::Status status) mutable {
+      if (status.ok()) {
+        std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
+      } else {
+        std::forward<F>(f)(absl::StatusOr<BufferHolders>(status));
+      }
+    });
+  }
+
+  absl::Status Await() {
+    if (!future.IsValid()) return absl::OkStatus();
+    future.BlockUntilReady(
+        static_cast<void (*)(tsl::AsyncValue*)>(tsl::BlockUntilReady));
+    tsl::AsyncValue* av = future.async_value();
+    if (av->IsError()) {
+      return av->GetError();
+    }
+    return absl::OkStatus();
+  }
+
+  void AddKeepAlive(std::shared_ptr<void> k) {
+    if (!k) return;
+    if (!keep_alive) {
+      keep_alive = std::move(k);
+    } else {
+      struct CombinedKeepAlive {
+        std::shared_ptr<void> old_ka;
+        std::shared_ptr<void> new_ka;
+      };
+      keep_alive = std::make_shared<CombinedKeepAlive>(
+          CombinedKeepAlive{std::move(keep_alive), std::move(k)});
+    }
+  }
+};
+
+inline PjRtCopyFuture JoinPjRtCopyFutures(
+    absl::Span<const PjRtCopyFuture> futures) {
+  std::vector<xla::Future<>> sub_futures;
+  BufferHolders combined_holds;
+  PjRtCopyFuture joined;
+  for (const auto& f : futures) {
+    if (f.future.IsValid()) {
+      sub_futures.push_back(f.future);
+    }
+    for (const auto& h : f.holds) {
+      combined_holds.push_back(h);
+    }
+    if (f.keep_alive) {
+      joined.AddKeepAlive(f.keep_alive);
+    }
+  }
+  joined.future = xla::JoinFutures(sub_futures);
+  joined.holds = std::move(combined_holds);
+  return joined;
 }
 
 }  // namespace raiden

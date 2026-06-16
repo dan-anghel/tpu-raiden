@@ -388,7 +388,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
           std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  return raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dChunk(
@@ -446,7 +447,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dChunk(
   std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
   shard_futures_to_join.push_back(raiden::CreateBufferFuture(
       std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  return raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
@@ -496,7 +498,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
           std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  return raiden::PjRtCopyFuture::FromFuture(
+      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
 }
 
 absl::Status WeightSynchronizerBase::PushWeights(
@@ -508,7 +511,7 @@ absl::Status WeightSynchronizerBase::PushWeights(
 
   // 1. Automatically copy latest weights from Device TPU HBM onto Host CPU!
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
-  TF_RETURN_IF_ERROR(d2h_future.Await().status());
+  TF_RETURN_IF_ERROR(d2h_future.Await());
 
   // 2. Run high-speed parallel sockets H2H write to push host weights to peers!
   std::vector<int> weights_block_id = {0};
@@ -523,7 +526,7 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
     const tpu_raiden::weight_sync::StartTransferRequest& request) {
   const auto& schedules = request.shard_push_schedules();
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
-  TF_RETURN_IF_ERROR(d2h_future.Await().status());
+  TF_RETURN_IF_ERROR(d2h_future.Await());
 
   for (size_t i = 0; i < num_shards_; ++i) {
     auto it = schedules.find(static_cast<int32_t>(i));
@@ -570,7 +573,7 @@ absl::Status WeightSynchronizerBase::PullWeights(const std::string& source) {
   // 2. Automatically copy the received staging weights onto local Device TPU
   // HBM!
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
-  TF_RETURN_IF_ERROR(h2d_future.Await().status());
+  TF_RETURN_IF_ERROR(h2d_future.Await());
 
   return absl::OkStatus();
 }
@@ -599,7 +602,7 @@ absl::Status WeightSynchronizerBase::OnDataReceived() {
   // Automatically copy all received staging weights from Host onto Device TPU
   // HBM!
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
-  TF_RETURN_IF_ERROR(h2d_future.Await().status());
+  TF_RETURN_IF_ERROR(h2d_future.Await());
   return absl::OkStatus();
 }
 

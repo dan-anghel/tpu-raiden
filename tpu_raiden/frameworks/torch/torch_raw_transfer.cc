@@ -23,6 +23,8 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "absl/types/span.h"
+#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
@@ -151,12 +153,12 @@ void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
   (void)role;
 }
 
-xla::Future<BufferHolder> IssueD2HCopy(
-    xla::PjRtBuffer* src_buffer, uint8_t* dst_data, size_t dst_size,
-    const std::vector<int64_t>& src_offsets_major_dim,
-    const std::vector<int64_t>& dst_offsets_major_dim,
-    const std::vector<int64_t>& copy_sizes_major_dim,
-    std::shared_ptr<void> user_hold = nullptr) {
+PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
+                            size_t dst_size,
+                            const std::vector<int64_t>& src_offsets_major_dim,
+                            const std::vector<int64_t>& dst_offsets_major_dim,
+                            const std::vector<int64_t>& copy_sizes_major_dim,
+                            std::shared_ptr<void> user_hold = nullptr) {
   const bool is_partial = tpu_raiden::IsPartialCopy(
       src_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -185,16 +187,18 @@ xla::Future<BufferHolder> IssueD2HCopy(
     futures.push_back(hold.CopyRawDeviceToHost(
         dst_data + chunk.dst_offset, chunk.src_offset, chunk.size_bytes));
   }
-  return CreateBufferFuture(std::move(futures), hold.c_hold, hold.common_hold,
-                            /*ext_hold=*/nullptr, std::move(user_hold));
+  return PjRtCopyFuture(
+      xla::JoinFutures(absl::MakeSpan(futures)),
+      {BufferHolder{hold.c_hold, hold.common_hold, /*ext_hold=*/nullptr,
+                    std::move(user_hold)}});
 }
 
-xla::Future<BufferHolder> IssueH2DCopy(
-    const uint8_t* src_data, size_t src_size, xla::PjRtBuffer* dst_buffer,
-    const std::vector<int64_t>& src_offsets_major_dim,
-    const std::vector<int64_t>& dst_offsets_major_dim,
-    const std::vector<int64_t>& copy_sizes_major_dim,
-    std::shared_ptr<void> user_hold = nullptr) {
+PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,
+                            xla::PjRtBuffer* dst_buffer,
+                            const std::vector<int64_t>& src_offsets_major_dim,
+                            const std::vector<int64_t>& dst_offsets_major_dim,
+                            const std::vector<int64_t>& copy_sizes_major_dim,
+                            std::shared_ptr<void> user_hold = nullptr) {
   const bool is_partial = tpu_raiden::IsPartialCopy(
       dst_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -223,8 +227,10 @@ xla::Future<BufferHolder> IssueH2DCopy(
     futures.push_back(hold.CopyRawHostToDevice(
         src_data + chunk.src_offset, chunk.dst_offset, chunk.size_bytes));
   }
-  return CreateBufferFuture(std::move(futures), hold.c_hold, hold.common_hold,
-                            /*ext_hold=*/nullptr, std::move(user_hold));
+  return PjRtCopyFuture(
+      xla::JoinFutures(absl::MakeSpan(futures)),
+      {BufferHolder{hold.c_hold, hold.common_hold, /*ext_hold=*/nullptr,
+                    std::move(user_hold)}});
 }
 }  // namespace
 
@@ -238,7 +244,8 @@ PjRtCopyFuture TransferD2HBatchAsync(
   }
   tpu_raiden::ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
                                   copy_sizes_major_dim);
-  std::vector<xla::Future<BufferHolder>> futures;
+  std::vector<PjRtCopyFuture> futures;
+  futures.reserve(src_arrs.size());
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(dst_arrs[i], "Destination");
     xla::PjRtBuffer* src_buffer = UnpackTorchTensor(src_arrs[i]);
@@ -253,7 +260,7 @@ PjRtCopyFuture TransferD2HBatchAsync(
         dst_arrs[i].nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
         copy_sizes_major_dim, std::move(torch_holds)));
   }
-  return xla::JoinFutures(absl::MakeSpan(futures));
+  return JoinPjRtCopyFutures(absl::MakeSpan(futures));
 }
 
 PjRtCopyFuture TransferH2DBatchAsync(
@@ -266,7 +273,8 @@ PjRtCopyFuture TransferH2DBatchAsync(
   }
   tpu_raiden::ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
                                   copy_sizes_major_dim);
-  std::vector<xla::Future<BufferHolder>> futures;
+  std::vector<PjRtCopyFuture> futures;
+  futures.reserve(src_arrs.size());
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(src_arrs[i], "Source");
     xla::PjRtBuffer* dst_buffer = UnpackTorchTensor(dst_arrs[i]);
@@ -281,7 +289,7 @@ PjRtCopyFuture TransferH2DBatchAsync(
         src_arrs[i].nbytes(), dst_buffer, src_offsets_major_dim,
         dst_offsets_major_dim, copy_sizes_major_dim, std::move(torch_holds)));
   }
-  return xla::JoinFutures(absl::MakeSpan(futures));
+  return JoinPjRtCopyFutures(absl::MakeSpan(futures));
 }
 
 PjRtCopyFuture TransferD2HAsync(
@@ -337,24 +345,24 @@ std::shared_ptr<RawHostBuffer> PreparedTorchRawTransfer::HostBuffer() const {
 PjRtCopyFuture PreparedTorchRawTransfer::D2HAsync() {
   xla::Future<> copy_future =
       hold_.CopyRawDeviceToHost(host_buffer_->MutableData(), 0, physical_size_);
-  std::vector<xla::Future<BufferHolder>> futures = {CreateBufferFuture(
-      {std::move(copy_future)}, hold_.c_hold, hold_.common_hold,
-      /*ext_hold=*/nullptr, shared_from_this())};
-  return xla::JoinFutures(absl::MakeSpan(futures));
+  return PjRtCopyFuture(
+      std::move(copy_future),
+      {BufferHolder{hold_.c_hold, hold_.common_hold, /*ext_hold=*/nullptr,
+                    shared_from_this()}});
 }
 
 PjRtCopyFuture PreparedTorchRawTransfer::H2DAsync() {
   xla::Future<> copy_future =
       hold_.CopyRawHostToDevice(host_buffer_->Data(), 0, physical_size_);
-  std::vector<xla::Future<BufferHolder>> futures = {CreateBufferFuture(
-      {std::move(copy_future)}, hold_.c_hold, hold_.common_hold,
-      /*ext_hold=*/nullptr, shared_from_this())};
-  return xla::JoinFutures(absl::MakeSpan(futures));
+  return PjRtCopyFuture(
+      std::move(copy_future),
+      {BufferHolder{hold_.c_hold, hold_.common_hold, /*ext_hold=*/nullptr,
+                    shared_from_this()}});
 }
 
 void PreparedTorchRawTransfer::D2H() {
   PjRtCopyFuture future = D2HAsync();
-  absl::Status status = future.Await().status();
+  absl::Status status = future.Await();
   if (!status.ok()) {
     ThrowStatus("D2H copy failed", status);
   }
@@ -362,7 +370,7 @@ void PreparedTorchRawTransfer::D2H() {
 
 void PreparedTorchRawTransfer::H2D() {
   PjRtCopyFuture future = H2DAsync();
-  absl::Status status = future.Await().status();
+  absl::Status status = future.Await();
   if (!status.ok()) {
     ThrowStatus("H2D copy failed", status);
   }
