@@ -127,7 +127,7 @@ struct BufferHoldAndAlias {
   bool is_common_buffer = false;
 
   // For CommonPjRtBuffer:
-  tsl::RCReference<xla::CommonPjRtRawBuffer> common_raw_buffer;
+  xla::PjRtRawBufferRef common_raw_buffer;
   std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> common_hold;
 
   // For PjRtCApiBuffer:
