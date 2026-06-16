@@ -34,7 +34,7 @@ namespace kv_cache {
 // concurrent access.
 class LogicalBlockManager {
  public:
-  using EntityId = int64_t;
+
 
   // Constructs a LogicalBlockManager managing a total of `num_blocks` blocks.
   // Block IDs are indexed from 0 to num_blocks - 1.
@@ -46,7 +46,6 @@ class LogicalBlockManager {
   // insufficient blocks are available (even after attempting LRU eviction of
   // unlocked blocks).
   absl::StatusOr<std::vector<int>> Allocate(int num_blocks_to_allocate,
-                                            EntityId entity_id,
                                             bool lock = false);
 
   // Unlocks the specified blocks, making them eligible for LRU eviction if
@@ -60,7 +59,7 @@ class LogicalBlockManager {
   // State inspection methods.
   bool IsAllocated(int block_id) const;
   bool IsLocked(int block_id) const;
-  std::optional<EntityId> GetEntityId(int block_id) const;
+
 
   int total_blocks() const { return total_blocks_; }
   int num_free_blocks() const;
@@ -71,7 +70,7 @@ class LogicalBlockManager {
   struct BlockState {
     bool is_allocated = false;
     bool is_locked = false;
-    std::optional<EntityId> entity_id = std::nullopt;
+
     uint64_t last_access_counter = 0;
   };
 

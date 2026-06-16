@@ -115,47 +115,45 @@ NB_MODULE(_tpu_raiden_jax, m) {
           "d2h_auto_allocate",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
              const std::vector<int64_t>& src_offsets,
-             const std::vector<int64_t>& copy_sizes, int64_t entity_id)
+             const std::vector<int64_t>& copy_sizes)
               -> absl::StatusOr<
                   std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.D2hAutoAllocate(src_offsets, copy_sizes, entity_id);
+            auto res = self.D2hAutoAllocate(src_offsets, copy_sizes);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
-          nb::arg("copy_sizes_major_dim") = nb::list(),
-          nb::arg("entity_id") = 0)
+          nb::arg("copy_sizes_major_dim") = nb::list())
 
       .def(
           "h2h_write",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids, int64_t entity_id)
+             const std::vector<int>& src_block_ids)
               -> absl::StatusOr<
                   std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.H2hWrite(peer, src_block_ids, /*dst_block_ids=*/{},
-                                     entity_id);
+            auto res = self.H2hWrite(peer, src_block_ids);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0)
+          nb::arg("peer"), nb::arg("src_block_ids"))
 
       .def(
           "h2h_read",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids, int64_t entity_id)
+             const std::vector<int>& src_block_ids)
               -> absl::StatusOr<
                   std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.H2hRead(peer, src_block_ids, entity_id);
+            auto res = self.H2hRead(peer, src_block_ids);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0)
+          nb::arg("peer"), nb::arg("src_block_ids"))
 
       .def("local_port", &tpu_raiden::kv_cache::KVCacheManagerBase::local_port)
       .def("get_host_pointer",

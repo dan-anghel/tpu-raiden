@@ -30,7 +30,7 @@ LogicalBlockManager::LogicalBlockManager(int num_blocks)
     : total_blocks_(num_blocks), blocks_(num_blocks) {}
 
 absl::StatusOr<std::vector<int>> LogicalBlockManager::Allocate(
-    int num_blocks_to_allocate, EntityId entity_id, bool lock) {
+    int num_blocks_to_allocate, bool lock) {
   if (num_blocks_to_allocate <= 0) {
     return absl::InvalidArgumentError(absl::StrCat(
         "Requested blocks must be > 0, got ", num_blocks_to_allocate));
@@ -93,7 +93,6 @@ absl::StatusOr<std::vector<int>> LogicalBlockManager::Allocate(
       int evict_id = evictable_block_ids[i];
       // Clear previous allocation state before reuse.
       blocks_[evict_id].is_allocated = false;
-      blocks_[evict_id].entity_id = std::nullopt;
       allocated_block_ids.push_back(evict_id);
     }
   }
@@ -105,7 +104,6 @@ absl::StatusOr<std::vector<int>> LogicalBlockManager::Allocate(
   for (int block_id : allocated_block_ids) {
     blocks_[block_id].is_allocated = true;
     blocks_[block_id].is_locked = lock;
-    blocks_[block_id].entity_id = entity_id;
     blocks_[block_id].last_access_counter = access_counter_;
   }
 
@@ -157,11 +155,7 @@ bool LogicalBlockManager::IsLocked(int block_id) const {
   return blocks_[block_id].is_locked;
 }
 
-std::optional<LogicalBlockManager::EntityId> LogicalBlockManager::GetEntityId(
-    int block_id) const {
-  if (block_id < 0 || block_id >= total_blocks_) return std::nullopt;
-  return blocks_[block_id].entity_id;
-}
+
 
 int LogicalBlockManager::num_free_blocks() const {
   int count = 0;

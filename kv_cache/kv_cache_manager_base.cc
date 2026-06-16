@@ -579,7 +579,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::D2hAutoAllocate(
     const std::vector<int64_t>& src_offsets_major_dim,
-    const std::vector<int64_t>& copy_sizes_major_dim, int64_t entity_id) {
+    const std::vector<int64_t>& copy_sizes_major_dim) {
   size_t num_chunks = src_offsets_major_dim.size();
   if (num_chunks != copy_sizes_major_dim.size()) {
     return absl::InvalidArgumentError(
@@ -598,7 +598,7 @@ KVCacheManagerBase::D2hAutoAllocate(
   }
 
   ASSIGN_OR_RETURN(std::vector<int> allocated_block_ids,
-                   AllocateBlocks(total_blocks_to_allocate, entity_id));
+                   AllocateBlocks(total_blocks_to_allocate));
 
   std::vector<int64_t> flat_src_offsets;
   std::vector<int64_t> flat_dst_offsets;
@@ -632,10 +632,10 @@ absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hWrite(std::string peer,
                              const std::vector<int>& src_block_ids,
                              const std::vector<int>& dst_block_ids,
-                             int64_t entity_id, uint64_t uuid) {
+                             uint64_t uuid) {
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      H2hWriteDirect(peer, src_block_ids, dst_block_ids, entity_id, uuid));
+      H2hWriteDirect(peer, src_block_ids, dst_block_ids, uuid));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
@@ -643,10 +643,9 @@ KVCacheManagerBase::H2hWrite(std::string peer,
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hRead(std::string peer,
-                            const std::vector<int>& src_block_ids,
-                            int64_t entity_id) {
+                            const std::vector<int>& src_block_ids) {
   ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
-                   H2hReadDirect(peer, src_block_ids, entity_id));
+                   H2hReadDirect(peer, src_block_ids));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));

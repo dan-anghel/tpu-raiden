@@ -114,12 +114,12 @@ uint8_t* KVCacheStoreInternal::GetBlockHostPointer(size_t layer_idx,
 }
 
 absl::StatusOr<std::vector<int>> KVCacheStoreInternal::AllocateBlocks(
-    size_t num_blocks, int64_t entity_id, uint64_t uuid) {
+    size_t num_blocks, uint64_t uuid) {
   absl::MutexLock lock(mutex_);
   if (!block_manager_) {
     return absl::FailedPreconditionError("Block manager is not initialized");
   }
-  return block_manager_->Allocate(num_blocks, entity_id);
+  return block_manager_->Allocate(num_blocks);
 }
 
 absl::Status KVCacheStoreInternal::OnSingleBlockReceived(int block_id,
@@ -263,11 +263,10 @@ absl::Status KVCacheStoreInternal::Insert(
     blocks_per_chunk.push_back(needed);
   }
 
-  int64_t entity_id = next_entity_id_++;
   {
     absl::MutexLock lock(mutex_);
     ASSIGN_OR_RETURN(store_block_ids,
-                     block_manager_->Allocate(total_needed_blocks, entity_id));
+                     block_manager_->Allocate(total_needed_blocks));
   }
 
   size_t shard_alloc_size = total_needed_blocks * bytes_per_block;

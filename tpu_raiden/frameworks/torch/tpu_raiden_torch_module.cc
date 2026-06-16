@@ -122,10 +122,9 @@ NB_MODULE(_tpu_raiden_torch, m) {
           "D2hAutoAllocate",
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
-             const std::vector<int64_t>& copy_sizes_major_dim,
-             int64_t entity_id) {
+             const std::vector<int64_t>& copy_sizes_major_dim) {
             auto status_or = self.D2hAutoAllocate(
-                src_offsets_major_dim, copy_sizes_major_dim, entity_id);
+                src_offsets_major_dim, copy_sizes_major_dim);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager D2hAutoAllocate failed: " +
@@ -136,14 +135,13 @@ NB_MODULE(_tpu_raiden_torch, m) {
                 tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
-          nb::arg("entity_id") = 0)
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
       .def(
           "H2hWrite",
           [](KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids, int64_t entity_id) {
-            auto status_or = self.H2hWrite(std::move(peer), src_block_ids,
-                                           /*dst_block_ids=*/{}, entity_id);
+             const std::vector<int>& src_block_ids) {
+            auto status_or =
+                self.H2hWrite(std::move(peer), src_block_ids);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager H2hWrite failed: " +
@@ -153,14 +151,14 @@ NB_MODULE(_tpu_raiden_torch, m) {
                 status_or.value().first,
                 tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0,
+          nb::arg("peer"), nb::arg("src_block_ids"),
           nb::call_guard<nb::gil_scoped_release>())
       .def(
           "H2hRead",
           [](KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids, int64_t entity_id) {
+             const std::vector<int>& src_block_ids) {
             auto status_or =
-                self.H2hRead(std::move(peer), src_block_ids, entity_id);
+                self.H2hRead(std::move(peer), src_block_ids);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager H2hRead failed: " +
@@ -170,7 +168,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
                 status_or.value().first,
                 tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0,
+          nb::arg("peer"), nb::arg("src_block_ids"),
           nb::call_guard<nb::gil_scoped_release>())
       .def_prop_ro("local_port", &KVCacheManager::local_port)
       .def_prop_ro("num_layers", &KVCacheManager::num_layers)

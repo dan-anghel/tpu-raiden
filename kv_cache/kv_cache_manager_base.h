@@ -101,19 +101,15 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // Auto-allocating offloads E2E
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
-                  const std::vector<int64_t>& copy_sizes_major_dim = {},
-                  int64_t entity_id = 0);
+                  const std::vector<int64_t>& copy_sizes_major_dim = {});
 
   // Symmetrical H2H writes E2E
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
       std::string peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, int64_t entity_id = 0,
-      uint64_t uuid = 0);
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
 
-  // Symmetrical H2H reads E2E
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
-      std::string peer, const std::vector<int>& src_block_ids,
-      int64_t entity_id = 0);
+      std::string peer, const std::vector<int>& src_block_ids);
 
   absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
       std::string peer, const std::vector<int>& src_block_ids,
@@ -210,8 +206,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   // Override parent AllocateBlocks using our dynamic block manager!
   absl::StatusOr<std::vector<int>> AllocateBlocks(
-      size_t num_blocks, int64_t entity_id, uint64_t uuid = 0) override {
-    return block_manager_->Allocate(num_blocks, entity_id, /*lock=*/true);
+      size_t num_blocks, uint64_t uuid = 0) override {
+    return block_manager_->Allocate(num_blocks, /*lock=*/true);
   }
 
   absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>

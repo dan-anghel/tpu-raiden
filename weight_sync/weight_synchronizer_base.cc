@@ -566,8 +566,7 @@ absl::Status WeightSynchronizerBase::PullWeights(const std::string& source) {
 
   // 1. Run high-speed parallel sockets H2H read to pull weights from source!
   std::vector<int> weights_block_id = {0};
-  TF_RETURN_IF_ERROR(
-      H2hReadDirect(source, weights_block_id, /*entity_id=*/0).status());
+  TF_RETURN_IF_ERROR(H2hReadDirect(source, weights_block_id).status());
 
   // 2. Automatically copy the received staging weights onto local Device TPU
   // HBM!

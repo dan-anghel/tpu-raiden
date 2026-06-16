@@ -297,7 +297,6 @@ class KVCacheManagerTest(parameterized.TestCase):
     block_ids, future = manager.d2h_auto_allocate(
         src_offsets_major_dim=src_offsets,
         copy_sizes_major_dim=sizes,
-        entity_id=101,
     )
     self.assertLen(block_ids, 1)
     self.assertEqual(block_ids[0], 0)
@@ -375,7 +374,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     # Push block ID 2 (slices 4:6) to remote peer server.
     peer = f"127.0.0.1:{port}"
     allocated_ids, future = src_manager.h2h_write(
-        peer=peer, src_block_ids=[4, 5], entity_id=202
+        peer=peer, src_block_ids=[4, 5]
     )
     self.assertEqual(allocated_ids, [0, 1])
     future.Await()
@@ -451,7 +450,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     peer = f"127.0.0.1:{port}"
     # Pull remote block ID 1 (slices 2:4) into local host memory.
     allocated_ids, future = local_manager.h2h_read(
-        peer=peer, src_block_ids=[2, 3], entity_id=303
+        peer=peer, src_block_ids=[2, 3]
     )
     self.assertEqual(allocated_ids, [0, 1])
     future.Await()
@@ -594,7 +593,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     peer = f"127.0.0.1:{port}"
     allocated_ids, future = local_manager.h2h_read(
-        peer=peer, src_block_ids=[2, 3], entity_id=404
+        peer=peer, src_block_ids=[2, 3]
     )
     self.assertEqual(allocated_ids, [0, 1])
     future.Await()

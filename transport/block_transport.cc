@@ -362,8 +362,7 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
                           ParseMajorOrder(header.major_order));
     TF_ASSIGN_OR_RETURN(
         std::vector<int> allocated_ids,
-        delegate_->AllocateBlocks(header.num_blocks, /*entity_id=*/0,
-                                  header.uuid));
+        delegate_->AllocateBlocks(header.num_blocks, header.uuid));
 
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
                                     header.num_blocks * sizeof(int)));
@@ -701,7 +700,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     allocated_ids = local_block_ids;
   } else {
     TF_ASSIGN_OR_RETURN(allocated_ids, delegate_->AllocateBlocks(
-                                             local_blocks, /*entity_id=*/0));
+                                             local_blocks));
   }
 
   int P = parallelism;

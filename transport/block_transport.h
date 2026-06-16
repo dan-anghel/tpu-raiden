@@ -37,9 +37,8 @@ enum class MajorOrder : uint8_t {
   kBlockMajor = 1,
 };
 
-using BlockReceivedCallback =
-    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
-                               int block_id, size_t size_bytes)>;
+using BlockReceivedCallback = std::function<absl::Status(
+    size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
 
 // Delegate interface for BlockTransport to access layers/shards host memory
 // and allocate blocks on the receiver dynamically.
@@ -48,7 +47,7 @@ class BlockTransportDelegate {
   virtual ~BlockTransportDelegate() = default;
 
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(
-      size_t num_blocks, int64_t entity_id, uint64_t uuid = 0) = 0;
+      size_t num_blocks, uint64_t uuid = 0) = 0;
 
   virtual absl::Status OnDataReceived() = 0;
 
@@ -75,9 +74,7 @@ class BlockTransportDelegate {
     return GetHostPointer(layer_idx, shard_idx) + block_id * bytes_per_block();
   }
 
-  virtual size_t bytes_per_block() const {
-    return slice_byte_size();
-  }
+  virtual size_t bytes_per_block() const { return slice_byte_size(); }
 
   virtual int GetRemoteReadBlockId(int base_remote_id, int chunk_k) = 0;
 
@@ -108,13 +105,10 @@ class BlockTransport {
   ~BlockTransport();
 
   // Push block data to remote peer (H2H Write)
-  absl::StatusOr<std::vector<int>> Push(const std::string& peer,
-                                        const std::vector<int>& src_block_ids,
-                                        const std::vector<int>& dst_block_ids = {},
-                                        int parallelism = 1,
-                                        MajorOrder major_order =
-                                            MajorOrder::kLayerMajor,
-                                        uint64_t uuid = 0);
+  absl::StatusOr<std::vector<int>> Push(
+      const std::string& peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
+      MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0);
 
   // Pull block data from remote peer (H2H Read)
   absl::StatusOr<std::vector<int>> Pull(

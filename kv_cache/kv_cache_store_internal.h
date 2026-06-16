@@ -67,9 +67,8 @@ class KVCacheStoreInternal
   uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
                                int block_id) override;
 
-  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id,
-                                                  uint64_t uuid = 0) override;
+  absl::StatusOr<std::vector<int>> AllocateBlocks(
+      size_t num_blocks, uint64_t uuid = 0) override;
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     return base_remote_id + chunk_k;
   }
@@ -113,7 +112,7 @@ class KVCacheStoreInternal
   std::unique_ptr<global_registry::GlobalRegistryClient> registry_client_;
 
   std::string local_address_;
-  std::atomic<int64_t> next_entity_id_{2000000};
+
 
   std::unique_ptr<LogicalBlockManager> block_manager_;
   absl::flat_hash_map<int, std::vector<uint8_t*>> block_to_ptrs_

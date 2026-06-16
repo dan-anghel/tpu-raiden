@@ -88,9 +88,7 @@ void CheckStatus(const std::string& context, const absl::Status& status) {
   }
 }
 
-void EmitTimingLog(const std::string& message) {
-  LOG(INFO) << message;
-}
+void EmitTimingLog(const std::string& message) { LOG(INFO) << message; }
 
 template <typename T>
 T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
@@ -240,7 +238,8 @@ static kv_cache::KVCacheCopySpec ToKVCacheCopySpecImpl(const CopySpec& spec) {
 static CopySpec BuildH2dCopySpec(const std::vector<int64_t>& src_block_ids,
                                  const std::vector<int64_t>& dst_block_ids) {
   if (src_block_ids.size() != dst_block_ids.size()) {
-    throw std::invalid_argument("src and dst block lists must have same length");
+    throw std::invalid_argument(
+        "src and dst block lists must have same length");
   }
   CopySpec spec;
   if (src_block_ids.empty()) {
@@ -253,8 +252,7 @@ static CopySpec BuildH2dCopySpec(const std::vector<int64_t>& src_block_ids,
 
   for (int64_t start = 0; start < n;) {
     int64_t end = start + 1;
-    while (end < n &&
-           src_block_ids[end] == src_block_ids[end - 1] + 1 &&
+    while (end < n && src_block_ids[end] == src_block_ids[end - 1] + 1 &&
            dst_block_ids[end] == dst_block_ids[end - 1] + 1) {
       ++end;
     }
@@ -391,8 +389,7 @@ void KVCacheManagerWithTransfer::ValidateRequestedBlocks(
 
 KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
@@ -401,8 +398,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
                          host_blocks_to_allocate.has_value()
                              ? *host_blocks_to_allocate
                              : num_slots * max_blocks,
-                         unsafe_skip_buffer_lock,
-                         parallelism, host_allocator),
+                         unsafe_skip_buffer_lock, parallelism, host_allocator),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -432,15 +428,14 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
 
 KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate, int parallelism,
-    int64_t node_id, int64_t local_control_port, int64_t max_blocks,
-    int64_t num_slots, double timeout_s)
-    : KVCacheManagerBase(
-          num_layers, num_shards, slice_byte_size, local_port,
-          host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
-                                              : num_slots * max_blocks,
-          parallelism),
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism, int64_t node_id, int64_t local_control_port,
+    int64_t max_blocks, int64_t num_slots, double timeout_s)
+    : KVCacheManagerBase(num_layers, num_shards, slice_byte_size, local_port,
+                         host_blocks_to_allocate.has_value()
+                             ? *host_blocks_to_allocate
+                             : num_slots * max_blocks,
+                         parallelism),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -526,8 +521,9 @@ void KVCacheManagerWithTransfer::StartRead(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
-  VLOG(1) << "KVCacheManagerWithTransfer::StartRead (Hybrid Bridge) called. req_id: " << req_id
-          << ", uuid: " << uuid << ", remote: " << remote_endpoint
+  VLOG(1) << "KVCacheManagerWithTransfer::StartRead (Hybrid Bridge) called. "
+             "req_id: "
+          << req_id << ", uuid: " << uuid << ", remote: " << remote_endpoint
           << ", Thread: " << std::this_thread::get_id();
   std::vector<int64_t> host_block_ids =
       local_host_block_ids.value_or(local_block_ids);
@@ -553,7 +549,8 @@ void KVCacheManagerWithTransfer::StartRead(
   }
   std::optional<int> target_node = GetLocalTpuNumaNode(representative_buf);
 
-  push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint, load_plan = std::move(load_plan)]() {
+  push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
+                                     load_plan = std::move(load_plan)]() {
     try {
       int control_fd = ConnectTcp(remote_endpoint);
       auto control_cleanup =
@@ -566,7 +563,8 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.op = kOpPullStream;
       stream_request.uuid = uuid;
       stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
-      stream_request.consumer_data_port = static_cast<uint32_t>(local_data_port_);
+      stream_request.consumer_data_port =
+          static_cast<uint32_t>(local_data_port_);
       CheckStatus(
           "control pull stream write",
           WriteExact(control_fd, &stream_request, sizeof(stream_request)));
@@ -575,12 +573,16 @@ void KVCacheManagerWithTransfer::StartRead(
 
       ControlResponseHeader response = ReadControlResponseHeader(control_fd);
       if (response.status != 0) {
-        throw std::runtime_error("Remote producer rejected Hybrid Bridge read request");
+        throw std::runtime_error(
+            "Remote producer rejected Hybrid Bridge read request");
       }
-      VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull request with Producer. req_id: "
+      VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull "
+                 "request with Producer. req_id: "
               << req_id;
     } catch (const std::exception& e) {
-      LOG(ERROR) << "Raiden consumer error during Hybrid Bridge StartRead connect: " << e.what();
+      LOG(ERROR)
+          << "Raiden consumer error during Hybrid Bridge StartRead connect: "
+          << e.what();
       std::lock_guard<std::mutex> lock(mu_);
       failed_recving_.insert(req_id);
       active_recv_entries_.erase(uuid);
@@ -952,11 +954,13 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   std::string remote_data_endpoint =
       peer_ip + ":" + std::to_string(req.consumer_data_port);
 
-  VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged consumer. Intercepting and launching StartPushInternal to "
+  VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
+             "consumer. Intercepting and launching StartPushInternal to "
           << remote_data_endpoint;
 
   // Intercept and Execute Hybrid Push on behalf of remote consumer!
-  StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids, dst_block_ids);
+  StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
+                    dst_block_ids);
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
@@ -964,7 +968,8 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
   std::vector<int64_t> sizes(src_block_ids.size(), 1);
-  auto future_or = D2h(src_block_ids, src_block_ids, sizes, /*slot_idx=*/std::nullopt);
+  auto future_or =
+      D2h(src_block_ids, src_block_ids, sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
@@ -976,29 +981,29 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   }
 
   auto future = std::move(future_or.value());
-  future.OnReady([this, uuid, remote_data_endpoint, src_block_ids, dst_block_ids](
-                     const absl::StatusOr<raiden::BufferHolders>& s) {
-    if (!s.ok()) {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = send_entries_.find(uuid);
-      if (it != send_entries_.end()) {
-        done_sending_.insert(it->second->req_id);
-        send_entries_.erase(it);
-      }
-      return;
-    }
-    std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
-    std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
-    // Push across Data Plane socket!
-    auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints,
-                           /*entity_id=*/0, uuid);
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = send_entries_.find(uuid);
-    if (it != send_entries_.end()) {
-      done_sending_.insert(it->second->req_id);
-      send_entries_.erase(it);
-    }
-  });
+  future.OnReady(
+      [this, uuid, remote_data_endpoint, src_block_ids,
+       dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
+        if (!s.ok()) {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = send_entries_.find(uuid);
+          if (it != send_entries_.end()) {
+            done_sending_.insert(it->second->req_id);
+            send_entries_.erase(it);
+          }
+          return;
+        }
+        std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
+        std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
+        // Push across Data Plane socket!
+        auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = send_entries_.find(uuid);
+        if (it != send_entries_.end()) {
+          done_sending_.insert(it->second->req_id);
+          send_entries_.erase(it);
+        }
+      });
 }
 
 absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
@@ -1043,17 +1048,16 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   }
 
   auto future = std::move(future_or.value());
-  future.OnReady(
-      [this, uuid,
-       target_req_id](const absl::StatusOr<raiden::BufferHolders>& s) {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (s.ok()) {
-          done_recving_.insert(target_req_id);
-        } else {
-          failed_recving_.insert(target_req_id);
-        }
-        active_recv_entries_.erase(uuid);
-      });
+  future.OnReady([this, uuid, target_req_id](
+                     const absl::StatusOr<raiden::BufferHolders>& s) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (s.ok()) {
+      done_recving_.insert(target_req_id);
+    } else {
+      failed_recving_.insert(target_req_id);
+    }
+    active_recv_entries_.erase(uuid);
+  });
   return absl::OkStatus();
 }
 
