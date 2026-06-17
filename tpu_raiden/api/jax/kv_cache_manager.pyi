@@ -38,3 +38,15 @@ class KVCacheManager:
       parallelism: int = 1,
   ) -> int: ...
   def poll_stats(self) -> tuple[list[str], list[str], list[str]]: ...
+  def d2h(
+      self,
+      src_offsets: list[int],
+      dst_offsets: list[int],
+      copy_sizes: list[int] | None = ...,
+  ) -> any: ...
+  def h2d(
+      self,
+      src_offsets: list[int],
+      dst_offsets: list[int],
+      copy_sizes: list[int] | None = ...,
+  ) -> any: ...

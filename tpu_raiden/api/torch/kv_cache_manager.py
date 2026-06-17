@@ -147,3 +147,45 @@ class KVCacheManager:
       IDs.
     """
     return self._impl.complete_read()
+
+  def d2h(
+      self,
+      src_offsets: List[int],
+      dst_offsets: List[int],
+      copy_sizes: List[int] | None = None,
+  ) -> Any:
+    """Device-to-Host (D2H) copy transfer.
+
+    Args:
+      src_offsets: Source block offsets.
+      dst_offsets: Destination block offsets.
+      copy_sizes: Optional number of contiguous blocks to copy per segment
+        (defaults to 1 block per segment).
+
+    Returns:
+      A future representing the asynchronous copy transfer operation.
+    """
+    if copy_sizes is None:
+      copy_sizes = [1] * len(src_offsets)
+    return self._impl.D2h(src_offsets, dst_offsets, copy_sizes)
+
+  def h2d(
+      self,
+      src_offsets: List[int],
+      dst_offsets: List[int],
+      copy_sizes: List[int] | None = None,
+  ) -> Any:
+    """Host-to-Device (H2D) copy transfer.
+
+    Args:
+      src_offsets: Source block offsets.
+      dst_offsets: Destination block offsets.
+      copy_sizes: Optional number of contiguous blocks to copy per segment
+        (defaults to 1 block per segment).
+
+    Returns:
+      A future representing the asynchronous copy transfer operation.
+    """
+    if copy_sizes is None:
+      copy_sizes = [1] * len(src_offsets)
+    return self._impl.H2d(src_offsets, dst_offsets, copy_sizes)
