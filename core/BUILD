@@ -468,11 +468,11 @@ cc_test(
         ":tpu_pjrt_manager",
         ":tpu_utils",
         "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
-        "@xla//xla/tsl/platform:test_main",
     ],
 )
 

@@ -44,6 +44,7 @@
 
 #include <dlfcn.h>
 #include <malloc.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -59,6 +60,7 @@
 #include <vector>
 
 #include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -865,3 +867,9 @@ INSTANTIATE_TEST_SUITE_P(
 
 }  // namespace
 }  // namespace raiden
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+  absl::ParseCommandLine(argc, argv);
+  return RUN_ALL_TESTS();
+}
