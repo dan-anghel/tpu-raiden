@@ -136,22 +136,18 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  public:
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-      std::optional<int> local_port,
-      std::optional<int> host_blocks_to_allocate,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
       bool unsafe_skip_buffer_lock, int parallelism,
       HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
       int64_t num_slots = 0, double timeout_s = 120.0);
 
   // Metadata-based constructor for FFI / CPU-only testing
-  KVCacheManagerWithTransfer(size_t num_layers, size_t num_shards,
-                             size_t slice_byte_size,
-                             std::optional<int> local_port,
-                             std::optional<int> host_blocks_to_allocate,
-                             int parallelism = 1, int64_t node_id = 0,
-                             int64_t local_control_port = -1,
-                             int64_t max_blocks = 0, int64_t num_slots = 0,
-                             double timeout_s = 120.0);
+  KVCacheManagerWithTransfer(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+      int parallelism = 1, int64_t node_id = 0, int64_t local_control_port = -1,
+      int64_t max_blocks = 0, int64_t num_slots = 0, double timeout_s = 120.0);
 
   virtual ~KVCacheManagerWithTransfer();
 
@@ -274,12 +270,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
-  void StartPushInternal(
-      uint64_t uuid,
-      const std::string& remote_data_endpoint,
-      const std::vector<int64_t>& src_block_ids,
-      const std::vector<int64_t>& dst_block_ids
-  );
+  void StartPushInternal(uint64_t uuid, const std::string& remote_data_endpoint,
+                         const std::vector<int64_t>& src_block_ids,
+                         const std::vector<int64_t>& dst_block_ids);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 

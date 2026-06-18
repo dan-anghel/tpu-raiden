@@ -40,6 +40,7 @@
 #include "xla/tsl/platform/statusor.h"
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
+#include "core/tpu_utils.h"
 #include "weight_sync/weight_synchronizer_control_service.h"
 #include "weight_sync/weight_synchronizer_service.pb.h"
 
@@ -195,6 +196,8 @@ WeightSynchronizerBase::WeightSynchronizerBase(
               ? 0
               : layer_buffers[0][0]->GetOnDeviceSizeInBytes().value(),
           local_port, parallelism) {
+  DetectAndAssignNumaNode(layer_buffers);
+
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }

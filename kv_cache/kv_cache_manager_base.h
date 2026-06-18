@@ -23,12 +23,16 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/semaphore.h"
 #include "xla/stream_executor/stream.h"
 #include "core/host_memory_allocator.h"
 #include "core/numa_thread_pool.h"
@@ -38,6 +42,19 @@
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
+
+struct BlockMetadata {
+  int block_id;
+  void* data_ptr;
+  std::string address;
+  xla::PjRtClient* pjrt_client = nullptr;
+};
+
+using RecvCallback =
+    std::function<absl::Status(int block_id, size_t size_bytes)>;
+using BlockReadinessCallback = std::function<absl::Status(
+    size_t layer_idx, size_t shard_idx, int block_id)>;
+
 namespace kv_cache {
 
 struct KVCacheCopySpec {
@@ -79,6 +96,20 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
                      HostBufferAllocator host_allocator = nullptr);
 
   ~KVCacheManagerBase() override;
+
+  xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
+                                    const BlockMetadata& dst,
+                                    size_t size_bytes);
+
+  xla::Future<> RemoteD2DBlockReceive(int block_id,
+                                      raiden::BufferHoldAndAlias hold,
+                                      size_t size_bytes);
+
+  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
+
+  void SetBlockReadinessCallback(BlockReadinessCallback callback);
+  absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
+                                int block_id) override;
 
   // Async on-chip H2D offloads returning PJRT copy future E2E
   absl::StatusOr<raiden::PjRtCopyFuture> H2d(
@@ -218,6 +249,20 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
                     std::optional<size_t> layer_idx = std::nullopt,
                     std::optional<size_t> shard_idx = std::nullopt,
                     int64_t device_id = -1);
+
+ private:
+  xla::Future<> DoD2DTransfer(const BlockMetadata& src,
+                              const BlockMetadata& dst, size_t size_bytes);
+
+  std::unique_ptr<xla::Semaphore> semaphore_;
+
+  absl::Mutex recv_mu_;
+  absl::flat_hash_map<int, RecvCallback> recv_callbacks_
+      ABSL_GUARDED_BY(recv_mu_);
+
+  absl::Mutex block_readiness_mu_;
+  BlockReadinessCallback block_readiness_callback_
+      ABSL_GUARDED_BY(block_readiness_mu_);
 };
 
 }  // namespace kv_cache

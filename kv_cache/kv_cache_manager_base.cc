@@ -45,6 +45,7 @@
 #include "core/numa_thread_pool.h"
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
+#include "core/raw_transfer_impl.h"
 #include "core/status_macros.h"
 #include "core/tpu_utils.h"
 #include "kv_cache/logical_block_manager.h"
@@ -53,6 +54,10 @@
 namespace tpu_raiden {
 namespace kv_cache {
 namespace {
+
+xla::Future<> ReturnFuture(const absl::Status& status) {
+  return xla::Future<>(status);
+}
 
 absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
                                      const std::vector<int64_t>& dst_offsets,
@@ -91,6 +96,22 @@ KVCacheManagerBase::KVCacheManagerBase(
     return;
   }
 
+  DetectAndAssignNumaNode(layer_buffers);
+  const xla::PjRtDevice* representative_device = nullptr;
+  if (assigned_numa_node_.has_value()) {
+    for (const auto& layer : layer_buffers) {
+      for (xla::PjRtBuffer* buf : layer) {
+        if (buf && buf->device() &&
+            GetPjRtDeviceNumaNode(buf->device()) ==
+                assigned_numa_node_.value()) {
+          representative_device = buf->device();
+          break;
+        }
+      }
+      if (representative_device) break;
+    }
+  }
+
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
   LOG(ERROR) << "KVCacheManagerBase: on_device_shape: " << shape.ToString();
@@ -106,6 +127,7 @@ KVCacheManagerBase::KVCacheManagerBase(
     total_blocks = major_dim_size_;
     block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
   }
+  semaphore_ = std::make_unique<xla::Semaphore>(4);
 
   int num_host_blocks = host_blocks_to_allocate.value_or(64);
 
@@ -135,8 +157,10 @@ KVCacheManagerBase::KVCacheManagerBase(
 
       size_t alloc_size = num_host_blocks * bytes_per_block();
       if (host_allocator) {
-        auto status_or_allocation =
-            host_allocator(alloc_size, dst_buffer->device());
+        const xla::PjRtDevice* target_dev = representative_device
+                                                ? representative_device
+                                                : dst_buffer->device();
+        auto status_or_allocation = host_allocator(alloc_size, target_dev);
         if (!status_or_allocation.ok()) {
           throw std::runtime_error(absl::StrCat(
               "Host allocator failed for size: ", alloc_size,
@@ -190,29 +214,7 @@ KVCacheManagerBase::KVCacheManagerBase(
     buffer_holds_.push_back(std::move(hold_info));
   }
 
-  // Initialize NUMA thread pool
-  std::vector<int> unique_numa_nodes;
-  for (const auto& layer : layer_buffers) {
-    for (xla::PjRtBuffer* buf : layer) {
-      if (buf && buf->device()) {
-        int node = GetPjRtDeviceNumaNode(buf->device());
-        if (node >= 0) {
-          bool found = false;
-          for (int n : unique_numa_nodes) {
-            if (n == node) {
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            unique_numa_nodes.push_back(node);
-          }
-        }
-      }
-    }
-  }
-  size_t pool_size = std::max<size_t>(
-      {1, static_cast<size_t>(parallelism), unique_numa_nodes.size()});
+  size_t pool_size = std::max<size_t>(1, static_cast<size_t>(parallelism));
   dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
@@ -227,6 +229,7 @@ KVCacheManagerBase::KVCacheManagerBase(
                         local_port, parallelism) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
+  semaphore_ = std::make_unique<xla::Semaphore>(4);
 
   layers_.reserve(num_layers_);
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
@@ -391,7 +394,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
       VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
-          node >= 0 ? std::optional<int>(node) : std::nullopt,
+          assigned_numa_node(),
           [this, works, is_partial, src_offsets_major_dim,
            dst_offsets_major_dim, copy_sizes_major_dim, slot_idx]() {
             return DispatchH2dWork(works, slot_idx, is_partial,
@@ -529,9 +532,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
       VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
-          node >= 0 ? std::optional<int>(node) : std::nullopt,
-          [this, works, is_partial, src_offsets, dst_offsets, copy_sizes,
-           slot_idx]() {
+          assigned_numa_node(), [this, works, is_partial, src_offsets,
+                                 dst_offsets, copy_sizes, slot_idx]() {
             return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
                                    dst_offsets, copy_sizes);
           });
@@ -1076,6 +1078,184 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
           << local_futures.size()
           << " buffer futures. Thread: " << std::this_thread::get_id();
   return local_futures;
+}
+
+xla::Future<> KVCacheManagerBase::RemoteD2DBlockWrite(const BlockMetadata& src,
+                                                      const BlockMetadata& dst,
+                                                      size_t size_bytes) {
+  auto [promise, future] = xla::MakePromise<void>();
+  if (!semaphore_) {
+    promise.Set(absl::FailedPreconditionError(
+        "D2D transfer helper is not initialized (missing semaphore)"));
+    return future;
+  }
+  if (!src.pjrt_client) {
+    promise.Set(absl::FailedPreconditionError(
+        "D2D transfer helper is missing pjrt_client in src metadata"));
+    return future;
+  }
+
+  auto shared_promise =
+      std::make_shared<xla::Promise<void>>(std::move(promise));
+
+  std::thread([this, src, dst, size_bytes, shared_promise]() mutable {
+    // Acquire staging block budget.
+    semaphore_->Acquire(1);
+
+    // Perform transfer
+    xla::Future<> d2d_future = DoD2DTransfer(src, dst, size_bytes);
+
+    d2d_future.OnReady([this, shared_promise](const absl::Status& status) {
+      // Release staging block budget.
+      semaphore_->Release(1);
+      shared_promise->Set(status);
+    });
+  }).detach();
+
+  return future;
+}
+
+xla::Future<> KVCacheManagerBase::DoD2DTransfer(const BlockMetadata& src,
+                                                const BlockMetadata& dst,
+                                                size_t size_bytes) {
+  auto [promise, future] = xla::MakePromise<void>();
+  ASSIGN_OR_RETURN(std::unique_ptr<HostMemoryAllocator> allocator,
+                   HostMemoryAllocator::Create(src.pjrt_client),
+                   _.LogError().With(ReturnFuture));
+
+  // 1. Allocate local staging memory
+  ASSIGN_OR_RETURN(auto host_allocation, allocator->Allocate(size_bytes),
+                   _.LogError().With(ReturnFuture));
+
+  // 2. Copy data from device to host staging memory (D2H)
+  xla::PjRtBuffer* src_buffer = static_cast<xla::PjRtBuffer*>(src.data_ptr);
+
+  std::vector<xla::PjRtBuffer*> src_buffers = {src_buffer};
+  std::vector<uint8_t*> dst_ptrs = {host_allocation.ptr};
+  std::vector<size_t> dst_sizes = {host_allocation.size};
+
+  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future,
+                   raiden::transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes,
+                                             /*src_offsets_major_dim=*/{},
+                                             /*dst_offsets_major_dim=*/{},
+                                             /*copy_sizes_major_dim=*/{}),
+                   _.LogError().With(ReturnFuture));
+
+  // Wrap promise in shared_ptr because OnReady lambda needs to be copyable
+  auto shared_promise =
+      std::make_shared<xla::Promise<void>>(std::move(promise));
+
+  // 3. Trigger H2H inside d2h_future ready callback
+  d2h_future.OnReady(
+      [this, dst, host_allocation, shared_promise](
+          const absl::StatusOr<raiden::BufferHolders>& status_or) mutable {
+        if (!status_or.ok()) {
+          shared_promise->Set(absl::InternalError(
+              absl::StrCat("D2H copy failed: ", status_or.status().message())));
+          return;
+        }
+
+        // 4. Start H2H Push in a separate thread to avoid blocking PJRT
+        // callback.
+        std::thread([this, dst, host_allocation, shared_promise]() mutable {
+          absl::Status s = server_->WriteBlockDirect(dst.address, dst.block_id,
+                                                     host_allocation.ptr,
+                                                     host_allocation.size);
+          shared_promise->Set(s);
+        }).detach();
+      });
+
+  return future;
+}
+
+absl::Status KVCacheManagerBase::OnSingleBlockReceived(int block_id,
+                                                       size_t size_bytes) {
+  RecvCallback cb;
+  {
+    absl::MutexLock l(&recv_mu_);
+    auto it = recv_callbacks_.find(block_id);
+    if (it != recv_callbacks_.end()) {
+      cb = std::move(it->second);
+      recv_callbacks_.erase(it);
+    }
+  }
+  if (cb) {
+    return cb(block_id, size_bytes);
+  }
+  return absl::OkStatus();
+}
+
+xla::Future<> KVCacheManagerBase::RemoteD2DBlockReceive(
+    int block_id, raiden::BufferHoldAndAlias hold, size_t size_bytes) {
+  if (size_bytes != bytes_per_block()) {
+    return xla::Future<>(absl::InvalidArgumentError(absl::StrCat(
+        "size_bytes (", size_bytes, ") must match bytes_per_block (",
+        bytes_per_block(), ")")));
+  }
+  if (!hold.buffer) {
+    return xla::Future<>(absl::FailedPreconditionError(
+        "Destination PjRtBuffer in hold is null"));
+  }
+
+  auto [promise, future] = xla::MakePromise<void>();
+  auto shared_promise =
+      std::make_shared<xla::Promise<void>>(std::move(promise));
+
+  auto callback = [this, hold, size_bytes, shared_promise](
+                      int block_id_received,
+                      size_t size_bytes_received) -> absl::Status {
+    if (size_bytes_received != size_bytes) {
+      auto status = absl::InvalidArgumentError("Received size mismatch");
+      shared_promise->Set(status);
+      return status;
+    }
+
+    uint8_t* host_ptr = GetBlockHostPointer(0, 0, block_id_received);
+    if (host_ptr == nullptr) {
+      auto status = absl::FailedPreconditionError("Host pointer is null");
+      shared_promise->Set(status);
+      return status;
+    }
+
+    int64_t device_offset_bytes =
+        static_cast<int64_t>(block_id_received) * bytes_per_block();
+
+    xla::Future<> copy_future =
+        hold.CopyRawHostToDevice(host_ptr, device_offset_bytes, size_bytes);
+
+    copy_future.OnReady([hold, shared_promise](const absl::Status& status) {
+      shared_promise->Set(status);
+    });
+
+    return absl::OkStatus();
+  };
+
+  {
+    absl::MutexLock l(&recv_mu_);
+    recv_callbacks_[block_id] = std::move(callback);
+  }
+
+  return future;
+}
+
+void KVCacheManagerBase::SetBlockReadinessCallback(
+    BlockReadinessCallback callback) {
+  absl::MutexLock l(&block_readiness_mu_);
+  block_readiness_callback_ = std::move(callback);
+}
+
+absl::Status KVCacheManagerBase::WaitForBlockRead(size_t layer_idx,
+                                                  size_t shard_idx,
+                                                  int block_id) {
+  BlockReadinessCallback callback;
+  {
+    absl::MutexLock l(&block_readiness_mu_);
+    callback = block_readiness_callback_;
+  }
+  if (!callback) {
+    return absl::OkStatus();
+  }
+  return callback(layer_idx, shard_idx, block_id);
 }
 
 }  // namespace kv_cache

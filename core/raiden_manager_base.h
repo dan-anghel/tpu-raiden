@@ -36,33 +36,12 @@
 
 namespace tpu_raiden {
 
-struct BlockMetadata {
-  int block_id;
-  void* data_ptr;
-  std::string address;
-  xla::PjRtClient* pjrt_client = nullptr;
-};
-
-using RecvCallback =
-    std::function<absl::Status(int block_id, size_t size_bytes)>;
-using BlockReadinessCallback =
-    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
-                               int block_id)>;
-
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
   RaidenManagerBase(size_t num_layers, size_t num_shards,
                     size_t slice_byte_size,
                     std::optional<int> local_port = std::nullopt,
-                    int parallelism = 1, size_t max_staging_blocks = 4);
-
-  xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
-                                    const BlockMetadata& dst,
-                                    size_t size_bytes);
-
-  xla::Future<> RemoteD2DBlockReceive(int block_id,
-                                      raiden::BufferHoldAndAlias hold,
-                                      size_t size_bytes);
+                    int parallelism = 1);
 
   ~RaidenManagerBase() override;
 
@@ -84,6 +63,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
                                 const uint8_t* data_ptr, size_t size_bytes);
 
   std::optional<int> local_port() const;
+  std::optional<int> assigned_numa_node() const { return assigned_numa_node_; }
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override;
   size_t GetHostSize(size_t layer_idx, size_t shard_idx) override;
@@ -93,8 +73,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   void SetExternalHostPointers(const std::vector<const uint8_t*>& host_ptrs,
                                const std::vector<size_t>& host_sizes);
 
-  void SetBlockReadinessCallback(BlockReadinessCallback callback);
-
   // Delegate overrides E2E
   size_t num_layers() const override { return num_layers_; }
   size_t num_shards() const override { return num_shards_; }
@@ -102,7 +80,9 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t bytes_per_block() const override;
   size_t shard_factor() const override { return shard_factor_; }
   absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
-                                int block_id) override;
+                                int block_id) override {
+    return absl::OkStatus();
+  }
 
  protected:
   struct ShardBufferInfoBase {
@@ -124,6 +104,10 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   int parallelism_ = 1;
   size_t shard_factor_ = 1;
   int64_t major_dim_size_ = 0;
+  std::optional<int> assigned_numa_node_ = std::nullopt;
+
+  void DetectAndAssignNumaNode(
+      const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);
 
   std::unique_ptr<tpu_raiden::transport::BlockTransport> server_;
 
@@ -141,21 +125,9 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   absl::Status OnDataReceived() override { return absl::OkStatus(); }
 
-  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
-
- private:
-  xla::Future<> DoD2DTransfer(const BlockMetadata& src,
-                              const BlockMetadata& dst, size_t size_bytes);
-
-  std::unique_ptr<xla::Semaphore> semaphore_;
-
-  absl::Mutex recv_mu_;
-  absl::flat_hash_map<int, RecvCallback> recv_callbacks_
-      ABSL_GUARDED_BY(recv_mu_);
-
-  absl::Mutex block_readiness_mu_;
-  BlockReadinessCallback block_readiness_callback_
-      ABSL_GUARDED_BY(block_readiness_mu_);
+  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override {
+    return absl::OkStatus();
+  }
 };
 
 }  // namespace tpu_raiden

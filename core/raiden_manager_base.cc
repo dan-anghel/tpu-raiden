@@ -26,7 +26,6 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
@@ -36,6 +35,8 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
+#include "core/status_macros.h"
+#include "core/tpu_utils.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -44,10 +45,42 @@ xla::Future<> ReturnFuture(const absl::Status& status) {
   return xla::Future<>(status);
 }
 
+void RaidenManagerBase::DetectAndAssignNumaNode(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers) {
+  std::vector<int> unique_numa_nodes;
+  for (const auto& layer : layer_buffers) {
+    for (xla::PjRtBuffer* buf : layer) {
+      if (buf && buf->device()) {
+        int node = GetPjRtDeviceNumaNode(buf->device());
+        if (node >= 0) {
+          bool found = false;
+          for (int n : unique_numa_nodes) {
+            if (n == node) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) unique_numa_nodes.push_back(node);
+        }
+      }
+    }
+  }
+  if (!unique_numa_nodes.empty()) {
+    assigned_numa_node_ = unique_numa_nodes[0];
+    if (unique_numa_nodes.size() > 1) {
+      LOG(WARNING) << "Incoming PJRT buffers are associated with more than one "
+                      "NUMA node ("
+                   << unique_numa_nodes[0] << " vs " << unique_numa_nodes[1]
+                   << "). Picking the first detected NUMA node: "
+                   << unique_numa_nodes[0];
+    }
+  }
+}
+
 RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
                                      size_t slice_byte_size,
                                      std::optional<int> local_port,
-                                     int parallelism, size_t max_staging_blocks)
+                                     int parallelism)
     : num_layers_(num_layers),
       num_shards_(num_shards),
       slice_byte_size_(slice_byte_size),
@@ -56,8 +89,6 @@ RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
 
   int port = local_port.value_or(0);
   server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(this, port);
-
-  semaphore_ = std::make_unique<xla::Semaphore>(max_staging_blocks);
 }
 
 RaidenManagerBase::~RaidenManagerBase() {
@@ -111,26 +142,6 @@ void RaidenManagerBase::SetExternalHostPointers(
   }
 }
 
-void RaidenManagerBase::SetBlockReadinessCallback(
-    BlockReadinessCallback callback) {
-  absl::MutexLock l(block_readiness_mu_);
-  block_readiness_callback_ = std::move(callback);
-}
-
-absl::Status RaidenManagerBase::WaitForBlockRead(size_t layer_idx,
-                                                 size_t shard_idx,
-                                                 int block_id) {
-  BlockReadinessCallback callback;
-  {
-    absl::MutexLock l(block_readiness_mu_);
-    callback = block_readiness_callback_;
-  }
-  if (!callback) {
-    return absl::OkStatus();
-  }
-  return callback(layer_idx, shard_idx, block_id);
-}
-
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
     const std::string& peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid) {
@@ -172,166 +183,6 @@ absl::Status RaidenManagerBase::PushWeightsChunk(const std::string& peer,
                              dst_offset_bytes, data_ptr, size_bytes);
 }
 
-size_t RaidenManagerBase::bytes_per_block() const {
-  return slice_byte_size_;
-}
-
-xla::Future<> RaidenManagerBase::RemoteD2DBlockWrite(const BlockMetadata& src,
-                                                     const BlockMetadata& dst,
-                                                     size_t size_bytes) {
-  auto [promise, future] = xla::MakePromise<void>();
-  if (!semaphore_) {
-    promise.Set(absl::FailedPreconditionError(
-        "D2D transfer helper is not initialized (missing semaphore)"));
-    return future;
-  }
-  if (!src.pjrt_client) {
-    promise.Set(absl::FailedPreconditionError(
-        "D2D transfer helper is missing pjrt_client in src metadata"));
-    return future;
-  }
-
-  auto shared_promise =
-      std::make_shared<xla::Promise<void>>(std::move(promise));
-
-  std::thread([this, src, dst, size_bytes, shared_promise]() mutable {
-    // Acquire staging block budget.
-    semaphore_->Acquire(1);
-
-    // Perform transfer
-    xla::Future<> d2d_future = DoD2DTransfer(src, dst, size_bytes);
-
-    d2d_future.OnReady([this, shared_promise](const absl::Status& status) {
-      // Release staging block budget.
-      semaphore_->Release(1);
-      shared_promise->Set(status);
-    });
-  }).detach();
-
-  return future;
-}
-
-xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
-                                               const BlockMetadata& dst,
-                                               size_t size_bytes) {
-  auto [promise, future] = xla::MakePromise<void>();
-  ASSIGN_OR_RETURN(std::unique_ptr<HostMemoryAllocator> allocator,
-                        HostMemoryAllocator::Create(src.pjrt_client),
-                        _.LogError().With(ReturnFuture));
-
-  // 1. Allocate local staging memory
-  ASSIGN_OR_RETURN(auto host_allocation, allocator->Allocate(size_bytes),
-                        _.LogError().With(ReturnFuture));
-
-  // 2. Copy data from device to host staging memory (D2H)
-  xla::PjRtBuffer* src_buffer = static_cast<xla::PjRtBuffer*>(src.data_ptr);
-
-  std::vector<xla::PjRtBuffer*> src_buffers = {src_buffer};
-  std::vector<uint8_t*> dst_ptrs = {host_allocation.ptr};
-  std::vector<size_t> dst_sizes = {host_allocation.size};
-
-  ASSIGN_OR_RETURN(
-      raiden::PjRtCopyFuture d2h_future,
-      raiden::transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes,
-                                /*src_offsets_major_dim=*/{},
-                                /*dst_offsets_major_dim=*/{},
-                                /*copy_sizes_major_dim=*/{}),
-      _.LogError().With(ReturnFuture));
-
-  // Wrap promise in shared_ptr because OnReady lambda needs to be copyable
-  auto shared_promise =
-      std::make_shared<xla::Promise<void>>(std::move(promise));
-
-  // 3. Trigger H2H inside d2h_future ready callback
-  d2h_future.OnReady(
-      [this, dst, host_allocation, shared_promise](
-          const absl::StatusOr<raiden::BufferHolders>& status_or) mutable {
-        if (!status_or.ok()) {
-          shared_promise->Set(absl::InternalError(
-              absl::StrCat("D2H copy failed: ", status_or.status().message())));
-          return;
-        }
-
-        // 4. Start H2H Push in a separate thread to avoid blocking PJRT
-        // callback.
-        std::thread([this, dst, host_allocation, shared_promise]() mutable {
-          absl::Status s = server_->WriteBlockDirect(dst.address, dst.block_id,
-                                                     host_allocation.ptr,
-                                                     host_allocation.size);
-          shared_promise->Set(s);
-        }).detach();
-      });
-
-  return future;
-}
-absl::Status RaidenManagerBase::OnSingleBlockReceived(int block_id,
-                                                      size_t size_bytes) {
-  RecvCallback cb;
-  {
-    absl::MutexLock l(recv_mu_);
-    auto it = recv_callbacks_.find(block_id);
-    if (it != recv_callbacks_.end()) {
-      cb = std::move(it->second);
-      recv_callbacks_.erase(it);
-    }
-  }
-  if (cb) {
-    return cb(block_id, size_bytes);
-  }
-  return absl::OkStatus();
-}
-
-xla::Future<> RaidenManagerBase::RemoteD2DBlockReceive(
-    int block_id, raiden::BufferHoldAndAlias hold, size_t size_bytes) {
-  if (size_bytes != bytes_per_block()) {
-    return xla::Future<>(absl::InvalidArgumentError(absl::StrCat(
-        "size_bytes (", size_bytes, ") must match bytes_per_block (",
-        bytes_per_block(), ")")));
-  }
-  if (!hold.buffer) {
-    return xla::Future<>(absl::FailedPreconditionError(
-        "Destination PjRtBuffer in hold is null"));
-  }
-
-  auto [promise, future] = xla::MakePromise<void>();
-  auto shared_promise =
-      std::make_shared<xla::Promise<void>>(std::move(promise));
-
-  auto callback = [this, hold, size_bytes, shared_promise](
-                      int block_id_received,
-                      size_t size_bytes_received) -> absl::Status {
-    if (size_bytes_received != size_bytes) {
-      auto status = absl::InvalidArgumentError("Received size mismatch");
-      shared_promise->Set(status);
-      return status;
-    }
-
-    uint8_t* host_ptr = GetBlockHostPointer(0, 0, block_id_received);
-    if (host_ptr == nullptr) {
-      auto status = absl::FailedPreconditionError("Host pointer is null");
-      shared_promise->Set(status);
-      return status;
-    }
-
-    int64_t device_offset_bytes =
-        static_cast<int64_t>(block_id_received) * bytes_per_block();
-
-    xla::Future<> copy_future =
-        hold.CopyRawHostToDevice(host_ptr, device_offset_bytes, size_bytes);
-
-    copy_future.OnReady([hold, shared_promise](const absl::Status& status) {
-      shared_promise->Set(status);
-    });
-
-    return absl::OkStatus();
-  };
-
-  {
-    absl::MutexLock l(recv_mu_);
-    recv_callbacks_[block_id] = std::move(callback);
-  }
-
-  return future;
-}
+size_t RaidenManagerBase::bytes_per_block() const { return slice_byte_size_; }
 
 }  // namespace tpu_raiden

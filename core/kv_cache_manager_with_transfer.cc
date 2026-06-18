@@ -435,7 +435,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
                          host_blocks_to_allocate.has_value()
                              ? *host_blocks_to_allocate
                              : num_slots * max_blocks,
-                         parallelism),
+                         parallelism, nullptr),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -543,11 +543,7 @@ void KVCacheManagerWithTransfer::StartRead(
     return;
   }
 
-  xla::PjRtBuffer* representative_buf = nullptr;
-  if (!buffer_holds_.empty() && !buffer_holds_[0].empty()) {
-    representative_buf = buffer_holds_[0][0].buffer;
-  }
-  std::optional<int> target_node = GetLocalTpuNumaNode(representative_buf);
+  std::optional<int> target_node = assigned_numa_node();
 
   push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
                                      load_plan = std::move(load_plan)]() {
@@ -875,11 +871,7 @@ void KVCacheManagerWithTransfer::ControlServerLoop() {
       if (errno == EINTR) continue;
       break;
     }
-    xla::PjRtBuffer* representative_buf = nullptr;
-    if (!buffer_holds_.empty() && !buffer_holds_[0].empty()) {
-      representative_buf = buffer_holds_[0][0].buffer;
-    }
-    std::optional<int> source_node = GetLocalTpuNumaNode(representative_buf);
+    std::optional<int> source_node = assigned_numa_node();
 
     pull_pool_->Schedule(source_node, [this, client_fd]() {
       HandleControlConnection(client_fd);
@@ -1014,8 +1006,7 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it == active_recv_entries_.end()) {
-      return absl::NotFoundError(
-          "No active RecvEntry matching incoming Push UUID");
+      return absl::OkStatus();
     }
     chip_dst_blocks = it->second.chip_block_ids;
     target_req_id = it->second.req_id;

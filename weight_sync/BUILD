@@ -55,6 +55,7 @@ cc_library(
         "//core:raiden_manager_base",
         "//core:raw_transfer_core",
         "//core:status_macros",
+        "//core:tpu_utils",
         "//core:xla_raw_transfer_headers",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
