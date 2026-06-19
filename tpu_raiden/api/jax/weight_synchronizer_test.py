@@ -34,7 +34,10 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.devices = jax.devices("cpu")
+    try:
+      self.devices = jax.devices("tpu")
+    except RuntimeError:
+      self.devices = jax.devices("cpu")
     self.mesh = jax.sharding.Mesh(np.array(self.devices), ("data",))
     self.sharding = jax.sharding.NamedSharding(
         self.mesh, jax.sharding.PartitionSpec("data")

@@ -16,11 +16,16 @@
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_H_
 
 #include <optional>
+#include <vector>
 
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
 #endif
 #include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
+
+namespace xla {
+class PjRtBuffer;
+}  // namespace xla
 
 #ifndef WITHOUT_PYTHON
 namespace nb = nanobind;
@@ -29,18 +34,33 @@ namespace nb = nanobind;
 namespace tpu_raiden {
 namespace jax {
 
+#ifndef WITHOUT_PYTHON
+struct UnpackedWeights {
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers;
+  nanobind::list jax_arrays;
+};
+#endif
+
 class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
  public:
   using WeightSynchronizerBase::WeightSynchronizerBase;
 
 #ifndef WITHOUT_PYTHON
-  WeightSynchronizer(const nb::list& jax_arrays,
+  WeightSynchronizer(nanobind::list jax_arrays,
                      std::optional<int> local_port = std::nullopt,
                      int parallelism = 1, bool unsafe_skip_buffer_lock = false,
                      std::optional<int> control_port = std::nullopt);
 #endif
 
   ~WeightSynchronizer() override;
+
+ private:
+#ifndef WITHOUT_PYTHON
+  WeightSynchronizer(UnpackedWeights&& weights, std::optional<int> local_port,
+                     int parallelism, bool unsafe_skip_buffer_lock,
+                     std::optional<int> control_port);
+  std::optional<nanobind::list> jax_arrays_;
+#endif
 };
 
 }  // namespace jax

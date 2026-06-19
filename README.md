@@ -34,19 +34,34 @@ Verify the installation:
 bazel --version
 ```
 
+### Installing Patchelf (Required for PyTorch)
+To compile and link the PyTorch C++ extension (`_tpu_raiden_torch.so`), you MUST install `patchelf`:
+```bash
+sudo apt-get install -y patchelf
+```
+*Why this is necessary:* PyTorch's compiled extension requires `patchelf` to inject a `NEEDED` link on `libpywrap_torch_tpu_common.so` at build time. This ensures TPU backend symbols resolve locally during import without triggering fatal duplicate XLA allocator registration crashes.
+
+### TPUVM Development Notes
+* **Disk Space**: Remote Bazel builds on standard TPUVMs can exhaust disk space in `/tmp`. Always point Bazel output to a directory that has enough disk space left.:
+  ```bash
+  export BAZEL_OUTPUT_BASE=$YOUR_TMP_DIR_WITH_ENOUGH_SPACE
+  ```
+* **PyTorch Wheel Compatibility**: Ensure your environment aligns with `torch_tpu`'s pinned C++ ABI expectations (e.g., `torch==2.11.0+cpu`).
+
 ## Building `raw_transfer`
 
-We provide a script to handle the build process and install the required Python dependencies. Run the following command from the repository root:
+We provide a script to handle the build process and install required dependencies. You can scope compilation to specific frameworks:
 
 ```bash
-./build.sh
+./build.sh [jax|torch|both]
 ```
 
 **What this script does:**
 1. Navigates to the workspace directory.
-2. Compiles the `//raw_transfer:raw_transfer_binaries` target using Bazel (it uses `--disk_cache` to speed up subsequent builds).
-3. Installs the necessary Python dependencies listed in `requirements.txt`.
-4. Artifacts will be available in the `bazel-bin/raw_transfer/` directory.
+2. Compiles the selected extension modules (`_tpu_raiden_jax.so` and/or `_tpu_raiden_torch.so`) using Bazel.
+3. For PyTorch builds, executes `patchelf --add-needed` on the generated shared library.
+4. Installs necessary Python dependencies listed in `requirements.txt`.
+5. Copies compiled `.so` extension binaries directly into their respective framework source packages.
 
 ## Testing `tpu_raiden`
 

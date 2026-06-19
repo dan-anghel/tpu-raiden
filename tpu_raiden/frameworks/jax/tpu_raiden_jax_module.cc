@@ -214,7 +214,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
   // 2. Bind WeightSynchronizer
   // =========================================================================
   nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
-      .def(nb::init<const nb::list&, std::optional<int>, int, bool,
+      .def(nb::init<nb::list, std::optional<int>, int, bool,
                     std::optional<int>>(),
            nb::arg("jax_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("parallelism") = 1,

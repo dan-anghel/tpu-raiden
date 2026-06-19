@@ -33,15 +33,33 @@ namespace nb = nanobind;
 namespace tpu_raiden {
 namespace jax {
 
-WeightSynchronizer::WeightSynchronizer(const nb::list& jax_arrays,
+
+namespace {
+UnpackedWeights UnpackAndMove(nanobind::list jax_arrays) {
+  auto layer_buffers = tpu_raiden::jax::UnpackJaxArrays(jax_arrays);
+  return {std::move(layer_buffers), std::move(jax_arrays)};
+}
+}  // namespace
+
+WeightSynchronizer::WeightSynchronizer(nanobind::list jax_arrays,
+                                       std::optional<int> local_port,
+                                       int parallelism,
+                                       bool unsafe_skip_buffer_lock,
+                                       std::optional<int> control_port)
+    : WeightSynchronizer(UnpackAndMove(std::move(jax_arrays)), local_port,
+                         parallelism, unsafe_skip_buffer_lock, control_port) {}
+
+WeightSynchronizer::WeightSynchronizer(UnpackedWeights&& weights,
                                        std::optional<int> local_port,
                                        int parallelism,
                                        bool unsafe_skip_buffer_lock,
                                        std::optional<int> control_port)
     : weight_sync::WeightSynchronizerBase(
-          tpu_raiden::jax::UnpackJaxArrays(jax_arrays), local_port,
+          weights.layer_buffers, local_port,
           /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
-          parallelism, control_port) {}
+          parallelism, control_port),
+      jax_arrays_(std::move(weights.jax_arrays)) {}
+
 
 WeightSynchronizer::~WeightSynchronizer() = default;
 

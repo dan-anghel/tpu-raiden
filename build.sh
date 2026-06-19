@@ -259,9 +259,11 @@ if [ "$BUILD_TORCH" = true ]; then
     patchelf --add-needed libpywrap_torch_tpu_common.so "${TORCH_SO}"
     echo "patchelf: added NEEDED libpywrap_torch_tpu_common.so to torch extension"
   else
-    echo "WARNING: patchelf not found; torch extension will NOT resolve" \
-         "torch_tpu symbols without a global libpywrap preload (which aborts" \
-         "on duplicate XLA allocator registration). Install patchelf." >&2
+    echo "ERROR: patchelf not found! The PyTorch extension requires patchelf" \
+         "to inject NEEDED libpywrap_torch_tpu_common.so so symbols resolve in local" \
+         "scope without duplicate XLA allocator crashes. Please install patchelf" \
+         "(e.g., 'sudo apt-get install -y patchelf') and rebuild." >&2
+    exit 1
   fi
 fi
 
