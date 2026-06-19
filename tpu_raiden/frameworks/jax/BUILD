@@ -124,30 +124,12 @@ nanobind_extension(
         ":raw_transfer_jax",
         ":weight_synchronizer_jax",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
-    ],
-)
-
-nanobind_extension(
-    name = "kv_cache_store",
-    srcs = [
-        "kv_cache_store_module.cc",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-        "-frtti",
-    ],
-    features = ["-use_header_modules"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//tpu_raiden/kv_cache:kv_cache_store",
-        "@nanobind",
-        "@xla//xla/pjrt:status_casters",
     ],
 )
 

@@ -29,9 +29,10 @@ py_library(
 py_library(
     name = "kv_cache_store",
     srcs = ["kv_cache_store.py"],
+    data = ["kv_cache_store.pyi"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/frameworks/jax:kv_cache_store",
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
     ],
 )
 

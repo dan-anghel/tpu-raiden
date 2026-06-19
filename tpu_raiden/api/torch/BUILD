@@ -42,6 +42,15 @@ py_library(
     ],
 )
 
+py_library(
+    name = "kv_cache_store",
+    srcs = ["kv_cache_store.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+    ],
+)
+
 py_test(
     name = "weight_synchronizer_test",
     srcs = ["weight_synchronizer_test.py"],

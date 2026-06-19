@@ -13,8 +13,10 @@
 // limitations under the License.
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -22,6 +24,7 @@
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>  // IWYU pragma: keep
 #include <nanobind/stl/pair.h>  // IWYU pragma: keep
+#include <nanobind/stl/shared_ptr.h>  // IWYU pragma: keep
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
 #include <nanobind/stl/vector.h>  // IWYU pragma: keep
 #include "tpu_raiden/core/raiden_future.h"
@@ -30,10 +33,29 @@
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
+#include "tpu_raiden/kv_cache/kv_cache_store.h"
 
 namespace nb = nanobind;
 
 using ::tpu_raiden::jax::WeightSynchronizer;
+
+namespace tpu_raiden {
+namespace kv_cache {
+namespace {
+class KVCacheStoreWrapper {
+ public:
+  explicit KVCacheStoreWrapper(size_t lru_capacity) {
+    controller_ = std::make_unique<KVCacheStore>(lru_capacity);
+  }
+  KVCacheStore* operator->() { return controller_.get(); }
+  KVCacheStore& operator*() { return *controller_; }
+
+ private:
+  std::unique_ptr<KVCacheStore> controller_;
+};
+}  // namespace
+}  // namespace kv_cache
+}  // namespace tpu_raiden
 
 NB_MODULE(_tpu_raiden_jax, m) {
   // =========================================================================
@@ -303,4 +325,69 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def_prop_ro("num_layers", &WeightSynchronizer::num_layers)
       .def_prop_ro("num_shards", &WeightSynchronizer::num_shards)
       .def_prop_ro("slice_byte_size", &WeightSynchronizer::slice_byte_size);
+
+  // =========================================================================
+  // 3. Bind KVCacheStore
+  // =========================================================================
+  nb::class_<tpu_raiden::kv_cache::RaidenId>(m, "RaidenId")
+      .def(nb::init<std::string, std::string, std::string, int>(),
+           nb::arg("job_name"), nb::arg("job_replica_id") = "",
+           nb::arg("data_name"), nb::arg("data_replica_idx") = 0)
+      .def_rw("job_name", &tpu_raiden::kv_cache::RaidenId::job_name)
+      .def_rw("job_replica_id", &tpu_raiden::kv_cache::RaidenId::job_replica_id)
+      .def_rw("data_name", &tpu_raiden::kv_cache::RaidenId::data_name)
+      .def_rw("data_replica_idx",
+              &tpu_raiden::kv_cache::RaidenId::data_replica_idx);
+
+  nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
+      .def(nb::init<size_t>(), nb::arg("capacity"))
+      .def(
+          "lookup",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<uint64_t>& block_hashes) {
+            auto res = self->Lookup(block_hashes);
+            if (!res.ok()) {
+              throw std::runtime_error("KVCacheStore lookup failed: " +
+                                       std::string(res.status().message()));
+            }
+            return res.value();
+          },
+          nb::arg("block_hashes"),
+          "Checks the LRU directory for cached block hashes. Returns a list of "
+          "all matched replica pairs prior to the first miss.")
+      .def(
+          "insert",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<uint64_t>& block_hashes,
+             const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
+                 slices,
+             bool on_host) {
+            return self->Insert(block_hashes, slices, on_host);
+          },
+          nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
+      .def(
+          "delete",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<uint64_t>& block_hashes,
+             const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
+                 slices) { self->Delete(block_hashes, slices); },
+          nb::arg("block_hashes"), nb::arg("slices"))
+      .def("capacity",
+           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+             return self->capacity();
+           })
+      .def(
+          "pin",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<uint64_t>& block_hashes) {
+            return self->Pin(block_hashes);
+          },
+          nb::arg("block_hashes"))
+      .def(
+          "release",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<uint64_t>& block_hashes) {
+            self->Release(block_hashes);
+          },
+          nb::arg("block_hashes"));
 }

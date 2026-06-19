@@ -152,6 +152,7 @@ nanobind_extension(
         ":weight_synchronizer_torch",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

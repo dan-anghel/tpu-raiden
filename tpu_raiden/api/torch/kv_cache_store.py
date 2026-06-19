@@ -15,7 +15,7 @@
 """Python wrapper for the compiled C++ KVCacheStore."""
 
 from typing import Any
-from tpu_raiden.frameworks.jax import _tpu_raiden_jax as _impl
+from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
 
 
 class RaidenId:

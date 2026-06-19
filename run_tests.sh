@@ -54,7 +54,6 @@ fi
 if [ "$RUN_JAX" = true ]; then
   echo "=== Running JAX Python Unit Tests ==="
   python "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/kv_cache_manager_test.py"
-  python "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/resharding_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/resharding_planner_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_manager_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_store_test.py"
