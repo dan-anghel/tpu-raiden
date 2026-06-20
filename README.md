@@ -15,7 +15,7 @@ source .venv312/bin/activate
 ```
 
 ### Installing Bazel
-To compile the `raw_transfer` binaries, you will need **Bazel 7.7.0**.
+To compile the `tpu_raiden` C++ extension binaries, you will need **Bazel 7.7.0**.
 
 **Option 1: Install Bazel 7.7.0 directly (Linux amd64)**
 ```bash
@@ -48,7 +48,7 @@ sudo apt-get install -y patchelf
   ```
 * **PyTorch Wheel Compatibility**: Ensure your environment aligns with `torch_tpu`'s pinned C++ ABI expectations (e.g., `torch==2.11.0+cpu`).
 
-## Building `raw_transfer`
+## Building `tpu_raiden`
 
 We provide a script to handle the build process and install required dependencies. You can scope compilation to specific frameworks:
 

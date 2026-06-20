@@ -18,7 +18,7 @@ set -e
 
 WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
-# Point to the directory containing the compiled raw_transfer.so and source files
+# Point to the directory containing the compiled extension libraries and source files
 # We also include the workspace parent dir to map absolute 'google3.third_party...' python imports!
 export PYTHONPATH="${WORKSPACE_DIR}:${WORKSPACE_DIR}/bazel-bin:${PYTHONPATH}"
 
@@ -59,6 +59,7 @@ if [ "$RUN_JAX" = true ]; then
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_store_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_manager_transfer_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/weight_synchronizer_test.py"
+  python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_manager_mpmd_test.py"
 fi
 
 if [ "$RUN_TORCH" = true ]; then
@@ -67,4 +68,5 @@ if [ "$RUN_TORCH" = true ]; then
   python "${WORKSPACE_DIR}/tpu_raiden/api/torch/kv_cache_manager_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/torch/kv_cache_manager_transfer_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/torch/weight_synchronizer_test.py"
+  python "${WORKSPACE_DIR}/tpu_raiden/api/torch/kv_cache_manager_mpmd_test.py"
 fi

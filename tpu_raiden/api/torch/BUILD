@@ -19,9 +19,6 @@ package(default_visibility = ["//visibility:public"])
 py_library(
     name = "kv_cache_manager_torch_py",
     srcs = ["kv_cache_manager.py"],
-    data = [
-        "kv_cache_manager.pyi",
-    ],
     visibility = ["//visibility:public"],
     deps = [
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",

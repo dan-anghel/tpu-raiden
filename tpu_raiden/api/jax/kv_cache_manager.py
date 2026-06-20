@@ -28,7 +28,7 @@
 
 """High-performance JAX KV Cache Manager (repurposed as TransferEngine)."""
 
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 from tpu_raiden.frameworks.jax import _tpu_raiden_jax as _impl
 
 
@@ -43,10 +43,12 @@ class KVCacheManager:
       self,
       kv_caches: List[Any],
       local_control_port: int,
-      max_blocks: int,
-      num_slots: int,
+      max_blocks: Optional[int] = None,
+      num_slots: Optional[int] = None,
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
+      host_blocks_to_allocate: Optional[int] = None,
+      parallelism: int = 1,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -54,19 +56,36 @@ class KVCacheManager:
       kv_caches: List of device-placed contiguous Tensors representing the
         sharded KV caches.
       local_control_port: TCP socket server port for control plane coordination.
-      max_blocks: Maximum number of blocks in the host pool.
+      max_blocks: Maximum number of blocks per staging slot.
       num_slots: Number of transfer slots to allocate.
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
+      host_blocks_to_allocate: Legacy/unified total blocks to allocate in host
+        pool.
+      parallelism: Transfer channel parallelism.
     """
-    self._impl = _impl.KVCacheManager(
-        kv_caches=kv_caches,
-        local_control_port=local_control_port,
-        max_blocks=max_blocks,
-        num_slots=num_slots,
-        timeout_s=timeout_s,
-        unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
-    )
+    if host_blocks_to_allocate is not None:
+      self._impl = _impl.KVCacheManager(
+          kv_caches,
+          local_control_port if local_control_port > 0 else None,
+          host_blocks_to_allocate,
+          unsafe_skip_buffer_lock,
+          parallelism,
+      )
+    else:
+      if max_blocks is None or num_slots is None:
+        raise ValueError(
+            "Must specify either (max_blocks, num_slots) or"
+            " host_blocks_to_allocate."
+        )
+      self._impl = _impl.KVCacheManager(
+          kv_caches=kv_caches,
+          local_control_port=local_control_port,
+          max_blocks=max_blocks,
+          num_slots=num_slots,
+          timeout_s=timeout_s,
+          unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
+      )
 
   @property
   def local_control_port(self) -> int:
