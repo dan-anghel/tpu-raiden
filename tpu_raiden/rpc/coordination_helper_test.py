@@ -44,6 +44,37 @@ class CoordinationHelperTest(absltest.TestCase):
 
     server.stop()
 
+  def test_metadata_coordination(self):
+    server = coordination_helper.CoordinationServer()
+    port = server.start()
+    server_address = f'localhost:{port}'
+
+    client = coordination_helper.CoordinationClient(server_address)
+
+    endpoints = [
+        {'endpoint': '10.0.0.1:8888', 'shards': [0, 1]},
+        {'endpoint': '10.0.0.2:8888', 'shards': [2, 3]},
+    ]
+    transfer_uuid = 123456789
+    transfer_req_id = 'test-request-id'
+    block_ids = [10, 20, 30]
+
+    server.set_metadata(
+        endpoints=endpoints,
+        transfer_uuid=transfer_uuid,
+        transfer_req_id=transfer_req_id,
+        block_ids=block_ids,
+    )
+
+    metadata = client.get_metadata()
+
+    self.assertEqual(metadata.endpoints, endpoints)
+    self.assertEqual(metadata.transfer_uuid, transfer_uuid)
+    self.assertEqual(metadata.transfer_req_id, transfer_req_id)
+    self.assertEqual(metadata.block_ids, block_ids)
+
+    server.stop()
+
 
 if __name__ == '__main__':
   absltest.main()
