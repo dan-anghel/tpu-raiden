@@ -16,6 +16,7 @@
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_API_TORCH_KV_CACHE_MANAGER_H_
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -25,23 +26,29 @@
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 namespace tpu_raiden {
+namespace kv_cache {
+class KVCacheListener;
+}  // namespace kv_cache
+}  // namespace tpu_raiden
+
+namespace tpu_raiden {
 namespace torch {
 
 class KVCacheManager : public KVCacheManagerWithTransfer {
  public:
   // PyTorch sharded constructor E2E (cache-only by default)
-  KVCacheManager(
-      const std::vector<std::vector<at::Tensor>>& device_tensors,
-      std::optional<int> local_port = std::nullopt,
-      std::optional<int> host_blocks_to_allocate = std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+  KVCacheManager(const std::vector<std::vector<at::Tensor>>& device_tensors,
+                 std::optional<int> local_port = std::nullopt,
+                 std::optional<int> host_blocks_to_allocate = std::nullopt,
+                 bool unsafe_skip_buffer_lock = false, int parallelism = 1);
 
   // New transfer-enabled constructor (flat list of tensors, single shard per
   // layer)
   KVCacheManager(const std::vector<at::Tensor>& kv_caches, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock);
+                 bool unsafe_skip_buffer_lock,
+                 std::optional<int> listener_port = std::nullopt);
 
   ~KVCacheManager() override;
 
@@ -52,6 +59,9 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   void RegisterHostBuffers(int64_t node_id);
 
   const std::vector<at::Tensor>& kv_caches() const { return kv_caches_; }
+
+  std::optional<int> listener_port() const;
+  bool is_listener_active() const;
 
  private:
   // Buffers unpacked from a 2D tensor list, together with the owning
@@ -78,6 +88,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   std::vector<at::Tensor> kv_caches_;
   // Keep-alives for the materialized device buffers backing the manager.
   std::vector<torch_tpu::DeviceBufferRef> buffer_refs_;
+  std::unique_ptr<tpu_raiden::kv_cache::KVCacheListener> listener_;
 };
 
 }  // namespace torch

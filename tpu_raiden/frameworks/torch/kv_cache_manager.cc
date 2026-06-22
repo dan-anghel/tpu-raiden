@@ -15,6 +15,7 @@
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
+#include "tpu_raiden/kv_cache/kv_cache_listener.h"
 
 namespace tpu_raiden {
 namespace torch {
@@ -89,15 +91,36 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
 KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t node_id, int64_t local_control_port,
                                int64_t max_blocks, int64_t num_slots,
-                               double timeout_s, bool unsafe_skip_buffer_lock)
+                               double timeout_s, bool unsafe_skip_buffer_lock,
+                               std::optional<int> listener_port)
     : KVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
                      /*local_port=*/std::nullopt,
                      /*host_blocks_to_allocate=*/std::nullopt,
                      unsafe_skip_buffer_lock, /*parallelism=*/1, node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
-                     kv_caches) {}
+                     kv_caches) {
+  if (listener_port) {
+    listener_ =
+        std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
+            this, *listener_port);
+  }
+}
 
 KVCacheManager::~KVCacheManager() = default;
+
+std::optional<int> KVCacheManager::listener_port() const {
+  if (listener_) {
+    return listener_->listener_port();
+  }
+  return std::nullopt;
+}
+
+bool KVCacheManager::is_listener_active() const {
+  if (listener_) {
+    return listener_->is_active();
+  }
+  return false;
+}
 
 }  // namespace torch
 }  // namespace tpu_raiden

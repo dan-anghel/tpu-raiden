@@ -14,16 +14,21 @@
 
 #include "tpu_raiden/transport/block_transport.h"
 
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <string>
 #include <thread>  // NOLINT
 #include <vector>
 
@@ -41,6 +46,139 @@ namespace tpu_raiden {
 namespace transport {
 
 namespace {
+
+std::string GetLocalAddr(int fd) {
+  struct sockaddr_storage addr;
+  socklen_t addr_len = sizeof(addr);
+  if (getsockname(fd, (struct sockaddr*)&addr, &addr_len) == -1) {
+    LOG(ERROR) << "getsockname failed";
+    return "";
+  }
+  char ip_str[INET6_ADDRSTRLEN];
+  int port = 0;
+  if (addr.ss_family == AF_INET) {
+    struct sockaddr_in* s = (struct sockaddr_in*)&addr;
+    inet_ntop(AF_INET, &s->sin_addr, ip_str, sizeof(ip_str));
+    port = ntohs(s->sin_port);
+    return absl::StrCat(ip_str, ":", port);
+  } else if (addr.ss_family == AF_INET6) {
+    struct sockaddr_in6* s = (struct sockaddr_in6*)&addr;
+    inet_ntop(AF_INET6, &s->sin6_addr, ip_str, sizeof(ip_str));
+    port = ntohs(s->sin6_port);
+    return absl::StrCat("[", ip_str, "]:", port);
+  }
+  return "";
+}
+
+#ifndef UIO_MAXIOV
+#define UIO_MAXIOV 1024
+#endif
+
+#ifndef IOV_MAX
+#define IOV_MAX UIO_MAXIOV
+#endif
+
+absl::Status WriteVExact(int fd, const std::vector<BlockChunk>& chunks) {
+  std::vector<struct iovec> iov;
+  iov.reserve(chunks.size());
+  for (const auto& chunk : chunks) {
+    iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
+  }
+
+  size_t iov_idx = 0;
+  while (iov_idx < iov.size()) {
+    size_t batch_size =
+        std::min(iov.size() - iov_idx, static_cast<size_t>(IOV_MAX));
+
+    size_t batch_remaining = batch_size;
+    while (batch_remaining > 0) {
+      ssize_t written = writev(fd, &iov[iov_idx], batch_remaining);
+      if (written < 0) {
+        if (errno == EINTR) continue;
+        return absl::InternalError(
+            absl::StrCat("Socket writev failed: ", std::strerror(errno)));
+      }
+      if (written == 0) {
+        return absl::InternalError("Socket closed unexpectedly during writev");
+      }
+
+      size_t remaining = written;
+      while (remaining > 0 && batch_remaining > 0) {
+        if (remaining >= iov[iov_idx].iov_len) {
+          remaining -= iov[iov_idx].iov_len;
+          iov_idx++;
+          batch_remaining--;
+        } else {
+          iov[iov_idx].iov_base =
+              static_cast<char*>(iov[iov_idx].iov_base) + remaining;
+          iov[iov_idx].iov_len -= remaining;
+          remaining = 0;
+        }
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ReadVExact(int fd, const std::vector<BlockChunk>& chunks) {
+  std::vector<struct iovec> iov;
+  iov.reserve(chunks.size());
+  for (const auto& chunk : chunks) {
+    iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
+  }
+
+  size_t iov_idx = 0;
+  while (iov_idx < iov.size()) {
+    size_t batch_size =
+        std::min(iov.size() - iov_idx, static_cast<size_t>(IOV_MAX));
+
+    size_t batch_remaining = batch_size;
+    while (batch_remaining > 0) {
+      ssize_t bytes_read = readv(fd, &iov[iov_idx], batch_remaining);
+      if (bytes_read < 0) {
+        if (errno == EINTR) continue;
+        return absl::InternalError(
+            absl::StrCat("Socket readv failed: ", std::strerror(errno)));
+      }
+      if (bytes_read == 0) {
+        return absl::InternalError("Socket closed unexpectedly during readv");
+      }
+
+      size_t remaining = bytes_read;
+      while (remaining > 0 && batch_remaining > 0) {
+        if (remaining >= iov[iov_idx].iov_len) {
+          remaining -= iov[iov_idx].iov_len;
+          iov_idx++;
+          batch_remaining--;
+        } else {
+          iov[iov_idx].iov_base =
+              static_cast<char*>(iov[iov_idx].iov_base) + remaining;
+          iov[iov_idx].iov_len -= remaining;
+          remaining = 0;
+        }
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
+                            size_t sh, const std::vector<BlockChunk>& chunks) {
+  uint8_t* base = delegate->GetHostPointer(l, sh);
+  if (base != nullptr) {
+    size_t host_size = delegate->GetHostSize(l, sh);
+    for (const auto& chunk : chunks) {
+      if (chunk.ptr < base || chunk.ptr + chunk.size > base + host_size) {
+        return absl::OutOfRangeError(absl::StrCat(
+            "Chunk out of bounds. Chunk ptr: ",
+            reinterpret_cast<uintptr_t>(chunk.ptr), ", size: ", chunk.size,
+            ", Host base: ", reinterpret_cast<uintptr_t>(base),
+            ", Host size: ", host_size));
+      }
+    }
+  }
+  return absl::OkStatus();
+}
 
 absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
                                 size_t layer_idx, size_t shard_idx,
@@ -132,7 +270,7 @@ BlockTransport::~BlockTransport() = default;
 absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                                                  const PacketHeader& header) {
   ApplySocketAffinityAndBinding(client_fd);
-  size_t bytes_per_block = block_delegate_->bytes_per_block();
+  const size_t bytes_per_block = block_delegate_->bytes_per_block();
 
   if (header.op == 1) {  // Push
     TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
@@ -149,11 +287,36 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
-          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id, 1,
-                                             bytes_per_block));
-          uint8_t* dest_ptr =
-              block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-          return ReadExact(client_fd, dest_ptr, bytes_per_block);
+          if (block_delegate_->use_block_chunks(header.uuid)) {
+            std::string local_addr = GetLocalAddr(client_fd);
+            std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
+                l, sh, dst_id, header.uuid, header.remote_id, local_addr);
+            RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+
+            uint32_t expected_size = 0;
+            for (const auto& chunk : chunks) {
+              expected_size += chunk.size;
+            }
+
+            uint32_t sender_size = 0;
+            RETURN_IF_ERROR(
+                ReadExact(client_fd, &sender_size, sizeof(sender_size)));
+
+            if (sender_size != expected_size) {
+              return absl::InternalError(absl::StrCat(
+                  "Block transfer size mismatch! Sender offered: ", sender_size,
+                  " bytes, but Receiver expected: ", expected_size,
+                  " bytes for Block ID: ", dst_id));
+            }
+
+            return ReadVExact(client_fd, chunks);
+          } else {
+            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
+                                               1, bytes_per_block));
+            uint8_t* dest_ptr =
+                block_delegate_->GetBlockHostPointer(l, sh, dst_id);
+            return ReadExact(client_fd, dest_ptr, bytes_per_block);
+          }
         }));
 
     RETURN_IF_ERROR(
@@ -174,11 +337,36 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
-          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id, 1,
-                                             bytes_per_block));
-          uint8_t* dest_ptr =
-              block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-          return ReadExact(client_fd, dest_ptr, bytes_per_block);
+          if (block_delegate_->use_block_chunks(header.uuid)) {
+            std::string local_addr = GetLocalAddr(client_fd);
+            std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
+                l, sh, dst_id, header.uuid, header.remote_id, local_addr);
+            RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+
+            uint32_t expected_size = 0;
+            for (const auto& chunk : chunks) {
+              expected_size += chunk.size;
+            }
+
+            uint32_t sender_size = 0;
+            RETURN_IF_ERROR(
+                ReadExact(client_fd, &sender_size, sizeof(sender_size)));
+
+            if (sender_size != expected_size) {
+              return absl::InternalError(absl::StrCat(
+                  "Block transfer size mismatch! Sender offered: ", sender_size,
+                  " bytes, but Receiver expected: ", expected_size,
+                  " bytes for Block ID: ", dst_id));
+            }
+
+            return ReadVExact(client_fd, chunks);
+          } else {
+            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
+                                               1, bytes_per_block));
+            uint8_t* dest_ptr =
+                block_delegate_->GetBlockHostPointer(l, sh, dst_id);
+            return ReadExact(client_fd, dest_ptr, bytes_per_block);
+          }
         }));
 
     RETURN_IF_ERROR(
@@ -217,12 +405,29 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
         block_delegate_->num_shards(), local_blocks,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           const int read_id = static_cast<int>(header.remote_id + k);
-          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, read_id, 1,
-                                             bytes_per_block));
-          RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
-          const uint8_t* src_ptr =
-              block_delegate_->GetBlockHostPointer(l, sh, read_id);
-          return WriteExact(client_fd, src_ptr, bytes_per_block);
+          if (block_delegate_->use_block_chunks(header.uuid)) {
+            std::vector<BlockChunk> chunks =
+                block_delegate_->GetBlockChunks(l, sh, read_id, header.uuid);
+            RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+            RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
+
+            uint32_t total_size = 0;
+            for (const auto& chunk : chunks) {
+              total_size += chunk.size;
+            }
+
+            RETURN_IF_ERROR(
+                WriteExact(client_fd, &total_size, sizeof(total_size)));
+
+            return WriteVExact(client_fd, chunks);
+          } else {
+            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, read_id,
+                                               1, bytes_per_block));
+            RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
+            const uint8_t* src_ptr =
+                block_delegate_->GetBlockHostPointer(l, sh, read_id);
+            return WriteExact(client_fd, src_ptr, bytes_per_block);
+          }
         }));
   } else if (header.op == 4) {  // Single Block Push (Direct)
     int dst_id = static_cast<int>(header.remote_id);
@@ -338,7 +543,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& local_block_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
-    MajorOrder major_order, BlockReceivedCallback on_block_received) {
+    MajorOrder major_order, BlockReceivedCallback on_block_received,
+    uint64_t uuid) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
     return absl::InvalidArgumentError("Block list cannot be empty");
@@ -398,7 +604,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
                     local_block_offset, local_block_count, remote_block_offset,
                     remote_block_count, std::ref(src_block_ids),
                     std::ref(allocated_ids), std::ref(explicit_dst_ptrs),
-                    std::ref(statuses), major_order, on_block_received));
+                    std::ref(statuses), major_order, on_block_received, uuid));
 
     local_block_offset += local_block_count;
     remote_block_offset += remote_block_count;
@@ -443,7 +649,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   header.op = dst_block_ids.empty() ? 1 : 6;
   header.flags = static_cast<uint8_t>(major_order);
   header.buffer_id = 0;
-  header.remote_id = 0;
+  header.remote_id = static_cast<uint32_t>(block_delegate_->node_id());
   header.local_id = 0;
   header.uuid = uuid;
   if (block_count > std::numeric_limits<uint32_t>::max()) {
@@ -490,18 +696,33 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     }
   }
 
-  size_t bytes_per_block = block_delegate_->bytes_per_block();
-
   s = ForEachPayload(
       major_order, block_delegate_->num_layers(), block_delegate_->num_shards(),
       block_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
-        const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
         ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
         const int src_id = src_block_ids[block_offset + k];
-        RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
-                                           bytes_per_block));
-        const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
-        return WriteExact(fd, src_ptr, bytes_per_block);
+
+        if (block_delegate_->use_block_chunks(uuid)) {
+          std::vector<BlockChunk> chunks =
+              block_delegate_->GetBlockChunks(l, sh, src_id, uuid, -1, peer);
+          RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+
+          uint32_t total_size = 0;
+          for (const auto& chunk : chunks) {
+            total_size += chunk.size;
+          }
+
+          RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
+
+          return WriteVExact(fd, chunks);
+        } else {
+          size_t bytes_per_block = block_delegate_->bytes_per_block();
+          const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
+          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
+                                             bytes_per_block));
+          const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
+          return WriteExact(fd, src_ptr, bytes_per_block);
+        }
       });
   if (!s.ok()) {
     statuses[stream_idx] = s;
@@ -525,7 +746,7 @@ void BlockTransport::H2hReadWorker(
     const std::vector<int>& allocated_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
-    BlockReceivedCallback on_block_received) {
+    BlockReceivedCallback on_block_received, uint64_t uuid) {
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -586,8 +807,6 @@ void BlockTransport::H2hReadWorker(
                       curr_local_count * SF});
   }
 
-  size_t bytes_per_block = block_delegate_->bytes_per_block();
-
   for (const auto& chunk : chunks) {
     PacketHeader header = {};
     header.op = 2;  // Pull request
@@ -604,6 +823,7 @@ void BlockTransport::H2hReadWorker(
     }
     header.remote_id = static_cast<uint32_t>(remote_read_block_id);
     header.count_or_size = static_cast<uint32_t>(chunk.remote_count);
+    header.uuid = uuid;
 
     absl::Status s = WriteExact(fd, &header, sizeof(header));
     if (!s.ok()) {
@@ -653,14 +873,53 @@ void BlockTransport::H2hReadWorker(
             return absl::InvalidArgumentError(
                 "Destination block id is negative");
           }
-          if (explicit_dst_ptrs.empty()) {
-            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
-                                               1, bytes_per_block));
-          }
-          uint8_t* dst_ptr = base_host_ptr + dst_id * bytes_per_block;
-          RETURN_IF_ERROR(ReadExact(fd, dst_ptr, bytes_per_block));
-          if (on_block_received != nullptr) {
-            RETURN_IF_ERROR(on_block_received(l, sh, dst_id, bytes_per_block));
+
+          if (block_delegate_->use_block_chunks(uuid)) {
+            std::vector<BlockChunk> chunks =
+                block_delegate_->GetBlockChunks(l, sh, dst_id, uuid);
+            RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+
+            if (!explicit_dst_ptrs.empty()) {
+              uint8_t* default_base = block_delegate_->GetHostPointer(l, sh);
+              uint8_t* explicit_base = base_host_ptr;
+              for (auto& chunk : chunks) {
+                size_t offset = chunk.ptr - default_base;
+                chunk.ptr = explicit_base + offset;
+              }
+            }
+
+            uint32_t expected_size = 0;
+            for (const auto& chunk : chunks) {
+              expected_size += chunk.size;
+            }
+
+            uint32_t sender_size = 0;
+            RETURN_IF_ERROR(ReadExact(fd, &sender_size, sizeof(sender_size)));
+
+            if (sender_size != expected_size) {
+              return absl::InternalError(absl::StrCat(
+                  "Block transfer size mismatch! Sender offered: ", sender_size,
+                  " bytes, but Receiver expected: ", expected_size,
+                  " bytes for Block ID: ", dst_id));
+            }
+
+            RETURN_IF_ERROR(ReadVExact(fd, chunks));
+
+            if (on_block_received != nullptr) {
+              RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));
+            }
+          } else {
+            size_t bytes_per_block = block_delegate_->bytes_per_block();
+            if (explicit_dst_ptrs.empty()) {
+              RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
+                                                 1, bytes_per_block));
+            }
+            uint8_t* dst_ptr = base_host_ptr + dst_id * bytes_per_block;
+            RETURN_IF_ERROR(ReadExact(fd, dst_ptr, bytes_per_block));
+            if (on_block_received != nullptr) {
+              RETURN_IF_ERROR(
+                  on_block_received(l, sh, dst_id, bytes_per_block));
+            }
           }
           return absl::OkStatus();
         });

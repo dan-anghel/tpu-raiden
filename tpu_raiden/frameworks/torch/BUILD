@@ -71,6 +71,8 @@ cc_library(
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:structured_log_buffer",
     ],
 )
 
@@ -89,6 +91,8 @@ cc_library(
     deps = [
         ":torch_tpu_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
@@ -131,6 +135,7 @@ cc_library(
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "//tpu_raiden/kv_cache:kv_cache_listener",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
@@ -289,6 +294,7 @@ cc_library(
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "//tpu_raiden/kv_cache:kv_cache_listener",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",

@@ -38,10 +38,35 @@ using BlockReceivedCallback =
     std::function<absl::Status(size_t layer_idx, size_t shard_idx,
                                int block_id, size_t size_bytes)>;
 
+// Represents a contiguous span of memory.
+struct BlockChunk {
+  uint8_t* ptr;
+  size_t size;
+};
+
 // Delegate interface for BlockTransport inheriting raw memory primitives.
 class BlockTransportDelegate : public RawBufferTransportDelegate {
  public:
   ~BlockTransportDelegate() override = default;
+
+  virtual bool use_block_chunks(uint64_t uuid) const { return false; }
+
+  // Returns the active node ID (rank) of the worker.
+  virtual int64_t node_id() const { return -1; }
+
+  // Returns the list of contiguous chunks that constitute a block
+  // for a specific transaction (identified by uuid).
+  // Optionally accepts the sender_node_id to distinguish senders in many-to-one
+  // transfers.
+  virtual std::vector<BlockChunk> GetBlockChunks(size_t layer_idx,
+                                                 size_t shard_idx, int block_id,
+                                                 uint64_t uuid,
+                                                 int64_t sender_node_id = -1,
+                                                 absl::string_view peer = "") {
+    // Default implementation: block is contiguous and of uniform size.
+    return {{GetBlockHostPointer(layer_idx, shard_idx, block_id),
+             bytes_per_block()}};
+  }
 
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(
       size_t num_blocks, uint64_t uuid = 0) = 0;
@@ -96,7 +121,7 @@ class BlockTransport : public RawBufferTransport {
       const std::vector<int>& local_block_ids = {},
       const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor,
-      BlockReceivedCallback on_block_received = {});
+      BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0);
 
   // Write a single block of data directly from a host pointer to a remote block ID.
   absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
@@ -123,7 +148,8 @@ class BlockTransport : public RawBufferTransport {
                      const std::vector<uint8_t*>& explicit_dst_ptrs,
                      std::vector<absl::Status>& statuses,
                      MajorOrder major_order,
-                     BlockReceivedCallback on_block_received);
+                     BlockReceivedCallback on_block_received,
+                     uint64_t uuid = 0);
 
   BlockTransportDelegate* block_delegate_;
 };

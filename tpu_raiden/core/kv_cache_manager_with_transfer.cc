@@ -68,7 +68,10 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/tsl/platform/errors.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -76,6 +79,8 @@
 
 namespace tpu_raiden {
 namespace {
+
+constexpr absl::Duration kPendingWorkTimeout = absl::Seconds(30);
 
 [[noreturn]] void ThrowStatus(absl::string_view context,
                               const absl::Status& status) {
@@ -518,6 +523,45 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
          << " failed=0";
   EmitTimingLog(timing.str());
   return static_cast<int64_t>(uuid);
+}
+
+absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
+    uint64_t uuid, const kv_cache::StartTransferRequest& request,
+    bool is_sender) {
+  // 1. Call base class implementation to register the plan in active_plans_
+  TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
+      uuid, request, is_sender));
+
+  // 2. If we are the receiver and the destination memory type is HBM,
+  //    populate active_recv_entries_ to enable automatic H2D copy!
+  if (!is_sender && request.dst_mem_type() == kv_cache::MEMORY_TYPE_HBM) {
+    std::lock_guard<std::mutex> lock(mu_);
+    RecvEntry recv_entry;
+    std::string req_id = absl::StrCat("resharded_transfer_", uuid);
+    recv_entry.req_id = req_id;
+
+    int64_t total_blocks = 0;
+    for (const auto& [src_replica_idx, schedule] :
+         request.shard_push_schedules()) {
+      std::set<int> unique_blocks_from_this_source;
+      for (const auto& push_entry : schedule.entries()) {
+        recv_entry.host_to_chip[push_entry.dst_block_id()] =
+            push_entry.dst_block_id();
+        unique_blocks_from_this_source.insert(push_entry.dst_block_id());
+      }
+      total_blocks += unique_blocks_from_this_source.size();
+    }
+    recv_entry.total_blocks = total_blocks;
+    if (total_blocks > 0) {
+      active_recv_entries_[uuid] = std::move(recv_entry);
+      LOG(INFO) << "RegisterActivePlan (Receiver): Populated "
+                   "active_recv_entries_ for UUID "
+                << uuid << " with " << total_blocks
+                << " total physical block-pushes (including duplicates across "
+                   "sources) for automatic H2D.";
+    }
+  }
+  return absl::OkStatus();
 }
 
 void KVCacheManagerWithTransfer::StartRead(
@@ -1077,6 +1121,27 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
       active_recv_entries_.erase(uuid);
     }
   });
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerWithTransfer::WaitForPendingWork() {
+  LOG(INFO) << "Waiting for pending H2D transfers to complete...";
+  const absl::Time start = absl::Now();
+  while (true) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (active_recv_entries_.empty()) {
+        break;
+      }
+      const absl::Duration elapsed = absl::Now() - start;
+      if (elapsed > kPendingWorkTimeout) {
+        return absl::DeadlineExceededError(
+            "Timeout waiting for pending H2D transfers");
+      }
+    }
+    absl::SleepFor(absl::Milliseconds(100));
+  }
+  LOG(INFO) << "All pending H2D transfers completed.";
   return absl::OkStatus();
 }
 

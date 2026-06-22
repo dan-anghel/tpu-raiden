@@ -92,17 +92,18 @@ NB_MODULE(_tpu_raiden_torch, m) {
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>, bool, int>(),
-           nb::arg("device_tensors"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool>(),
+                    int64_t, double, bool, std::optional<int>>(),
            nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
-           nb::arg("unsafe_skip_buffer_lock") = true)
+           nb::arg("unsafe_skip_buffer_lock") = true,
+           nb::arg("listener_port") = nb::none())
+
       .def(
           "H2d",
           [](KVCacheManager& self,
@@ -198,6 +199,10 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def_prop_ro("num_shards", &KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size)
       .def_prop_ro("local_control_port", &KVCacheManager::local_control_port)
+      .def_prop_ro("listener_port", &KVCacheManager::listener_port)
+      .def_prop_ro("is_listener_active",
+                   &KVCacheManager::is_listener_active)
+
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("block_ids"))
       .def("start_read", &KVCacheManager::StartRead, nb::arg("req_id"),

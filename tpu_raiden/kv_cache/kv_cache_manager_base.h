@@ -38,6 +38,7 @@
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/kv_cache/kv_cache_service.pb.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -142,6 +143,13 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
       std::string peer, const std::vector<int>& src_block_ids);
 
+  // Executes a distributed resharding push transfer based on precise
+  // centralized Controller schedules.
+  absl::Status PushKVCacheResharded(const StartTransferRequest& request);
+
+  // Blocks until all pending asynchronous transfers/copies are complete.
+  virtual absl::Status WaitForPendingWork() { return absl::OkStatus(); }
+
   absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids,
@@ -198,6 +206,18 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   LogicalBlockManager* block_manager() const { return block_manager_.get(); }
 
   size_t bytes_per_block() const override;
+
+  bool use_block_chunks(uint64_t uuid) const override;
+
+  virtual absl::Status RegisterActivePlan(uint64_t uuid,
+                                          const StartTransferRequest& request,
+                                          bool is_sender);
+
+  std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
+      size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
+      int64_t sender_node_id = -1, absl::string_view peer = "") override;
+
+  bool IsDramDestination(uint64_t uuid) const;
 
  protected:
   const PJRT_Api* c_api_ = nullptr;
@@ -260,6 +280,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::Mutex block_readiness_mu_;
   BlockReadinessCallback block_readiness_callback_
       ABSL_GUARDED_BY(block_readiness_mu_);
+
+  mutable absl::Mutex plans_mu_;
+  struct RegisteredPlan {
+    StartTransferRequest request;
+    bool is_sender = false;
+  };
+  absl::flat_hash_map<uint64_t, RegisteredPlan> active_plans_
+      ABSL_GUARDED_BY(plans_mu_);
 };
 
 }  // namespace kv_cache

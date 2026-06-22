@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:proto.bzl", "py_proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -55,6 +59,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":kv_cache_service_cc_proto",
         ":logical_block_manager",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:numa_thread_pool",
@@ -199,5 +204,50 @@ cc_test(
         "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+proto_library(
+    name = "kv_cache_service_proto",
+    srcs = ["kv_cache_service.proto"],
+)
+
+cc_proto_library(
+    name = "kv_cache_service_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":kv_cache_service_proto"],
+)
+
+py_proto_library(
+    name = "kv_cache_service_py_pb2",
+    visibility = ["//visibility:public"],
+    deps = [":kv_cache_service_proto"],
+)
+
+py_library(
+    name = "kv_cache_controller",
+    srcs = ["kv_cache_controller.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_service_py_pb2",
+        "//tpu_raiden/rpc:raiden_controller",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_listener",
+    srcs = ["kv_cache_listener.cc"],
+    hdrs = ["kv_cache_listener.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_base",
+        ":kv_cache_service_cc_proto",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
     ],
 )

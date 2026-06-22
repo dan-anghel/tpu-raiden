@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -34,6 +35,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -48,6 +50,7 @@
 #include "tpu_raiden/core/raw_transfer_impl.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
+#include "tpu_raiden/kv_cache/kv_cache_service.pb.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -82,8 +85,7 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator)
     : RaidenManagerBase(layer_buffers.size(),
@@ -222,11 +224,10 @@ KVCacheManagerBase::KVCacheManagerBase(
 
 KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate, int parallelism,
-    HostBufferAllocator host_allocator)
-    : RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                        local_port, parallelism) {
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism, HostBufferAllocator host_allocator)
+    : RaidenManagerBase(num_layers, num_shards, slice_byte_size, local_port,
+                        parallelism) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
   semaphore_ = std::make_unique<xla::Semaphore>(4);
@@ -898,6 +899,15 @@ size_t KVCacheManagerBase::bytes_per_block() const {
   return slice_byte_size_;
 }
 
+bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {
+  absl::MutexLock l(plans_mu_);
+  auto it = active_plans_.find(uuid);
+  if (it == active_plans_.end()) {
+    return false;
+  }
+  return it->second.request.use_block_chunks();
+}
+
 absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>
 KVCacheManagerBase::DispatchH2dWork(
     const std::vector<CopyWork>& works, std::optional<int64_t> slot_idx,
@@ -1238,6 +1248,175 @@ absl::Status KVCacheManagerBase::WaitForBlockRead(size_t layer_idx,
     return absl::OkStatus();
   }
   return callback(layer_idx, shard_idx, block_id);
+}
+
+absl::Status KVCacheManagerBase::PushKVCacheResharded(
+    const StartTransferRequest& request) {
+  // 1. Register the active plan so GetBlockChunks can use it
+  TF_RETURN_IF_ERROR(
+      RegisterActivePlan(request.uuid(), request, /*is_sender=*/true));
+
+  // 2. D2H to copy from device to host.
+  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
+  TF_RETURN_IF_ERROR(d2h_future.Await());
+
+  // 3. Group entries by dst_peer and collect unique block IDs
+  std::map<std::string, std::vector<std::pair<int, int>>> peer_transfers;
+  for (const auto& [shard_idx, schedule] : request.shard_push_schedules()) {
+    for (const auto& entry : schedule.entries()) {
+      peer_transfers[entry.dst_peer()].push_back(
+          {entry.src_block_id(), entry.dst_block_id()});
+    }
+  }
+
+  // 4. Push blocks for each peer
+  for (auto& [peer, transfers] : peer_transfers) {
+    std::vector<int> src_block_ids;
+    std::vector<int> dst_block_ids;
+    std::set<std::pair<int, int>> seen;
+    for (const auto& p : transfers) {
+      if (seen.insert(p).second) {
+        src_block_ids.push_back(p.first);
+        dst_block_ids.push_back(p.second);
+      }
+    }
+
+    if (src_block_ids.empty()) continue;
+
+    if (!server_) {
+      return absl::FailedPreconditionError("Transport server is not running");
+    }
+
+    // Call BlockTransport::Push
+    TF_ASSIGN_OR_RETURN(
+        std::vector<int> allocated_ids,
+        server_->Push(peer, src_block_ids, dst_block_ids, /*parallelism=*/1,
+                      transport::MajorOrder::kLayerMajor, request.uuid()));
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerBase::RegisterActivePlan(
+    uint64_t uuid, const StartTransferRequest& request, bool is_sender) {
+  absl::MutexLock l(plans_mu_);
+  if (auto [it, inserted] =
+          active_plans_.try_emplace(uuid, RegisteredPlan{request, is_sender});
+      !inserted) {
+    return absl::AlreadyExistsError(
+        absl::StrCat("Plan with UUID ", uuid, " is already registered!"));
+  }
+  LOG(INFO) << "RegisterActivePlan: Registered plan for UUID " << uuid
+            << ", is_sender: " << is_sender << ", shard_push_schedules size: "
+            << request.shard_push_schedules().size();
+  return absl::OkStatus();
+}
+
+bool KVCacheManagerBase::IsDramDestination(uint64_t uuid) const {
+  absl::MutexLock l(plans_mu_);
+  auto it = active_plans_.find(uuid);
+  if (it != active_plans_.end()) {
+    return it->second.request.dst_mem_type() ==
+           tpu_raiden::kv_cache::MEMORY_TYPE_DRAM;
+  }
+  return false;
+}
+
+std::vector<tpu_raiden::transport::BlockChunk>
+KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
+                                   int block_id, uint64_t uuid,
+                                   int64_t sender_node_id,
+                                   absl::string_view peer) {
+  RegisteredPlan plan;
+  bool has_plan = false;
+  {
+    absl::MutexLock l(plans_mu_);
+    auto it = active_plans_.find(uuid);
+    if (it != active_plans_.end()) {
+      plan = it->second;
+      has_plan = true;
+    }
+  }
+
+  if (!has_plan || uuid == 0) {
+    auto default_chunk = GetBlockHostPointer(layer_idx, shard_idx, block_id);
+    size_t default_size = bytes_per_block();
+    return {{default_chunk, default_size}};
+  }
+
+  const auto& request = plan.request;
+  const auto& schedules = request.shard_push_schedules();
+  auto schedule_it = schedules.find(static_cast<int32_t>(shard_idx));
+
+  bool is_sender = plan.is_sender;
+
+  std::vector<tpu_raiden::transport::BlockChunk> chunks;
+  size_t block_size_bytes = bytes_per_block();
+  size_t block_start_byte = static_cast<size_t>(block_id) * block_size_bytes;
+  size_t block_end_byte = block_start_byte + block_size_bytes;
+  uint8_t* base_host_ptr = GetHostPointer(layer_idx, shard_idx);
+
+  if (is_sender) {
+    const auto& schedule = schedule_it->second;
+    for (const auto& entry : schedule.entries()) {
+      if (!peer.empty() && entry.dst_peer() != peer) {
+        continue;
+      }
+      size_t src_offset = entry.src_offset_bytes();
+      size_t size = entry.size_bytes();
+      if (src_offset >= block_start_byte &&
+          src_offset + size <= block_end_byte) {
+        size_t block_relative_offset = src_offset - block_start_byte;
+        chunks.push_back(
+            {.ptr = base_host_ptr + block_start_byte + block_relative_offset,
+             .size = size});
+      }
+    }
+  } else {
+    int found_src_shard = -1;
+    if (sender_node_id != -1) {
+      found_src_shard = static_cast<int>(sender_node_id);
+    } else {
+      for (const auto& [src_shard, src_schedule] : schedules) {
+        for (const auto& entry : src_schedule.entries()) {
+          if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx) {
+            size_t dst_offset = entry.dst_offset_bytes();
+            if (dst_offset >= block_start_byte && dst_offset < block_end_byte) {
+              found_src_shard = src_shard;
+              break;
+            }
+          }
+        }
+        if (found_src_shard != -1) break;
+      }
+    }
+
+    if (found_src_shard != -1) {
+      const auto& schedule = schedules.at(found_src_shard);
+      for (const auto& entry : schedule.entries()) {
+        if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx) {
+          if (!peer.empty() && entry.dst_peer() != peer) {
+            continue;
+          }
+          size_t dst_offset = entry.dst_offset_bytes();
+          size_t size = entry.size_bytes();
+          if (dst_offset >= block_start_byte &&
+              dst_offset + size <= block_end_byte) {
+            size_t block_relative_offset = dst_offset - block_start_byte;
+            chunks.push_back({.ptr = base_host_ptr + block_start_byte +
+                                     block_relative_offset,
+                              .size = size});
+          }
+        }
+      }
+    }
+  }
+
+  if (!chunks.empty()) {
+    return chunks;
+  }
+
+  return {};
 }
 
 }  // namespace kv_cache

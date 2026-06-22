@@ -250,15 +250,14 @@ cc_library(
         ":raw_transfer_core",
         ":tpu_utils",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
-        "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
-        "@com_google_absl//absl/types:span",
-        "@xla//xla:future",
+        "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:errors",
     ],
 )
 

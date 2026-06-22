@@ -30,10 +30,8 @@
 
 import os
 import sys
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
-import torch
-import torch_tpu  # noqa: F401  # Load torch shared libraries before the extension.
 from torch_tpu import _loader as _torch_tpu_loader
 
 
@@ -77,6 +75,7 @@ class KVCacheManager:
       num_slots: int,
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
+      listener_port: Optional[int] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -89,6 +88,8 @@ class KVCacheManager:
       num_slots: Number of transfer slots to allocate.
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
+      listener_port: Sockets server port for incoming C++ KVCacheListener
+        commands.
     """
     self._impl = _impl.KVCacheManager(
         kv_caches=kv_caches,
@@ -98,6 +99,7 @@ class KVCacheManager:
         num_slots=num_slots,
         timeout_s=timeout_s,
         unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
+        listener_port=listener_port,
     )
 
   @property
@@ -109,6 +111,11 @@ class KVCacheManager:
   def local_control_port(self) -> int:
     """Returns the active control plane listener port."""
     return self._impl.local_control_port
+
+  @property
+  def local_port(self) -> int:
+    """Returns the active data port."""
+    return self._impl.local_port
 
   def register_read(
       self, req_id: str, uuid: int, block_ids: List[int]
@@ -195,3 +202,37 @@ class KVCacheManager:
     if copy_sizes is None:
       copy_sizes = [1] * len(src_offsets)
     return self._impl.H2d(src_offsets, dst_offsets, copy_sizes)
+
+  @property
+  def listener_port(self) -> Optional[int]:
+    """Returns the active local port assigned to the C++ KVCacheListener."""
+    return self._impl.listener_port
+
+  @property
+  def is_listener_active(self) -> bool:
+    """Returns whether the native C++ KVCacheListener is actively running."""
+    return self._impl.is_listener_active
+
+  def h2d(
+      self,
+      src_offsets: List[int] = None,
+      dst_offsets: List[int] = None,
+      sizes: List[int] = None,
+  ) -> Any:
+    """Triggers Host-to-Device (H2D) copy of staged host buffer to Device memory."""
+    src_offsets = src_offsets or []
+    dst_offsets = dst_offsets or []
+    sizes = sizes or []
+    return self._impl.H2d(src_offsets, dst_offsets, sizes)
+
+  def d2h(
+      self,
+      src_offsets: List[int] = None,
+      dst_offsets: List[int] = None,
+      sizes: List[int] = None,
+  ) -> Any:
+    """Triggers Device-to-Host (D2H) copy of Device memory to Host buffer."""
+    src_offsets = src_offsets or []
+    dst_offsets = dst_offsets or []
+    sizes = sizes or []
+    return self._impl.D2h(src_offsets, dst_offsets, sizes)

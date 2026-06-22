@@ -167,6 +167,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
              std::vector<std::string>>
   CompleteReadRaw();
 
+  absl::Status RegisterActivePlan(uint64_t uuid,
+                                  const kv_cache::StartTransferRequest& request,
+                                  bool is_sender) override;
+
   int local_control_port() const { return local_control_port_; }
   int64_t node_id() const { return node_id_; }
 
@@ -265,6 +269,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
+
+  absl::Status WaitForPendingWork() override;
 
   struct RecvEntry {
     std::string req_id;

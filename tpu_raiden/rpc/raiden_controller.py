@@ -29,16 +29,19 @@
 
 import asyncio
 import dataclasses
+import enum
 import math
+import random
 import socket
 import threading
 import time
-from typing import Optional, Protocol, Union, runtime_checkable
+import typing
+from typing import Any, Optional, Union
 
 from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
 
 
-class NameResolver(Protocol):
+class NameResolver(typing.Protocol):
   """Interface for resolving remote network coordinates (e.g.
 
   BNS) to raw IP addresses.
@@ -48,8 +51,8 @@ class NameResolver(Protocol):
     ...
 
 
-@runtime_checkable
-class RaidenEngine(Protocol):
+@typing.runtime_checkable
+class RaidenEngine(typing.Protocol):
   """Standardized Data-Plane collective engine interface for Raiden Worker daemons."""
 
   @property
@@ -58,7 +61,7 @@ class RaidenEngine(Protocol):
     ...
 
 
-class RaidenMemoryType:
+class RaidenMemoryType(enum.IntEnum):
   """Raiden memory type constants."""
 
   DRAM = 1
@@ -97,7 +100,7 @@ class TransferPlan:
   plan: dict[RaidenId, list[list[tuple[RaidenId, int, list[NDSlice]]]]]
 
   shard_push_schedules: dict[
-      RaidenId, dict[int, list[tuple[str, int, int, int, int]]]
+      RaidenId, dict[int, list[tuple[str, int, int, int, int, int, int]]]
   ] = dataclasses.field(default_factory=dict)
 
   # Maps every RaidenId in the plan to its physical Control-Plane RPC
@@ -111,6 +114,9 @@ class TransferPlan:
   worker_data_addresses: dict[RaidenId, list[str]] = dataclasses.field(
       default_factory=dict
   )
+  uuid: int = 0
+  dst_mem_type: int = RaidenMemoryType.DRAM
+  use_block_chunks: bool = False
 
 
 def create_server_socket(port: int) -> socket.socket:
@@ -617,6 +623,7 @@ class RaidenController:
       src_block_ids: Optional[list[int]] = None,
       dst_device_block_ids: Optional[list[int]] = None,
       dst_mem_type: RaidenMemoryType = RaidenMemoryType.DRAM,
+      use_block_chunks: bool = False,
   ) -> RaidenFuture:
     """For a requested data transfer, generates a transfer plan for the work units to carry out and start it.
 
@@ -698,42 +705,69 @@ class RaidenController:
       if d_slices:
         dst_slices[d] = d_slices
 
-    itemsize = self._registered_itemsizes.get(selected_src)
-    if src_slices is not None and itemsize is None:
-      raise ValueError(
-          "itemsize must be registered if shard_nd_slices is provided."
-      )
+    # Check if we have slices for any of the src_units and enforce itemsize
+    for src_unit in src_units:
+      src_slices = self._registered_shard_slices.get(src_unit)
+      if src_slices is not None:
+        itemsize = self._registered_itemsizes.get(src_unit)
+        if itemsize is None:
+          raise ValueError(
+              "itemsize must be registered if shard_nd_slices is provided."
+          )
 
+    has_slices = any(self._registered_shard_slices.get(s) for s in src_units)
     shard_push_schedules: dict[
-        RaidenId, dict[int, list[tuple[str, int, int, int, int]]]
+        RaidenId, dict[int, list[tuple[str, int, int, int, int, int, int]]]
     ] = {}
 
-    if src_slices and len(dst_slices) == len(dst_units):
-      push_schedules: dict[int, list[tuple[str, int, int, int, int]]] = {}
-      for src_shard_idx, src_slice in enumerate(src_slices):
-        shard_entries = []
-        for dst_unit in dst_units:
-          d_slices = dst_slices[dst_unit]
-          dst_shards = self._resolve_shards(dst_unit)
-          for dst_shard_idx, dst_slice in enumerate(d_slices):
-            intersection = intersect_nd_slices(src_slice, dst_slice)
-            if intersection:
-              dst_peer = dst_shards[dst_shard_idx % len(dst_shards)]
-              chunks = generate_1d_copy_chunks(
-                  src_slice, dst_slice, intersection, itemsize
-              )
-              for src_offset, dst_offset, size in chunks:
-                shard_entries.append((
-                    dst_peer,
-                    dst_shard_idx,
-                    dst_offset,
-                    src_offset,
-                    size,
-                ))
-        if shard_entries:
-          push_schedules[src_shard_idx] = shard_entries
+    if has_slices and len(dst_slices) == len(dst_units):
+      for src_unit in src_units:
+        src_slices = self._registered_shard_slices.get(src_unit)
+        if not src_slices:
+          continue
+        itemsize = self._registered_itemsizes.get(src_unit)
 
-      shard_push_schedules[selected_src] = push_schedules
+        push_schedules: dict[
+            int, list[tuple[str, int, int, int, int, int, int]]
+        ] = {}
+        for src_shard_idx, src_slice in enumerate(src_slices):
+          shard_entries = []
+          for dst_unit in dst_units:
+            d_slices = dst_slices[dst_unit]
+            dst_shards = self._resolve_shards(dst_unit)
+            for dst_shard_idx, dst_slice in enumerate(d_slices):
+              intersection = intersect_nd_slices(src_slice, dst_slice)
+              if intersection:
+                dst_peer = dst_shards[dst_shard_idx % len(dst_shards)]
+                chunks = generate_1d_copy_chunks(
+                    src_slice, dst_slice, intersection, itemsize
+                )
+                src_block_bytes = (
+                    math.prod([e - s for s, e in src_slice[1:]]) * itemsize
+                    if len(src_slice) > 1
+                    else itemsize
+                )
+                dst_block_bytes = (
+                    math.prod([e - s for s, e in dst_slice[1:]]) * itemsize
+                    if len(dst_slice) > 1
+                    else itemsize
+                )
+                for src_offset, dst_offset, size in chunks:
+                  src_block_id = src_offset // src_block_bytes
+                  dst_block_id = dst_offset // dst_block_bytes
+                  shard_entries.append((
+                      dst_peer,
+                      dst_shard_idx,
+                      dst_offset,
+                      src_offset,
+                      size,
+                      src_block_id,
+                      dst_block_id,
+                  ))
+          if shard_entries:
+            push_schedules[src_shard_idx] = shard_entries
+        if push_schedules:
+          shard_push_schedules[src_unit] = push_schedules
 
     rpc_addresses = {}
     if hasattr(self.worker_rpc_client, "get_worker_endpoints"):
@@ -742,12 +776,17 @@ class RaidenController:
     data_addresses = {unit: self._resolve_shards(unit) for unit in dst_units}
 
     plan = TransferPlan(
-        src_units=[selected_src],
+        src_units=list(shard_push_schedules.keys())
+        if shard_push_schedules
+        else [selected_src],
         dst_units=dst_units,
-        plan=plan,
+        plan=None if shard_push_schedules else plan,
         shard_push_schedules=shard_push_schedules,
         worker_rpc_addresses=rpc_addresses,
         worker_data_addresses=data_addresses,
+        uuid=random.randint(1, 2**63 - 1),
+        dst_mem_type=dst_mem_type,
+        use_block_chunks=use_block_chunks,
     )
 
     with self._lock:
@@ -757,14 +796,17 @@ class RaidenController:
       self._active_transfers[req_id] = plan
 
     async def _execute_transfer() -> None:
-      # Controller sends start_transfer RPC to ALL participating Source and
-      # Destination workers!
-      targets = [selected_src]
+      # 1. Send start_transfer to Destination workers first to register the plan.
+      # Since destinations have no push schedules, they will register and return immediately.
       for unit in dst_units:
-        if unit not in targets:
-          targets.append(unit)
-      for target_unit in targets:
-        await self.worker_rpc_client.start_transfer(target_unit, plan)
+        await self.worker_rpc_client.start_transfer(unit, plan)
+
+      # 2. Send start_transfer to Source workers to trigger the actual push.
+      # These will block until the push is complete.
+      await asyncio.gather(*[
+          self.worker_rpc_client.start_transfer(unit, plan)
+          for unit in plan.src_units
+      ])
 
     transfer_task = _execute_transfer()
     return RaidenFuture(session_id=session_id, transfer_task=transfer_task)
@@ -773,13 +815,20 @@ class RaidenController:
 class RaidenControllerServer:
   """Centralized Control-Plane network servicer hosting a highly secure JSON/Pickle TCP Controller server."""
 
-  def __init__(self, controller: RaidenController):
+  def __init__(
+      self,
+      controller: RaidenController,
+      proto_module: Optional[Any] = None,
+  ):
     """Instantiates RaidenControllerServer on an active RaidenController instance.
 
     Args:
       controller: High-level RaidenController instance managing transfer plans.
+      proto_module: Optional protobuf module to use for ControlRequest/Response.
+        Defaults to weight_synchronizer_service_pb2.
     """
     self._controller = controller
+    self._proto_module = proto_module or weight_synchronizer_service_pb2
     self._sock = create_server_socket(controller.port)
     self._stopped = False
     self._thread = None
@@ -847,16 +896,16 @@ class RaidenControllerServer:
       while len(req_bytes) < req_len:
         req_bytes += conn.recv(req_len - len(req_bytes))
 
-      req = weight_synchronizer_service_pb2.ControlRequest()
+      req = self._proto_module.ControlRequest()
       req.ParseFromString(req_bytes)
 
-      resp = weight_synchronizer_service_pb2.ControlResponse()
+      resp = self._proto_module.ControlResponse()
       resp.success = False
 
       try:
         if (
             req.command
-            == weight_synchronizer_service_pb2.ControlRequest.COMMAND_REGISTER_WORK_UNIT
+            == self._proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT
         ):
           reg = req.register_work_unit_request
           unit = RaidenId(
@@ -883,7 +932,7 @@ class RaidenControllerServer:
           resp.success = True
         elif (
             req.command
-            == weight_synchronizer_service_pb2.ControlRequest.COMMAND_START_TRANSFER
+            == self._proto_module.ControlRequest.COMMAND_START_TRANSFER
         ):
           start_req = req.start_transfer_request
           srcs = [
@@ -894,13 +943,12 @@ class RaidenControllerServer:
               RaidenId(u.job_name, u.job_replica_id, u.data_name)
               for u in start_req.dst_units
           ]
-          future = self._controller.start_transfer(srcs, dsts, None)
+          future = self._controller.start_transfer(
+              srcs, dsts, None, use_block_chunks=start_req.use_block_chunks
+          )
           loop.run_until_complete(future.wait())
           resp.success = True
-        elif (
-            req.command
-            == weight_synchronizer_service_pb2.ControlRequest.COMMAND_SHUTDOWN
-        ):
+        elif req.command == self._proto_module.ControlRequest.COMMAND_SHUTDOWN:
           if hasattr(self._controller.worker_rpc_client, "shutdown_workers"):
             loop.run_until_complete(
                 self._controller.worker_rpc_client.shutdown_workers()
@@ -936,14 +984,24 @@ class RaidenControllerClientFacade:
       self,
       controller_address: str,
       name_resolver: Optional[NameResolver] = None,
+      proto_module: Optional[Any] = None,
   ):
     """Accepts Controller server coordinate 'ip:port'."""
     self._address = controller_address
     self._name_resolver = name_resolver
+    self._proto_module = proto_module or weight_synchronizer_service_pb2
 
-  def _send_protobuf_rpc(
-      self, req: weight_synchronizer_service_pb2.ControlRequest
-  ) -> bool:
+  def _raiden_id_to_proto(
+      self,
+      unit: RaidenId,
+  ) -> Any:
+    return self._proto_module.RaidenIdProto(
+        job_name=unit.job_name,
+        job_replica_id=unit.job_replica_id,
+        data_name=unit.data_name,
+    )
+
+  def _send_protobuf_rpc(self, req: Any) -> bool:
     """Helper method to serialize and send an RPC Protobuf over robust persistent TCP sockets."""
     sock = connect_socket(
         self._address, timeout=300.0, resolver=self._name_resolver
@@ -968,7 +1026,7 @@ class RaidenControllerClientFacade:
           raise RuntimeError("Connection closed while reading response data")
         resp_bytes += chunk
 
-      resp = weight_synchronizer_service_pb2.ControlResponse()
+      resp = self._proto_module.ControlResponse()
       resp.ParseFromString(resp_bytes)
       if not resp.success:
         raise RuntimeError(
@@ -986,7 +1044,7 @@ class RaidenControllerClientFacade:
       shard_nd_slices: Optional[
           Union[
               list[list[tuple[int, int]]],
-              list[weight_synchronizer_service_pb2.NDSliceProto],
+              list[Any],
           ]
       ] = None,
       itemsize: Optional[int] = None,
@@ -1005,8 +1063,8 @@ class RaidenControllerClientFacade:
       raise ValueError(
           "itemsize must not be None if shard_nd_slices is provided."
       )
-    reg_req = weight_synchronizer_service_pb2.RegisterWorkUnitRequest(
-        unit=_raiden_id_to_proto(unit),
+    reg_req = self._proto_module.RegisterWorkUnitRequest(
+        unit=self._raiden_id_to_proto(unit),
         shards=shards,
         control_plane_rpc_address=(
             control_plane_rpc_address if control_plane_rpc_address else ""
@@ -1014,7 +1072,7 @@ class RaidenControllerClientFacade:
     )
     if shard_nd_slices:
       for nd_slice in shard_nd_slices:
-        if isinstance(nd_slice, weight_synchronizer_service_pb2.NDSliceProto):
+        if isinstance(nd_slice, self._proto_module.NDSliceProto):
           reg_req.shard_nd_slices.add().CopyFrom(nd_slice)
         else:
           slice_proto = reg_req.shard_nd_slices.add()
@@ -1025,8 +1083,8 @@ class RaidenControllerClientFacade:
     if itemsize:
       reg_req.itemsize = itemsize
 
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_REGISTER_WORK_UNIT,
+    req = self._proto_module.ControlRequest(
+        command=self._proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT,
         register_work_unit_request=reg_req,
     )
     self._send_protobuf_rpc(req)
@@ -1036,20 +1094,22 @@ class RaidenControllerClientFacade:
       src_units: list[RaidenId],
       dst_units: list[RaidenId],
       req_id: Optional[str] = None,
+      use_block_chunks: bool = False,
   ) -> bool:
     """Sends remote RPC to start global least-loaded transfer and blocks until fully complete."""
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
-        start_transfer_request=weight_synchronizer_service_pb2.StartTransferRequest(
-            src_units=[_raiden_id_to_proto(u) for u in src_units],
-            dst_units=[_raiden_id_to_proto(u) for u in dst_units],
+    req = self._proto_module.ControlRequest(
+        command=self._proto_module.ControlRequest.COMMAND_START_TRANSFER,
+        start_transfer_request=self._proto_module.StartTransferRequest(
+            src_units=[self._raiden_id_to_proto(u) for u in src_units],
+            dst_units=[self._raiden_id_to_proto(u) for u in dst_units],
+            use_block_chunks=use_block_chunks,
         ),
     )
     return self._send_protobuf_rpc(req)
 
   def shutdown(self) -> bool:
     """Sends remote RPC to trigger global cluster shutdown across all cooperating jobs."""
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_SHUTDOWN
+    req = self._proto_module.ControlRequest(
+        command=self._proto_module.ControlRequest.COMMAND_SHUTDOWN
     )
     return self._send_protobuf_rpc(req)
