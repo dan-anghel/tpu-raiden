@@ -31,6 +31,7 @@
 #include "third_party/py/torch/torch/headeronly/core/DeviceType.h"
 #include "torch_tpu/eager/device_buffer.h"
 #include "xla/future.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -147,18 +148,51 @@ T ValueOrThrow(absl::string_view context, absl::StatusOr<T> value_or) {
   return std::move(value_or).value();
 }
 
-void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
+void ValidateCpuTensor(const at::Tensor& tensor, absl::string_view role) {
   if (!tensor.device().is_cpu()) {
-    throw std::invalid_argument(std::string(role) + " must be a CPU tensor");
+    throw std::invalid_argument(absl::StrCat(role, " must be a CPU tensor"));
   }
   if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
+    throw std::invalid_argument(absl::StrCat(role, " must be contiguous"));
   }
 }
 
-void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
+void AwaitReady(xla::PjRtBuffer* buffer, absl::string_view role) {
   (void)buffer;
   (void)role;
+}
+
+// Raw transfer addresses the device buffer as a flat array of equal-size
+// major-dimension slices ("blocks"): block i lives at byte offset
+// i * GetMajorSliceByteSize(buffer). That mapping is only correct when logical
+// dimension 0 is the most-major physical dimension and the buffer's physical
+// size is an exact multiple of the slice size (the blocks tile it with no
+// remainder). Assert both so a buffer with an unexpected on-device layout fails
+// loudly here instead of silently transferring the wrong bytes.
+void ValidateMajorDimLayout(xla::PjRtBuffer* buffer, absl::string_view role) {
+  const xla::Shape& shape = buffer->on_device_shape();
+  const int rank = shape.dimensions().size();
+  if (rank < 1) {
+    throw std::invalid_argument(
+        absl::StrCat(role, " buffer must have rank >= 1 for block transfer"));
+  }
+  // In xla::Layout, minor_to_major(rank - 1) is the most-major physical dim.
+  if (auto pjrt_layout = buffer->layout();
+      pjrt_layout && pjrt_layout->xla_layout().minor_to_major(rank - 1) != 0) {
+    throw std::invalid_argument(
+        absl::StrCat(role, " buffer layout must place logical dimension 0 as the most-major "
+                     "physical dimension; block offsetting assumes blocks are the "
+                     "outermost, physically contiguous dimension."));
+  }
+  const int64_t slice = GetMajorSliceByteSize(buffer);
+  const int64_t physical_size =
+      ValueOrThrow(absl::StrCat(role, " physical buffer size for layout check"),
+                   buffer->GetOnDeviceSizeInBytes());
+  if (slice <= 0 || physical_size % slice != 0) {
+    throw std::invalid_argument(
+        absl::StrCat(role, " buffer physical size is not an exact multiple of its major-dimension "
+                     "slice size; the block-layout assumption does not hold."));
+  }
 }
 
 PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
@@ -167,6 +201,7 @@ PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
                             const std::vector<int64_t>& dst_offsets_major_dim,
                             const std::vector<int64_t>& copy_sizes_major_dim,
                             std::shared_ptr<void> user_hold = nullptr) {
+  ValidateMajorDimLayout(src_buffer, "Source");
   const bool is_partial = tpu_raiden::IsPartialCopy(
       src_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -207,6 +242,7 @@ PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,
                             const std::vector<int64_t>& dst_offsets_major_dim,
                             const std::vector<int64_t>& copy_sizes_major_dim,
                             std::shared_ptr<void> user_hold = nullptr) {
+  ValidateMajorDimLayout(dst_buffer, "Destination");
   const bool is_partial = tpu_raiden::IsPartialCopy(
       dst_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
