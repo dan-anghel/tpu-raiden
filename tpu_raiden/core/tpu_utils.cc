@@ -40,6 +40,14 @@
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
 
+#ifndef __NR_set_mempolicy
+#if defined(__x86_64__)
+#define __NR_set_mempolicy 238
+#elif defined(__aarch64__)
+#define __NR_set_mempolicy 237
+#endif
+#endif
+
 namespace tpu_raiden {
 
 int64_t SetThreadMempolicy(int mode, int node) {
@@ -143,11 +151,13 @@ int PinCurrentThreadToNumaNode(int node) {
   if (node < 0) return -1;
   std::vector<int> cores = GetNumaNodeCpuCores(node);
   if (cores.empty()) {
-    LOG(WARNING) << "No CPU cores found for NUMA node " << node;
-    return -2;
+    LOG(WARNING)
+        << "No CPU cores found for NUMA node " << node
+        << ". Skipping CPU core affinity, will attempt memory policy only.";
+  } else {
+    int rc = PinCurrentThreadToCores(cores);
+    if (rc != 0) return rc;
   }
-  int rc = PinCurrentThreadToCores(cores);
-  if (rc != 0) return rc;
   constexpr int kMpolBind = 2;
   int64_t mem_rc = SetThreadMempolicy(kMpolBind, node);
   if (mem_rc < 0) return static_cast<int>(mem_rc);
