@@ -56,7 +56,7 @@ class WeightSynchronizer {
   WeightSynchronizer(nanobind::list jax_arrays,
                      std::optional<int> local_port = std::nullopt,
                      int parallelism = 1, bool unsafe_skip_buffer_lock = false,
-                     std::optional<int> control_port = std::nullopt);
+                     std::optional<int> listener_port = std::nullopt);
 #endif
 
   ~WeightSynchronizer();
@@ -74,8 +74,8 @@ class WeightSynchronizer {
                                 size_t dst_offset_bytes, size_t size_bytes);
   const uint8_t* GetHostBufferPtr(size_t layer_idx, size_t shard_idx) const;
   std::optional<int> local_port() const;
-  std::optional<int> control_port() const;
-  bool is_control_service_active() const;
+  std::optional<int> listener_port() const;
+  bool is_listener_active() const;
   size_t num_layers() const;
   size_t num_shards() const;
   size_t slice_byte_size() const;
@@ -84,7 +84,7 @@ class WeightSynchronizer {
 #ifndef WITHOUT_PYTHON
   WeightSynchronizer(UnpackedWeights&& weights, std::optional<int> local_port,
                      int parallelism, bool unsafe_skip_buffer_lock,
-                     std::optional<int> control_port);
+                     std::optional<int> listener_port);
   std::optional<nanobind::list> jax_arrays_;
 #endif
   std::unique_ptr<weight_sync::WeightSynchronizerBase> impl_;

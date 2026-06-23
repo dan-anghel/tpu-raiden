@@ -153,7 +153,7 @@ if [ "${BUILD_TORCH}" = true ]; then
 fi
 
 BAZEL_TARGETS=(
-  "//tpu_raiden/weight_sync:weight_synchronizer_service_py_pb2"
+  "//tpu_raiden/rpc:raiden_service_py_pb2"
   "//tpu_raiden/rpc:coordination_py_pb2"
   "//tpu_raiden/rpc:coordination_py_pb2_grpc"
 )
@@ -232,7 +232,7 @@ echo "=== Building targets with Bazel ==="
 
 
 echo "=== Copying generated protobuf Python modules ==="
-cp -f "${WORKSPACE_DIR}/bazel-bin/weight_sync/weight_synchronizer_service_pb2.py" "${WORKSPACE_DIR}/weight_sync/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/raiden_service_pb2.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
 cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/coordination_pb2.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
 cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/coordination_pb2_grpc.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
 

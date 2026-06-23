@@ -60,7 +60,7 @@ py_test(
     tags = ["notap"],
     deps = [
         ":weight_synchronizer_jax_py",
-        "//tpu_raiden/weight_sync:weight_synchronizer_service_py_pb2",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
         "@pypi//numpy",

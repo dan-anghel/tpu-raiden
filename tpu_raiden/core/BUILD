@@ -249,6 +249,7 @@ cc_library(
         ":status_macros",
         ":tpu_utils",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

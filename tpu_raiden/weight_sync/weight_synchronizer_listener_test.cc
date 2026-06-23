@@ -26,7 +26,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/weight_sync/weight_synchronizer_control_service.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_listener.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -40,14 +40,21 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
-#include "tpu_raiden/weight_sync/weight_synchronizer_service.pb.h"
 
 namespace tpu_raiden {
 namespace weight_sync {
+
+using ::tpu_raiden::rpc::ControlRequest;
+using ::tpu_raiden::rpc::ControlResponse;
+using ::tpu_raiden::rpc::ShardPushEntryProto;
+using ::tpu_raiden::rpc::ShardPushScheduleProto;
+using ::tpu_raiden::rpc::StartTransferRequest;
+
 namespace {
 
-int ConnectToControlPort(int port) {
+int ConnectToListenerPort(int port) {
   int sock = socket(AF_INET6, SOCK_STREAM, 0);
   if (sock < 0) {
     return -1;
@@ -67,23 +74,23 @@ int ConnectToControlPort(int port) {
   return sock;
 }
 
-TEST(WeightSynchronizerControlServiceTest, PushWeightsCommandSuccess) {
+TEST(WeightSynchronizerListenerTest, PushWeightsCommandSuccess) {
   WeightSynchronizerBase engine(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/128,
       /*local_port=*/0, /*host_blocks_to_allocate=*/std::nullopt,
-      /*parallelism=*/1, /*control_port=*/std::nullopt);
+      /*parallelism=*/1, /*listener_port=*/std::nullopt);
 
-  WeightSynchronizerControlService control_service(&engine, /*control_port=*/0);
-  ASSERT_GT(control_service.control_port(), 0);
-  EXPECT_TRUE(control_service.is_active());
+  WeightSynchronizerListener listener(&engine, /*listener_port=*/0);
+  ASSERT_GT(listener.listener_port(), 0);
+  EXPECT_TRUE(listener.is_active());
 
-  int sock = ConnectToControlPort(control_service.control_port());
+  int sock = ConnectToListenerPort(listener.listener_port());
   ASSERT_GE(sock, 0);
 
   WeightSynchronizerBase dst_engine(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/128,
       /*local_port=*/0, /*host_blocks_to_allocate=*/1,
-      /*parallelism=*/1, /*control_port=*/std::nullopt);
+      /*parallelism=*/1, /*listener_port=*/std::nullopt);
   ASSERT_TRUE(dst_engine.local_port().has_value());
 
   ControlRequest req;
@@ -113,16 +120,16 @@ TEST(WeightSynchronizerControlServiceTest, PushWeightsCommandSuccess) {
   close(sock);
 }
 
-TEST(WeightSynchronizerControlServiceTest, ShutdownCommandStopsService) {
+TEST(WeightSynchronizerListenerTest, ShutdownCommandStopsService) {
   WeightSynchronizerBase engine(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/128,
       /*local_port=*/0, /*host_blocks_to_allocate=*/std::nullopt,
-      /*parallelism=*/1, /*control_port=*/std::nullopt);
+      /*parallelism=*/1, /*listener_port=*/std::nullopt);
 
-  WeightSynchronizerControlService control_service(&engine, /*control_port=*/0);
-  EXPECT_TRUE(control_service.is_active());
+  WeightSynchronizerListener listener(&engine, /*listener_port=*/0);
+  EXPECT_TRUE(listener.is_active());
 
-  int sock = ConnectToControlPort(control_service.control_port());
+  int sock = ConnectToListenerPort(listener.listener_port());
   ASSERT_GE(sock, 0);
 
   ControlRequest req;
@@ -151,23 +158,23 @@ TEST(WeightSynchronizerControlServiceTest, ShutdownCommandStopsService) {
   close(sock);
 }
 
-TEST(WeightSynchronizerControlServiceTest, PushWeightsReshardedSuccess) {
+TEST(WeightSynchronizerListenerTest, PushWeightsReshardedSuccess) {
   WeightSynchronizerBase src_engine(
       /*num_layers=*/1, /*num_shards=*/4, /*slice_byte_size=*/16,
       /*local_port=*/0, /*host_blocks_to_allocate=*/std::nullopt,
-      /*parallelism=*/1, /*control_port=*/std::nullopt);
+      /*parallelism=*/1, /*listener_port=*/std::nullopt);
 
-  WeightSynchronizerControlService control_service(&src_engine,
-                                                   /*control_port=*/0);
-  ASSERT_GT(control_service.control_port(), 0);
+  WeightSynchronizerListener listener(&src_engine,
+                                      /*listener_port=*/0);
+  ASSERT_GT(listener.listener_port(), 0);
 
-  int sock = ConnectToControlPort(control_service.control_port());
+  int sock = ConnectToListenerPort(listener.listener_port());
   ASSERT_GE(sock, 0);
 
   WeightSynchronizerBase dst_engine(
       /*num_layers=*/1, /*num_shards=*/4, /*slice_byte_size=*/16,
       /*local_port=*/0, /*host_blocks_to_allocate=*/1,
-      /*parallelism=*/1, /*control_port=*/std::nullopt);
+      /*parallelism=*/1, /*listener_port=*/std::nullopt);
   ASSERT_TRUE(dst_engine.local_port().has_value());
   std::string dst_peer =
       "127.0.0.1:" + std::to_string(*dst_engine.local_port());

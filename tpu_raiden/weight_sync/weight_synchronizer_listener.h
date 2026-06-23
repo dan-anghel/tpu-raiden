@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_WEIGHT_SYNC_WEIGHT_SYNCHRONIZER_CONTROL_SERVICE_H_
-#define THIRD_PARTY_TPU_RAIDEN_WEIGHT_SYNC_WEIGHT_SYNCHRONIZER_CONTROL_SERVICE_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_WEIGHT_SYNC_WEIGHT_SYNCHRONIZER_LISTENER_H_
+#define THIRD_PARTY_TPU_RAIDEN_WEIGHT_SYNC_WEIGHT_SYNCHRONIZER_LISTENER_H_
 
 #include <atomic>
 #include <string>
@@ -28,18 +28,16 @@ class WeightSynchronizerBase;
 // TCP Socket Server Daemon that runs natively in C++ to accept Control-Plane
 // management RPC commands (like PushWeights and Shutdown) directly from the
 // RL Coordinator or Controller task, bypassing Python servicer overhead.
-class WeightSynchronizerControlService final {
+class WeightSynchronizerListener final {
  public:
-  WeightSynchronizerControlService(WeightSynchronizerBase* engine,
-                                   int control_port);
-  ~WeightSynchronizerControlService();
+  WeightSynchronizerListener(WeightSynchronizerBase* engine, int listener_port);
+  ~WeightSynchronizerListener();
 
-  WeightSynchronizerControlService(const WeightSynchronizerControlService&) =
+  WeightSynchronizerListener(const WeightSynchronizerListener&) = delete;
+  WeightSynchronizerListener& operator=(const WeightSynchronizerListener&) =
       delete;
-  WeightSynchronizerControlService& operator=(
-      const WeightSynchronizerControlService&) = delete;
 
-  int control_port() const { return control_port_; }
+  int listener_port() const { return listener_port_; }
   bool is_active() const { return !stopping_; }
 
  private:
@@ -47,7 +45,7 @@ class WeightSynchronizerControlService final {
   void ConnectionWorker(int client_fd);
 
   WeightSynchronizerBase* engine_;
-  int control_port_;
+  int listener_port_;
   int server_fd_ = -1;
   std::atomic<bool> stopping_{false};
 
@@ -58,4 +56,4 @@ class WeightSynchronizerControlService final {
 }  // namespace weight_sync
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_WEIGHT_SYNC_WEIGHT_SYNCHRONIZER_CONTROL_SERVICE_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_WEIGHT_SYNC_WEIGHT_SYNCHRONIZER_LISTENER_H_

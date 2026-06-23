@@ -524,7 +524,7 @@ py_library(
     srcs = ["resharding_planner.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/weight_sync:weight_synchronizer_service_py_pb2",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
         "@jax//jax",
     ],
 )

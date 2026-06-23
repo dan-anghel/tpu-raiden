@@ -261,7 +261,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
            nb::arg("jax_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("parallelism") = 1,
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("control_port") = nb::none())
+           nb::arg("listener_port") = nb::none())
       .def(
           "PullWeights",
           [](WeightSynchronizer& self, absl::string_view source) {
@@ -363,9 +363,9 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("layer_idx") = 0, nb::arg("shard_idx") = 0)
       .def_prop_ro("local_port", &WeightSynchronizer::local_port)
-      .def_prop_ro("control_port", &WeightSynchronizer::control_port)
-      .def_prop_ro("is_control_service_active",
-                   &WeightSynchronizer::is_control_service_active)
+      .def_prop_ro("listener_port", &WeightSynchronizer::listener_port)
+      .def_prop_ro("is_listener_active",
+                   &WeightSynchronizer::is_listener_active)
       .def_prop_ro("num_layers", &WeightSynchronizer::num_layers)
       .def_prop_ro("num_shards", &WeightSynchronizer::num_shards)
       .def_prop_ro("slice_byte_size", &WeightSynchronizer::slice_byte_size);

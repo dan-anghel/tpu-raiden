@@ -38,7 +38,7 @@ import time
 import typing
 from typing import Any, Optional, Union
 
-from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
+from tpu_raiden.rpc import raiden_service_pb2
 
 
 class NameResolver(typing.Protocol):
@@ -191,6 +191,7 @@ class WorkerRpcClient:
       endpoint_addresses: Optional[dict[RaidenId, str]] = None,
       resolve_timeout: float = 300.0,
       name_resolver: Optional[NameResolver] = None,
+      proto_module: Optional[Any] = None,
   ):
     """Instantiates RPC Client with an optional initial endpoint mapping.
 
@@ -199,11 +200,13 @@ class WorkerRpcClient:
       resolve_timeout: Maximum duration in seconds to wait for a pending worker
         task to self-register before raising a Timeout RuntimeError.
       name_resolver: Interface for resolving remote coordinates (e.g. BNS).
+      proto_module: Optional protobuf module to use for ControlRequest/Response.
     """
     self._endpoints = endpoint_addresses or {}
     self._pending_endpoints: dict[RaidenId, asyncio.Future[str]] = {}
     self._resolve_timeout = resolve_timeout
     self._name_resolver = name_resolver
+    self._proto_module = proto_module or raiden_service_pb2
 
   def register_worker_endpoint(
       self, worker_name: RaidenId, rpc_address: str
@@ -297,6 +300,13 @@ class WorkerRpcClient:
     finally:
       sock.close()
 
+  def _raiden_id_to_proto(self, unit: RaidenId) -> Any:
+    return self._proto_module.RaidenIdProto(
+        job_name=unit.job_name,
+        job_replica_id=unit.job_replica_id,
+        data_name=unit.data_name,
+    )
+
   def _encode_start_transfer(
       self, target_id: RaidenId, transfer_plan: TransferPlan
   ) -> Optional[bytes]:
@@ -309,18 +319,112 @@ class WorkerRpcClient:
     Returns:
       Serialized binary bytes payload, or None for no-op execution.
     """
-    raise NotImplementedError("Subclasses must override _encode_start_transfer")
+    if (
+        target_id not in transfer_plan.src_units
+        and target_id not in transfer_plan.dst_units
+    ):
+      return None
+
+    peers = []
+    for dst in transfer_plan.dst_units:
+      dst_coords = transfer_plan.worker_data_addresses.get(
+          dst, ["127.0.0.1:8000"]
+      )
+      peers.extend(dst_coords)
+
+    req = self._proto_module.ControlRequest(
+        command=self._proto_module.ControlRequest.COMMAND_START_TRANSFER,
+        peers=peers,
+    )
+
+    is_sender = target_id in transfer_plan.src_units
+    start_req = self._proto_module.StartTransferRequest(
+        src_units=[
+            self._raiden_id_to_proto(u) for u in transfer_plan.src_units
+        ],
+        dst_units=[
+            self._raiden_id_to_proto(u) for u in transfer_plan.dst_units
+        ],
+        uuid=transfer_plan.uuid,
+        is_sender=is_sender,
+        dst_mem_type=int(transfer_plan.dst_mem_type),
+        use_block_chunks=transfer_plan.use_block_chunks,
+    )
+
+    if transfer_plan.shard_push_schedules:
+      if target_id in transfer_plan.dst_units:
+        # Receiver path: send FILTERED plan, only containing entries for this
+        # receiver
+        target_endpoints = transfer_plan.worker_data_addresses.get(
+            target_id, []
+        )
+        for (
+            src_unit,
+            push_schedules,
+        ) in transfer_plan.shard_push_schedules.items():
+          src_replica_idx = int(src_unit.job_replica_id)
+          # We assume each source worker has only 1 shard (shard_idx = 0)
+          schedule = push_schedules.get(0)
+          if schedule:
+            schedule_proto = self._proto_module.ShardPushScheduleProto()
+            for (
+                dst_peer,
+                dst_shard_idx,
+                dst_offset,
+                src_offset,
+                size,
+                src_block_id,
+                dst_block_id,
+            ) in schedule:
+              if dst_peer in target_endpoints:
+                entry_proto = schedule_proto.entries.add()
+                entry_proto.dst_peer = dst_peer
+                entry_proto.dst_shard_idx = dst_shard_idx
+                entry_proto.dst_offset_bytes = dst_offset
+                entry_proto.src_offset_bytes = src_offset
+                entry_proto.size_bytes = size
+                entry_proto.src_block_id = src_block_id
+                entry_proto.dst_block_id = dst_block_id
+            if len(schedule_proto.entries) > 0:
+              start_req.shard_push_schedules[src_replica_idx].CopyFrom(
+                  schedule_proto
+              )
+      else:
+        # Sender path: only send local schedule
+        push_schedules = transfer_plan.shard_push_schedules.get(target_id)
+        if push_schedules:
+          for shard_idx, entries in push_schedules.items():
+            schedule_proto = self._proto_module.ShardPushScheduleProto()
+            for (
+                dst_peer,
+                dst_shard_idx,
+                dst_offset,
+                src_offset,
+                size,
+                src_block_id,
+                dst_block_id,
+            ) in entries:
+              entry_proto = schedule_proto.entries.add()
+              entry_proto.dst_peer = dst_peer
+              entry_proto.dst_shard_idx = dst_shard_idx
+              entry_proto.dst_offset_bytes = dst_offset
+              entry_proto.src_offset_bytes = src_offset
+              entry_proto.size_bytes = size
+              entry_proto.src_block_id = src_block_id
+              entry_proto.dst_block_id = dst_block_id
+            start_req.shard_push_schedules[shard_idx].CopyFrom(schedule_proto)
+
+    req.start_transfer_request.CopyFrom(start_req)
+    return req.SerializeToString()
 
   def _verify_response(self, resp_bytes: bytes) -> None:
-    """Validates demarshaled remote response bytes returned from C++ workers.
-
-    Args:
-      resp_bytes: Raw binary bytes received over the TCP socket.
-
-    Raises:
-      RuntimeError: If remote execution reports explicit failure status.
-    """
-    raise NotImplementedError("Subclasses must override _verify_response")
+    """Validates demarshaled remote response bytes returned from C++ workers."""
+    resp = self._proto_module.ControlResponse()
+    resp.ParseFromString(resp_bytes)
+    if not resp.success:
+      raise RuntimeError(
+          f"Raiden remote native execution failed: {resp.message}"
+      )
 
   def get_worker_endpoints(self) -> dict[RaidenId, str]:
     """Returns active read-only snapshot of known registered Worker RPC endpoints."""
@@ -339,92 +443,27 @@ class WorkerRpcClient:
 
   def _encode_shutdown(self) -> bytes:
     """Serializes domain-specific binary command for remote shutdown signaling."""
-    raise NotImplementedError("Subclasses must override _encode_shutdown")
+    req = self._proto_module.ControlRequest(
+        command=self._proto_module.ControlRequest.COMMAND_SHUTDOWN
+    )
+    return req.SerializeToString()
 
 
 class WeightSyncWorkerRpcClient(WorkerRpcClient):
   """Concrete domain subclass for state-of-the-art Weight Synchronizer Protobuf serialization."""
 
-  def _encode_start_transfer(
-      self, target_id: RaidenId, transfer_plan: TransferPlan
-  ) -> Optional[bytes]:
-    """Serializes ControlRequest protobuf specifically for native WeightSynchronizer servicer endpoints.
-
-    Args:
-      target_id: Target worker RaidenId coordinate.
-      transfer_plan: Top-level distributed Collective Transfer execution plan.
-
-    Returns:
-      Serialized binary ControlRequest Protobuf bytes payload, or None for no-op
-      Destination execution.
-    """
-    if target_id not in transfer_plan.src_units:
-      return None
-
-    peers = []
-    for dst in transfer_plan.dst_units:
-      dst_coords = transfer_plan.worker_data_addresses.get(
-          dst, ["127.0.0.1:8000"]
-      )
-      peers.extend(dst_coords)
-
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
-        peers=peers,
+  def __init__(
+      self,
+      endpoint_addresses: Optional[dict[RaidenId, str]] = None,
+      resolve_timeout: float = 300.0,
+      name_resolver: Optional[NameResolver] = None,
+  ):
+    super().__init__(
+        endpoint_addresses=endpoint_addresses,
+        resolve_timeout=resolve_timeout,
+        name_resolver=name_resolver,
+        proto_module=raiden_service_pb2,
     )
-
-    start_req = weight_synchronizer_service_pb2.StartTransferRequest(
-        src_units=[_raiden_id_to_proto(u) for u in transfer_plan.src_units],
-        dst_units=[_raiden_id_to_proto(u) for u in transfer_plan.dst_units],
-    )
-
-    if transfer_plan.shard_push_schedules:
-      push_schedules = transfer_plan.shard_push_schedules.get(target_id)
-      if push_schedules:
-        for shard_idx, entries in push_schedules.items():
-          schedule_proto = (
-              weight_synchronizer_service_pb2.ShardPushScheduleProto()
-          )
-          for (
-              dst_peer,
-              dst_shard_idx,
-              dst_offset,
-              src_offset,
-              size,
-          ) in entries:
-            entry_proto = schedule_proto.entries.add()
-            entry_proto.dst_peer = dst_peer
-            entry_proto.dst_shard_idx = dst_shard_idx
-            entry_proto.dst_offset_bytes = dst_offset
-            entry_proto.src_offset_bytes = src_offset
-            entry_proto.size_bytes = size
-          start_req.shard_push_schedules[shard_idx].CopyFrom(schedule_proto)
-
-    req.start_transfer_request.CopyFrom(start_req)
-    return req.SerializeToString()
-
-  def _verify_response(self, resp_bytes: bytes) -> None:
-    """Validates demarshaled ControlResponse protobuf status returned from C++ WeightSynchronizer servers.
-
-    Args:
-      resp_bytes: Raw binary Protobuf bytes received over the TCP socket.
-
-    Raises:
-      RuntimeError: If remote execution reports explicit failure status.
-    """
-    resp = weight_synchronizer_service_pb2.ControlResponse()
-    resp.ParseFromString(resp_bytes)
-    if not resp.success:
-      raise RuntimeError(
-          f"Weight Synchronizer remote native execution failed: {resp.message}"
-      )
-
-  def _encode_shutdown(self) -> bytes:
-    """Serializes ControlRequest protobuf for remote WeightSynchronizer shutdown signaling."""
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_SHUTDOWN
-    )
-    return req.SerializeToString()
 
 
 class RaidenFuture:
@@ -583,7 +622,7 @@ class RaidenController:
       shard_nd_slices: Optional[
           Union[
               list[list[tuple[int, int]]],
-              list[weight_synchronizer_service_pb2.NDSliceProto],
+              list[raiden_service_pb2.NDSliceProto],
           ]
       ] = None,
       itemsize: Optional[int] = None,
@@ -825,10 +864,10 @@ class RaidenControllerServer:
     Args:
       controller: High-level RaidenController instance managing transfer plans.
       proto_module: Optional protobuf module to use for ControlRequest/Response.
-        Defaults to weight_synchronizer_service_pb2.
+        Defaults to raiden_service_pb2.
     """
     self._controller = controller
-    self._proto_module = proto_module or weight_synchronizer_service_pb2
+    self._proto_module = proto_module or raiden_service_pb2
     self._sock = create_server_socket(controller.port)
     self._stopped = False
     self._thread = None
@@ -967,16 +1006,6 @@ class RaidenControllerServer:
       conn.close()
 
 
-def _raiden_id_to_proto(
-    unit: RaidenId,
-) -> weight_synchronizer_service_pb2.RaidenIdProto:
-  return weight_synchronizer_service_pb2.RaidenIdProto(
-      job_name=unit.job_name,
-      job_replica_id=unit.job_replica_id,
-      data_name=unit.data_name,
-  )
-
-
 class RaidenControllerClientFacade:
   """Client-side stub encapsulating real remote Network RPCs to a centralized RaidenControllerServer."""
 
@@ -989,7 +1018,7 @@ class RaidenControllerClientFacade:
     """Accepts Controller server coordinate 'ip:port'."""
     self._address = controller_address
     self._name_resolver = name_resolver
-    self._proto_module = proto_module or weight_synchronizer_service_pb2
+    self._proto_module = proto_module or raiden_service_pb2
 
   def _raiden_id_to_proto(
       self,

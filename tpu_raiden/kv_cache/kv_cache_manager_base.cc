@@ -52,8 +52,8 @@
 #include "tpu_raiden/core/raw_transfer_impl.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
-#include "tpu_raiden/kv_cache/kv_cache_service.pb.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -1291,7 +1291,7 @@ absl::Status KVCacheManagerBase::WaitForBlockRead(size_t layer_idx,
 }
 
 absl::Status KVCacheManagerBase::PushKVCacheResharded(
-    const StartTransferRequest& request) {
+    const tpu_raiden::rpc::StartTransferRequest& request) {
   // 1. Register the active plan so GetBlockChunks can use it
   TF_RETURN_IF_ERROR(
       RegisterActivePlan(request.uuid(), request, /*is_sender=*/true));
@@ -1339,7 +1339,8 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
 }
 
 absl::Status KVCacheManagerBase::RegisterActivePlan(
-    uint64_t uuid, const StartTransferRequest& request, bool is_sender) {
+    uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
+    bool is_sender) {
   absl::MutexLock l(plans_mu_);
   if (auto [it, inserted] =
           active_plans_.try_emplace(uuid, RegisteredPlan{request, is_sender});
@@ -1358,7 +1359,7 @@ bool KVCacheManagerBase::IsDramDestination(uint64_t uuid) const {
   auto it = active_plans_.find(uuid);
   if (it != active_plans_.end()) {
     return it->second.request.dst_mem_type() ==
-           tpu_raiden::kv_cache::MEMORY_TYPE_DRAM;
+           tpu_raiden::rpc::MEMORY_TYPE_DRAM;
   }
   return false;
 }

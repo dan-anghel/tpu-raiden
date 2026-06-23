@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import itertools
 from typing import List, Tuple
 import jax
-from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
+from tpu_raiden.rpc import raiden_service_pb2
 
 
 @dataclass
@@ -246,7 +246,7 @@ def make_resharding_plan_from_metadata(
 def compute_nd_shard_slices(
     global_shape: Tuple[int, ...],
     mesh_shape: Tuple[int, ...],
-) -> List[weight_synchronizer_service_pb2.NDSliceProto]:
+) -> List[raiden_service_pb2.NDSliceProto]:
   """Computes N-dimensional logical tensor bounding boxes for a sharded grid.
 
   This function derives the exact coordinate intervals along every dimension
@@ -279,11 +279,12 @@ def compute_nd_shard_slices(
 
   shard_slices = []
   for device_coord in itertools.product(*coordinate_ranges):
-    slice_proto = weight_synchronizer_service_pb2.NDSliceProto()
+    slice_proto = raiden_service_pb2.NDSliceProto()
     for d in range(rank):
       c = device_coord[d]
       start = c * tile_sizes[d]
-      # Ensure any exact remainders land nicely in the last physical mesh shard boundary
+      # Ensure any exact remainders land nicely in the last physical mesh shard
+      # boundary
       end = (
           (c + 1) * tile_sizes[d]
           if c < mesh_shape[d] - 1

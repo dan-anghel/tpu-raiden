@@ -27,6 +27,23 @@ proto_library(
     srcs = ["coordination.proto"],
 )
 
+proto_library(
+    name = "raiden_service_proto",
+    srcs = ["raiden_service.proto"],
+)
+
+cc_proto_library(
+    name = "raiden_service_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":raiden_service_proto"],
+)
+
+py_proto_library(
+    name = "raiden_service_py_pb2",
+    visibility = ["//visibility:public"],
+    deps = [":raiden_service_proto"],
+)
+
 cc_proto_library(
     name = "coordination_cc_proto",
     deps = [":coordination_proto"],
@@ -63,7 +80,7 @@ py_library(
     name = "raiden_controller",
     srcs = ["raiden_controller.py"],
     deps = [
-        "//tpu_raiden/weight_sync:weight_synchronizer_service_py_pb2",
+        ":raiden_service_py_pb2",
     ],
 )
 

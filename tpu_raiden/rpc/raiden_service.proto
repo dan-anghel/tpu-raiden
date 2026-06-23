@@ -14,10 +14,10 @@
 
 syntax = "proto3";
 
-package tpu_raiden.weight_sync;
+package tpu_raiden.rpc;
 
 option java_multiple_files = true;
-option java_outer_classname = "WeightSynchronizerServiceProto";
+option java_outer_classname = "RaidenServiceProto";
 
 message RaidenIdProto {
   string job_name = 1;
@@ -70,6 +70,8 @@ message ShardPushEntryProto {
   int64 src_offset_bytes = 4;
   // Number of continuous bytes to transmit across the TCP stream.
   int64 size_bytes = 5;
+  int32 src_block_id = 6;
+  int32 dst_block_id = 7;
 }
 
 // A collection of network push entries orchestrated by a specific source TPU
@@ -78,12 +80,22 @@ message ShardPushScheduleProto {
   repeated ShardPushEntryProto entries = 1;
 }
 
+enum MemoryType {
+  MEMORY_TYPE_UNSPECIFIED = 0;
+  MEMORY_TYPE_DRAM = 1;
+  MEMORY_TYPE_HBM = 2;
+}
+
 message StartTransferRequest {
   repeated RaidenIdProto src_units = 1;
   repeated RaidenIdProto dst_units = 2;
   // Centralized transfer execution plans mapped by local Source Worker logical
   // shard partition index.
   map<int32, ShardPushScheduleProto> shard_push_schedules = 3;
+  int64 uuid = 4;
+  bool is_sender = 5;
+  MemoryType dst_mem_type = 6;
+  bool use_block_chunks = 7;
 }
 
 message ControlRequest {

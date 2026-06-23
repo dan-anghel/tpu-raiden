@@ -38,20 +38,20 @@ WeightSynchronizer::WeightSynchronizer(nanobind::list jax_arrays,
                                        std::optional<int> local_port,
                                        int parallelism,
                                        bool unsafe_skip_buffer_lock,
-                                       std::optional<int> control_port)
+                                       std::optional<int> listener_port)
     : WeightSynchronizer(UnpackAndMove(std::move(jax_arrays)), local_port,
-                         parallelism, unsafe_skip_buffer_lock, control_port) {}
+                         parallelism, unsafe_skip_buffer_lock, listener_port) {}
 
 WeightSynchronizer::WeightSynchronizer(UnpackedWeights&& weights,
                                        std::optional<int> local_port,
                                        int parallelism,
                                        bool unsafe_skip_buffer_lock,
-                                       std::optional<int> control_port)
+                                       std::optional<int> listener_port)
     : jax_arrays_(std::move(weights.jax_arrays)) {
   impl_ = std::make_unique<weight_sync::WeightSynchronizerBase>(
       weights.layer_buffers, local_port,
       /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock, parallelism,
-      control_port);
+      listener_port);
 }
 
 #endif  // WITHOUT_PYTHON
@@ -87,11 +87,11 @@ const uint8_t* WeightSynchronizer::GetHostBufferPtr(size_t layer_idx,
 std::optional<int> WeightSynchronizer::local_port() const {
   return impl_->local_port();
 }
-std::optional<int> WeightSynchronizer::control_port() const {
-  return impl_->control_port();
+std::optional<int> WeightSynchronizer::listener_port() const {
+  return impl_->listener_port();
 }
-bool WeightSynchronizer::is_control_service_active() const {
-  return impl_->is_control_service_active();
+bool WeightSynchronizer::is_listener_active() const {
+  return impl_->is_listener_active();
 }
 size_t WeightSynchronizer::num_layers() const { return impl_->num_layers(); }
 size_t WeightSynchronizer::num_shards() const { return impl_->num_shards(); }

@@ -12,37 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:proto.bzl", "py_proto_library")
 
 package(default_visibility = ["//visibility:public"])
-
-proto_library(
-    name = "weight_synchronizer_service_proto",
-    srcs = ["weight_synchronizer_service.proto"],
-)
-
-cc_proto_library(
-    name = "weight_synchronizer_service_cc_proto",
-    deps = [":weight_synchronizer_service_proto"],
-)
-
-py_proto_library(
-    name = "weight_synchronizer_service_py_pb2",
-    deps = [":weight_synchronizer_service_proto"],
-)
 
 cc_library(
     name = "weight_synchronizer_base",
     srcs = [
         "weight_synchronizer_base.cc",
-        "weight_synchronizer_control_service.cc",
+        "weight_synchronizer_listener.cc",
     ],
     hdrs = [
         "weight_synchronizer_base.h",
-        "weight_synchronizer_control_service.h",
+        "weight_synchronizer_listener.h",
     ],
     copts = [
         "-fno-strict-aliasing",
@@ -51,11 +33,11 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
-        ":weight_synchronizer_service_cc_proto",
         "//tpu_raiden/core:raiden_manager_base",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -86,8 +68,8 @@ cc_test(
 )
 
 cc_test(
-    name = "weight_synchronizer_control_service_test",
-    srcs = ["weight_synchronizer_control_service_test.cc"],
+    name = "weight_synchronizer_listener_test",
+    srcs = ["weight_synchronizer_listener_test.cc"],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
@@ -95,7 +77,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":weight_synchronizer_base",
-        ":weight_synchronizer_service_cc_proto",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

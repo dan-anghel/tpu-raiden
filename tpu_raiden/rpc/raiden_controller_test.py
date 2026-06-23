@@ -27,14 +27,24 @@
 # limitations under the License.
 """Tests for Raiden Controller high-level transfer API under rpc/."""
 
+import asyncio
 from absl.testing import absltest
 from tpu_raiden.rpc import raiden_controller
+
+
+class DummyWorkerRpcClient(raiden_controller.WorkerRpcClient):
+
+  async def start_transfer(self, target_id, transfer_plan) -> None:
+    pass
 
 
 class RaidenControllerTest(absltest.TestCase):
 
   def test_dynamic_balancing_and_overlap_planner(self):
-    controller = raiden_controller.RaidenController(port=10000)
+    dummy_client = DummyWorkerRpcClient()
+    controller = raiden_controller.RaidenController(
+        port=10000, worker_rpc_client=dummy_client
+    )
 
     src_unit_0 = raiden_controller.RaidenId(
         job_name="sampler",
@@ -67,11 +77,7 @@ class RaidenControllerTest(absltest.TestCase):
         src_units=[src_unit_0, src_unit_1],
         dst_units=[target_unit],
     )
-    wait_task = future_1.wait()
-    try:
-      wait_task.send(None)
-    except StopIteration:
-      pass
+    asyncio.run(future_1.wait())
 
     self.assertTrue(future_1.done())
     self.assertEqual(future_1.session_id, 0)
@@ -153,17 +159,13 @@ class RaidenControllerTest(absltest.TestCase):
         dst_units=[dst],
     )
 
-    wait_task = future.wait()
-    try:
-      wait_task.send(None)
-    except StopIteration:
-      pass
+    asyncio.run(future.wait())
 
     self.assertEqual(
         recorded_actions,
         [
-            ("start", [src]),
             ("start", [dst]),
+            ("start", [src]),
         ],
     )
 

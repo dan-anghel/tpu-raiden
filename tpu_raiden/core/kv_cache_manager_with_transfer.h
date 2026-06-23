@@ -194,7 +194,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   CompleteReadRaw();
 
   absl::Status RegisterActivePlan(uint64_t uuid,
-                                  const kv_cache::StartTransferRequest& request,
+                                  const rpc::StartTransferRequest& request,
                                   bool is_sender) override;
 
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,

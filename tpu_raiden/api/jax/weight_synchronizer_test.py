@@ -25,7 +25,7 @@ import socket
 import numpy as np
 
 from tpu_raiden.api.jax import weight_synchronizer
-from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
+from tpu_raiden.rpc import raiden_service_pb2
 
 WeightSynchronizer = weight_synchronizer.WeightSynchronizer
 
@@ -69,7 +69,7 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
         jax_arrays=src_arrs,
         local_port=0,
         unsafe_skip_buffer_lock=True,
-        control_port=0,
+        listener_port=0,
     )
     ws_dest1 = WeightSynchronizer(
         jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True
@@ -78,8 +78,8 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
         jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True
     )
 
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
+    req = raiden_service_pb2.ControlRequest(
+        command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
         peers=[
             f"127.0.0.1:{ws_dest1.local_port}",
             f"127.0.0.1:{ws_dest2.local_port}",
@@ -88,12 +88,12 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
     payload = req.SerializeToString()
 
     sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, 0)
-    sock.connect(("::1", ws_source.control_port))
+    sock.connect(("::1", ws_source.listener_port))
     sock.sendall(len(payload).to_bytes(4, "big") + payload)
 
     resp_len = int.from_bytes(sock.recv(4), "big")
     resp_bytes = sock.recv(resp_len)
-    resp = weight_synchronizer_service_pb2.ControlResponse()
+    resp = raiden_service_pb2.ControlResponse()
     resp.ParseFromString(resp_bytes)
     assert resp.success
     sock.close()
@@ -127,7 +127,7 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
         jax_arrays=src_arrs,
         local_port=0,
         unsafe_skip_buffer_lock=True,
-        control_port=0,
+        listener_port=0,
     )
     ws_dest1 = WeightSynchronizer(
         jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True
@@ -137,19 +137,19 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
     )
 
     # Self-push to populate ws_source's host buffer with current device weights
-    req = weight_synchronizer_service_pb2.ControlRequest(
-        command=weight_synchronizer_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
+    req = raiden_service_pb2.ControlRequest(
+        command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
         peers=[f"127.0.0.1:{ws_source.local_port}"],
     )
     payload = req.SerializeToString()
 
     sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, 0)
-    sock.connect(("::1", ws_source.control_port))
+    sock.connect(("::1", ws_source.listener_port))
     sock.sendall(len(payload).to_bytes(4, "big") + payload)
 
     resp_len = int.from_bytes(sock.recv(4), "big")
     resp_bytes = sock.recv(resp_len)
-    resp = weight_synchronizer_service_pb2.ControlResponse()
+    resp = raiden_service_pb2.ControlResponse()
     resp.ParseFromString(resp_bytes)
     assert resp.success
     sock.close()

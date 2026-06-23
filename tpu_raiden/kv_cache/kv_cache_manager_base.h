@@ -38,8 +38,8 @@
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
-#include "tpu_raiden/kv_cache/kv_cache_service.pb.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -143,7 +143,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   // Executes a distributed resharding push transfer based on precise
   // centralized Controller schedules.
-  absl::Status PushKVCacheResharded(const StartTransferRequest& request);
+  absl::Status PushKVCacheResharded(
+      const tpu_raiden::rpc::StartTransferRequest& request);
 
   // Blocks until all pending asynchronous transfers/copies are complete.
   virtual absl::Status WaitForPendingWork() { return absl::OkStatus(); }
@@ -207,9 +208,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   bool use_block_chunks(uint64_t uuid) const override;
 
-  virtual absl::Status RegisterActivePlan(uint64_t uuid,
-                                          const StartTransferRequest& request,
-                                          bool is_sender);
+  virtual absl::Status RegisterActivePlan(
+      uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
+      bool is_sender);
 
   std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
@@ -284,7 +285,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   mutable absl::Mutex plans_mu_;
   struct RegisteredPlan {
-    StartTransferRequest request;
+    tpu_raiden::rpc::StartTransferRequest request;
     bool is_sender = false;
   };
   absl::flat_hash_map<uint64_t, RegisteredPlan> active_plans_

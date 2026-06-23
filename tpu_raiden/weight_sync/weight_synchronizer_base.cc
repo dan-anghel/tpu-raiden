@@ -40,8 +40,8 @@
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
-#include "tpu_raiden/weight_sync/weight_synchronizer_control_service.h"
-#include "tpu_raiden/weight_sync/weight_synchronizer_service.pb.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_listener.h"
 
 ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
           "Amount of scratchpad to allocate to host buffers for resharding "
@@ -187,7 +187,7 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     std::optional<int> local_port,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
-    std::optional<int> control_port)
+    std::optional<int> listener_port)
     : tpu_raiden::RaidenManagerBase(
           layer_buffers.size(),
           layer_buffers.empty() ? 0 : layer_buffers[0].size(),
@@ -278,16 +278,16 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     buffer_holds_.push_back(std::move(hold_info));
   }
 
-  if (control_port) {
-    control_service_ =
-        std::make_unique<WeightSynchronizerControlService>(this, *control_port);
+  if (listener_port) {
+    listener_ =
+        std::make_unique<WeightSynchronizerListener>(this, *listener_port);
   }
 }
 
 WeightSynchronizerBase::WeightSynchronizerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    int parallelism, std::optional<int> control_port)
+    int parallelism, std::optional<int> listener_port)
     : tpu_raiden::RaidenManagerBase(num_layers, num_shards, slice_byte_size,
                                     local_port, parallelism) {
   physical_size_ = slice_byte_size_;
@@ -325,22 +325,22 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     layers_.push_back(std::move(layer_info));
   }
 
-  if (control_port) {
-    control_service_ =
-        std::make_unique<WeightSynchronizerControlService>(this, *control_port);
+  if (listener_port) {
+    listener_ =
+        std::make_unique<WeightSynchronizerListener>(this, *listener_port);
   }
 }
 
-std::optional<int> WeightSynchronizerBase::control_port() const {
-  if (control_service_) {
-    return control_service_->control_port();
+std::optional<int> WeightSynchronizerBase::listener_port() const {
+  if (listener_) {
+    return listener_->listener_port();
   }
   return std::nullopt;
 }
 
-bool WeightSynchronizerBase::is_control_service_active() const {
-  if (control_service_) {
-    return control_service_->is_active();
+bool WeightSynchronizerBase::is_listener_active() const {
+  if (listener_) {
+    return listener_->is_active();
   }
   return false;
 }
@@ -524,7 +524,7 @@ absl::Status WeightSynchronizerBase::PushWeights(
 }
 
 absl::Status WeightSynchronizerBase::PushWeightsResharded(
-    const tpu_raiden::weight_sync::StartTransferRequest& request) {
+    const tpu_raiden::rpc::StartTransferRequest& request) {
   const auto& schedules = request.shard_push_schedules();
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
   TF_RETURN_IF_ERROR(d2h_future.Await());

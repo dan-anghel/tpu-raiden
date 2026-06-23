@@ -535,15 +535,14 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
 }
 
 absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
-    uint64_t uuid, const kv_cache::StartTransferRequest& request,
-    bool is_sender) {
+    uint64_t uuid, const rpc::StartTransferRequest& request, bool is_sender) {
   // 1. Call base class implementation to register the plan in active_plans_
   TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
       uuid, request, is_sender));
 
   // 2. If we are the receiver and the destination memory type is HBM,
   //    populate active_recv_entries_ to enable automatic H2D copy!
-  if (!is_sender && request.dst_mem_type() == kv_cache::MEMORY_TYPE_HBM) {
+  if (!is_sender && request.dst_mem_type() == rpc::MEMORY_TYPE_HBM) {
     std::lock_guard<std::mutex> lock(mu_);
     RecvEntry recv_entry;
     std::string req_id = absl::StrCat("resharded_transfer_", uuid);
