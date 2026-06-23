@@ -1164,7 +1164,7 @@ absl::Status KVCacheManagerBase::OnSingleBlockReceived(int block_id,
                                                        size_t size_bytes) {
   RecvCallback cb;
   {
-    absl::MutexLock l(&recv_mu_);
+    absl::MutexLock l(recv_mu_);
     auto it = recv_callbacks_.find(block_id);
     if (it != recv_callbacks_.end()) {
       cb = std::move(it->second);
@@ -1223,7 +1223,7 @@ xla::Future<> KVCacheManagerBase::RemoteD2DBlockReceive(
   };
 
   {
-    absl::MutexLock l(&recv_mu_);
+    absl::MutexLock l(recv_mu_);
     recv_callbacks_[block_id] = std::move(callback);
   }
 
@@ -1232,7 +1232,7 @@ xla::Future<> KVCacheManagerBase::RemoteD2DBlockReceive(
 
 void KVCacheManagerBase::SetBlockReadinessCallback(
     BlockReadinessCallback callback) {
-  absl::MutexLock l(&block_readiness_mu_);
+  absl::MutexLock l(block_readiness_mu_);
   block_readiness_callback_ = std::move(callback);
 }
 
@@ -1241,7 +1241,7 @@ absl::Status KVCacheManagerBase::WaitForBlockRead(size_t layer_idx,
                                                   int block_id) {
   BlockReadinessCallback callback;
   {
-    absl::MutexLock l(&block_readiness_mu_);
+    absl::MutexLock l(block_readiness_mu_);
     callback = block_readiness_callback_;
   }
   if (!callback) {
