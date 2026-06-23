@@ -29,7 +29,10 @@
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/pjrt/pjrt_client.h"
+namespace xla {
+class PjRtBuffer;
+class PjRtClient;
+}  // namespace xla
 #include "xla/pjrt/status_casters.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/raw_transfer_impl.h"

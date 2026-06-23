@@ -97,13 +97,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool, std::optional<int>>(),
+                    int64_t, double, bool, int, std::optional<int>>(),
            nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
-           nb::arg("listener_port") = nb::none())
-
+           nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none())
       .def(
           "H2d",
           [](KVCacheManager& self,
@@ -147,8 +146,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
              const std::vector<int64_t>& copy_sizes_major_dim) {
-            auto status_or = self.D2hAutoAllocate(
-                src_offsets_major_dim, copy_sizes_major_dim);
+            auto status_or = self.D2hAutoAllocate(src_offsets_major_dim,
+                                                  copy_sizes_major_dim);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager D2hAutoAllocate failed: " +
@@ -164,8 +163,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
           "H2hWrite",
           [](KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids) {
-            auto status_or =
-                self.H2hWrite(std::move(peer), src_block_ids);
+            auto status_or = self.H2hWrite(std::move(peer), src_block_ids);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager H2hWrite failed: " +
@@ -181,8 +179,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
           "H2hRead",
           [](KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids) {
-            auto status_or =
-                self.H2hRead(std::move(peer), src_block_ids);
+            auto status_or = self.H2hRead(std::move(peer), src_block_ids);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager H2hRead failed: " +
@@ -199,17 +196,57 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def_prop_ro("num_shards", &KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size)
       .def_prop_ro("local_control_port", &KVCacheManager::local_control_port)
+      .def("get_local_endpoints",
+           [](const KVCacheManager& self) {
+             auto eps = self.get_local_endpoints();
+             nb::list py_eps;
+             for (const auto& ep : eps) {
+               nb::dict d;
+               d["endpoint"] = ep.endpoint;
+               d["shards"] = ep.shards;
+               py_eps.append(d);
+             }
+             return py_eps;
+           })
       .def_prop_ro("listener_port", &KVCacheManager::listener_port)
-      .def_prop_ro("is_listener_active",
-                   &KVCacheManager::is_listener_active)
+      .def_prop_ro("is_listener_active", &KVCacheManager::is_listener_active)
 
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("block_ids"))
-      .def("start_read", &KVCacheManager::StartRead, nb::arg("req_id"),
-           nb::arg("uuid"), nb::arg("remote_endpoint"),
-           nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
-           nb::arg("parallelism") = 1,
-           nb::arg("local_host_block_ids") = nb::none())
+      .def(
+          "start_read",
+          [](KVCacheManager& self, const std::string& req_id, uint64_t uuid,
+             nb::object remote_endpoint,
+             const std::vector<int64_t>& remote_block_ids,
+             const std::vector<int64_t>& local_block_ids, int parallelism,
+             std::optional<std::vector<int64_t>> local_host_block_ids) {
+            if (nb::isinstance<nb::str>(remote_endpoint)) {
+              self.StartRead(req_id, uuid,
+                             nb::cast<std::string>(remote_endpoint),
+                             remote_block_ids, local_block_ids, parallelism,
+                             local_host_block_ids);
+            } else if (nb::isinstance<nb::list>(remote_endpoint)) {
+              std::vector<tpu_raiden::EndpointDescriptor> descriptors;
+              nb::list ep_list = nb::cast<nb::list>(remote_endpoint);
+              for (size_t i = 0; i < ep_list.size(); ++i) {
+                nb::dict d = nb::cast<nb::dict>(ep_list[i]);
+                tpu_raiden::EndpointDescriptor desc;
+                desc.endpoint = nb::cast<std::string>(d["endpoint"]);
+                desc.shards = nb::cast<std::vector<int64_t>>(d["shards"]);
+                descriptors.push_back(std::move(desc));
+              }
+              self.StartRead(req_id, uuid, descriptors, remote_block_ids,
+                             local_block_ids, parallelism,
+                             local_host_block_ids);
+            } else {
+              throw std::runtime_error(
+                  "remote_endpoint must be str or list of dicts");
+            }
+          },
+          nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
+          nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
+          nb::arg("parallelism") = 1,
+          nb::arg("local_host_block_ids") = nb::none())
       .def("complete_read", [](KVCacheManager& self) {
         auto [done_sending, done_recving, failed_recving] =
             self.CompleteReadRaw();

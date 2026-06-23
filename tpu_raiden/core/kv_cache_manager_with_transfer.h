@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -49,13 +50,16 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
-#include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {
+
+struct EndpointDescriptor {
+  std::string endpoint;
+  std::vector<int64_t> shards;
+};
 
 class TransferFuture {
  public:
@@ -134,6 +138,11 @@ struct CommitResult {
   int64_t total_bytes;
 };
 
+struct PendingCopy {
+  int64_t host_block_id;
+  int64_t chip_block_id;
+};
+
 class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  public:
   KVCacheManagerWithTransfer(
@@ -144,6 +153,16 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       int64_t local_control_port = -1, int64_t max_blocks = 0,
       int64_t num_slots = 0, double timeout_s = 120.0);
 
+  KVCacheManagerWithTransfer(
+      const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
+      size_t slice_byte_size, const std::vector<int64_t>& dimensions,
+      size_t physical_size, std::optional<int> local_port,
+      std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+      int parallelism, HostBufferAllocator host_allocator, int64_t node_id = 0,
+      int64_t local_control_port = -1, int64_t max_blocks = 0,
+      int64_t num_slots = 0, double timeout_s = 120.0,
+      std::optional<int> assigned_numa_node = std::nullopt);
+
   // Metadata-based constructor for FFI / CPU-only testing
   KVCacheManagerWithTransfer(
       size_t num_layers, size_t num_shards, size_t slice_byte_size,
@@ -153,26 +172,45 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   virtual ~KVCacheManagerWithTransfer();
 
-  int64_t NotifyForRead(absl::string_view req_id, uint64_t uuid,
-                        const std::vector<int64_t>& block_ids);
+  virtual int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
+                                const std::vector<int64_t>& block_ids);
 
-  void StartRead(
-      absl::string_view req_id, uint64_t uuid,
-      absl::string_view remote_endpoint,
+  virtual void StartRead(
+      const std::string& req_id, uint64_t uuid,
+      const std::string& remote_endpoint,
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
 
-  std::tuple<std::vector<std::string>, std::vector<std::string>,
-             std::vector<std::string>>
+  virtual void StartRead(
+      const std::string& req_id, uint64_t uuid,
+      const std::vector<std::string>& remote_endpoints,
+      const std::vector<int64_t>& remote_block_ids,
+      const std::vector<int64_t>& local_block_ids, int parallelism = 1,
+      std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
+
+  virtual std::tuple<std::vector<std::string>, std::vector<std::string>,
+                     std::vector<std::string>>
   CompleteReadRaw();
 
   absl::Status RegisterActivePlan(uint64_t uuid,
                                   const kv_cache::StartTransferRequest& request,
                                   bool is_sender) override;
 
-  int local_control_port() const { return local_control_port_; }
-  int64_t node_id() const { return node_id_; }
+  absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
+                                uint64_t uuid = 0) override;
+
+  virtual std::vector<EndpointDescriptor> get_local_endpoints() const;
+
+  virtual void StartRead(
+      const std::string& req_id, uint64_t uuid,
+      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<int64_t>& remote_block_ids,
+      const std::vector<int64_t>& local_block_ids, int parallelism = 1,
+      std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
+
+  virtual int local_control_port() const { return local_control_port_; }
+  virtual int64_t node_id() const { return node_id_; }
 
  protected:
   struct SendEntry {
@@ -237,7 +275,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   static constexpr uint32_t kOpAck = 2;
   static constexpr uint32_t kOpPullStream = 3;
 
-  std::string EndpointWithPort(absl::string_view endpoint, int port) const;
+  std::string EndpointWithPort(const std::string& endpoint, int port) const;
   ControlResponseHeader ReadControlResponseHeader(int fd);
   void AckSend(uint64_t uuid);
   void ConfigureDataPortFromKvTransfer();
@@ -257,7 +295,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void ControlServerLoop();
   void HandleControlConnection(int fd);
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
-  void AckRemote(absl::string_view remote_endpoint, uint64_t uuid);
+  void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
   absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
                                        int block_id);
   std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
@@ -267,20 +305,25 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       size_t shard_idx, absl::Status status);
   void RemoveStagingReadinessLocked(int64_t slot_idx);
 
-  absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
-                                uint64_t uuid = 0) override;
+  using H2dIssueFuture =
+      std::shared_future<absl::StatusOr<raiden::PjRtCopyFuture>>;
 
   absl::Status WaitForPendingWork() override;
 
   struct RecvEntry {
     std::string req_id;
-    int64_t total_blocks = 0;
-    int64_t num_completed_blocks = 0;
+    CopySpec h2d_copy;
+    std::vector<int64_t> chip_block_ids;
     absl::flat_hash_map<int64_t, int64_t> host_to_chip;
+    std::map<std::pair<size_t, size_t>, std::vector<PendingCopy>>
+        pending_h2d_copies;
+    std::vector<H2dIssueFuture> h2d_dispatch_futures;
+    int32_t total_blocks = 0;
+    int32_t num_completed_blocks = 0;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
-  void StartPushInternal(uint64_t uuid, absl::string_view remote_data_endpoint,
+  void StartPushInternal(uint64_t uuid, const std::string& remote_data_endpoint,
                          const std::vector<int64_t>& src_block_ids,
                          const std::vector<int64_t>& dst_block_ids);
 

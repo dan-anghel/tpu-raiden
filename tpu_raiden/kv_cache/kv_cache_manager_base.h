@@ -106,14 +106,12 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
                                       raiden::BufferHoldAndAlias hold,
                                       size_t size_bytes);
 
-  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
-
   void SetBlockReadinessCallback(BlockReadinessCallback callback);
   absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
                                 int block_id) override;
 
   // Async on-chip H2D offloads returning PJRT copy future E2E
-  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2d(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
       const std::vector<int64_t>& copy_sizes_major_dim = {},
@@ -122,7 +120,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt);
 
   // Async on-chip D2H offloads E2E
-  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
       const std::vector<int64_t>& copy_sizes_major_dim = {},
@@ -131,17 +129,17 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt);
 
   // Auto-allocating offloads E2E
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+  virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
                   const std::vector<int64_t>& copy_sizes_major_dim = {});
 
   // Symmetrical H2H writes E2E
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
-      std::string peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
+  virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+  H2hWrite(std::string peer, const std::vector<int>& src_block_ids,
+           const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
 
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
-      std::string peer, const std::vector<int>& src_block_ids);
+  virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+  H2hRead(std::string peer, const std::vector<int>& src_block_ids);
 
   // Executes a distributed resharding push transfer based on precise
   // centralized Controller schedules.
@@ -150,7 +148,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // Blocks until all pending asynchronous transfers/copies are complete.
   virtual absl::Status WaitForPendingWork() { return absl::OkStatus(); }
 
-  absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids,
       const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism = 1,
@@ -259,6 +257,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     return block_manager_->Allocate(num_blocks, /*lock=*/true);
   }
 
+  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
+
   absl::StatusOr<std::vector<raiden::PjRtCopyFuture>> DispatchD2hChunks(
       const std::vector<int64_t>& src_offsets,
       const std::vector<int64_t>& dst_offsets,
@@ -271,6 +271,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   xla::Future<> DoD2DTransfer(const BlockMetadata& src,
                               const BlockMetadata& dst, size_t size_bytes);
 
+  HostBufferAllocator host_allocator_ = nullptr;
   std::unique_ptr<xla::Semaphore> semaphore_;
 
   absl::Mutex recv_mu_;

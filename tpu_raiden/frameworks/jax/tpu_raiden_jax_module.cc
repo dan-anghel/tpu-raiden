@@ -91,17 +91,17 @@ NB_MODULE(_tpu_raiden_jax, m) {
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, std::optional<int>, std::optional<int>, bool,
                     int>(),
-           nb::arg("device_arrays"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,
-                    bool>(),
+                    bool, int>(),
            nb::arg("kv_caches"), nb::arg("node_id") = 0,
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
-           nb::arg("unsafe_skip_buffer_lock") = true)
+           nb::arg("unsafe_skip_buffer_lock") = true,
+           nb::arg("parallelism") = 4)
 
       // Use lambdas to wrap the returned raiden::PjRtCopyFuture into
       // KVCacheManagerFuture
@@ -179,30 +179,72 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("peer"), nb::arg("src_block_ids"))
 
-      .def("local_port", &tpu_raiden::kv_cache::KVCacheManagerBase::local_port)
+      .def("local_port", &tpu_raiden::kv_cache::jax::KVCacheManager::local_port)
       .def("get_host_pointer",
            static_cast<const uint8_t* (
-               tpu_raiden::kv_cache::KVCacheManagerBase::*)(size_t, size_t)
+               tpu_raiden::kv_cache::jax::KVCacheManager::*)(size_t, size_t)
                            const>(
-               &tpu_raiden::kv_cache::KVCacheManagerBase::GetHostPointer),
+               &tpu_raiden::kv_cache::jax::KVCacheManager::GetHostPointer),
            nb::arg("layer_idx"), nb::arg("shard_idx"))
       .def_prop_ro("num_layers",
-                   &tpu_raiden::kv_cache::KVCacheManagerBase::num_layers)
+                   &tpu_raiden::kv_cache::jax::KVCacheManager::num_layers)
       .def_prop_ro("num_shards",
-                   &tpu_raiden::kv_cache::KVCacheManagerBase::num_shards)
+                   &tpu_raiden::kv_cache::jax::KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size",
-                   &tpu_raiden::kv_cache::KVCacheManagerBase::slice_byte_size)
+                   &tpu_raiden::kv_cache::jax::KVCacheManager::slice_byte_size)
       .def_prop_ro(
           "local_control_port",
           &tpu_raiden::kv_cache::jax::KVCacheManager::local_control_port)
+      .def("get_local_endpoints",
+           [](const tpu_raiden::kv_cache::jax::KVCacheManager& self) {
+             auto eps = self.get_local_endpoints();
+             nb::list py_eps;
+             for (const auto& ep : eps) {
+               nb::dict d;
+               d["endpoint"] = ep.endpoint;
+               d["shards"] = ep.shards;
+               py_eps.append(d);
+             }
+             return py_eps;
+           })
       .def("notify_for_read",
            &tpu_raiden::kv_cache::jax::KVCacheManager::NotifyForRead,
            nb::arg("req_id"), nb::arg("uuid"), nb::arg("block_ids"))
-      .def("start_read", &tpu_raiden::kv_cache::jax::KVCacheManager::StartRead,
-           nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
-           nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
-           nb::arg("parallelism") = 1,
-           nb::arg("local_host_block_ids") = nb::none())
+      .def(
+          "start_read",
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
+             const std::string& req_id, uint64_t uuid,
+             nb::object remote_endpoint,
+             const std::vector<int64_t>& remote_block_ids,
+             const std::vector<int64_t>& local_block_ids, int parallelism,
+             std::optional<std::vector<int64_t>> local_host_block_ids) {
+            if (nb::isinstance<nb::str>(remote_endpoint)) {
+              self.StartRead(req_id, uuid,
+                             nb::cast<std::string>(remote_endpoint),
+                             remote_block_ids, local_block_ids, parallelism,
+                             local_host_block_ids);
+            } else if (nb::isinstance<nb::list>(remote_endpoint)) {
+              std::vector<tpu_raiden::EndpointDescriptor> descriptors;
+              nb::list ep_list = nb::cast<nb::list>(remote_endpoint);
+              for (size_t i = 0; i < ep_list.size(); ++i) {
+                nb::dict d = nb::cast<nb::dict>(ep_list[i]);
+                tpu_raiden::EndpointDescriptor desc;
+                desc.endpoint = nb::cast<std::string>(d["endpoint"]);
+                desc.shards = nb::cast<std::vector<int64_t>>(d["shards"]);
+                descriptors.push_back(std::move(desc));
+              }
+              self.StartRead(req_id, uuid, descriptors, remote_block_ids,
+                             local_block_ids, parallelism,
+                             local_host_block_ids);
+            } else {
+              throw std::runtime_error(
+                  "remote_endpoint must be str or list of dicts");
+            }
+          },
+          nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
+          nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
+          nb::arg("parallelism") = 1,
+          nb::arg("local_host_block_ids") = nb::none())
       .def("complete_read",
            [](tpu_raiden::kv_cache::jax::KVCacheManager& self) {
              auto [done_sending, done_recving, failed_recving] =

@@ -28,9 +28,11 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "xla/ffi/api/ffi.h"
 #include "xla/stream_executor/device_address.h"
@@ -123,41 +125,16 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
   }
   int32_t port = port_opt.value();
 
-  // Get IP
+  std::string ip_str = g_weight_synchronizers[shard_idx]->local_ip();
   uint8_t ipv6[16] = {0};
-
-  struct ifaddrs *ifaddr, *ifa;
-  bool found = false;
-  if (getifaddrs(&ifaddr) == 0) {
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-      if (ifa->ifa_addr == nullptr) continue;
-      if (ifa->ifa_addr->sa_family == AF_INET6) {
-        struct sockaddr_in6* ipv6_addr =
-            reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-          struct sockaddr_in* ipv4 =
-              reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-          if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-            ipv6[10] = 0xff;
-            ipv6[11] = 0xff;
-            std::memcpy(ipv6 + 12, &ipv4->sin_addr.s_addr, 4);
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    freeifaddrs(ifaddr);
+  if (absl::StrContains(ip_str, ".")) {
+    struct in_addr ipv4;
+    inet_pton(AF_INET, ip_str.c_str(), &ipv4);
+    ipv6[10] = 0xff;
+    ipv6[11] = 0xff;
+    std::memcpy(ipv6 + 12, &ipv4.s_addr, 4);
+  } else {
+    inet_pton(AF_INET6, ip_str.c_str(), ipv6);
   }
 
   if (out->element_count() < 5) {
@@ -244,39 +221,16 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
   }
   int32_t port = port_opt.value();
 
+  std::string ip_str = g_weight_synchronizers[shard_idx]->local_ip();
   uint8_t ipv6[16] = {0};
-  struct ifaddrs *ifaddr, *ifa;
-  bool found = false;
-  if (getifaddrs(&ifaddr) == 0) {
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-      if (ifa->ifa_addr == nullptr) continue;
-      if (ifa->ifa_addr->sa_family == AF_INET6) {
-        struct sockaddr_in6* ipv6_addr =
-            reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-          struct sockaddr_in* ipv4 =
-              reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-          if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-            ipv6[10] = 0xff;
-            ipv6[11] = 0xff;
-            std::memcpy(ipv6 + 12, &ipv4->sin_addr.s_addr, 4);
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    freeifaddrs(ifaddr);
+  if (absl::StrContains(ip_str, ".")) {
+    struct in_addr ipv4;
+    inet_pton(AF_INET, ip_str.c_str(), &ipv4);
+    ipv6[10] = 0xff;
+    ipv6[11] = 0xff;
+    std::memcpy(ipv6 + 12, &ipv4.s_addr, 4);
+  } else {
+    inet_pton(AF_INET6, ip_str.c_str(), ipv6);
   }
 
   if (out->element_count() < 5) {

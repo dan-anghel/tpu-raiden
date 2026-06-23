@@ -14,6 +14,7 @@
 
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -26,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <thread>  // NOLINT
 #include <utility>
@@ -34,6 +36,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
@@ -72,6 +75,23 @@ absl::Status RawBufferTransport::ReadExact(int fd, void* buffer,
     ssize_t bytes_read = read(fd, ptr, remaining);
     if (bytes_read < 0) {
       if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        int poll_ret =
+            poll(&pfd, 1, 10000);  // 10s timeout to prevent infinite hang
+        if (poll_ret < 0) {
+          if (errno == EINTR) continue;
+          return absl::InternalError(absl::StrCat(
+              "Poll failed during ReadExact: ", std::strerror(errno)));
+        }
+        if (poll_ret == 0) {
+          return absl::DeadlineExceededError(
+              "Timeout waiting for socket readability during ReadExact");
+        }
+        continue;  // Socket is readable now, retry reading
+      }
       return absl::InternalError(
           absl::StrCat("Socket read failed: ", std::strerror(errno)));
     }
@@ -85,34 +105,70 @@ absl::Status RawBufferTransport::ReadExact(int fd, void* buffer,
 }
 
 RawBufferTransport::RawBufferTransport(RawBufferTransportDelegate* delegate,
-                                       int local_port, bool enable_conn_pool)
+                                       int local_port, bool enable_conn_pool,
+                                       std::optional<std::string> bind_ip)
     : raw_delegate_(delegate),
       local_port_(local_port),
+      bound_ip_(bind_ip.value_or("127.0.0.1")),
       pooling_enabled_(enable_conn_pool) {
   // 1. Setup server_fd_
-  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
+  bool bind_specified = bind_ip.has_value();
+  bool is_ipv4 = bind_specified && (absl::StrContains(*bind_ip, '.'));
+  server_fd_ = socket(is_ipv4 ? AF_INET : AF_INET6, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
-    LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
+    throw std::runtime_error("Failed to create server socket: " +
+                             std::string(std::strerror(errno)));
   }
   int opt = 1;
-  setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  struct sockaddr_in6 serv_addr;
-  std::memset(&serv_addr, 0, sizeof(serv_addr));
-  serv_addr.sin6_family = AF_INET6;
-  serv_addr.sin6_addr = in6addr_any;
-  serv_addr.sin6_port = htons(local_port_);
-
-  if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-           sizeof(serv_addr)) < 0) {
-    LOG(FATAL) << "Failed to bind server socket to port " << local_port_ << ": "
-               << std::strerror(errno);
+  if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    throw std::runtime_error("Failed to set SO_REUSEADDR: " +
+                             std::string(std::strerror(errno)));
   }
 
-  socklen_t addr_len = sizeof(serv_addr);
-  if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-                  &addr_len) == 0) {
-    local_port_ = ntohs(serv_addr.sin6_port);
+  if (is_ipv4) {
+    struct sockaddr_in serv_addr;
+    std::memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(local_port_);
+    if (inet_pton(AF_INET, bound_ip_.c_str(), &serv_addr.sin_addr) <= 0) {
+      serv_addr.sin_addr.s_addr = INADDR_ANY;
+    }
+    if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
+             sizeof(serv_addr)) < 0) {
+      throw std::runtime_error("Failed to bind IPv4 server socket to " +
+                               bound_ip_ + ":" + std::to_string(local_port_) +
+                               ": " + std::strerror(errno));
+    }
+    socklen_t addr_len = sizeof(serv_addr);
+    if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
+                    &addr_len) == 0) {
+      local_port_ = ntohs(serv_addr.sin_port);
+    }
+  } else {
+    struct sockaddr_in6 serv_addr;
+    std::memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin6_family = AF_INET6;
+    serv_addr.sin6_addr = in6addr_any;
+    serv_addr.sin6_port = htons(local_port_);
+
+    // If a specific IPv6 address was requested, try to parse and bind to it
+    if (bind_specified && !is_ipv4) {
+      if (inet_pton(AF_INET6, bound_ip_.c_str(), &serv_addr.sin6_addr) <= 0) {
+        serv_addr.sin6_addr = in6addr_any;
+      }
+    }
+
+    if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
+             sizeof(serv_addr)) < 0) {
+      throw std::runtime_error("Failed to bind IPv6 server socket to " +
+                               bound_ip_ + ":" + std::to_string(local_port_) +
+                               ": " + std::strerror(errno));
+    }
+    socklen_t addr_len = sizeof(serv_addr);
+    if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
+                    &addr_len) == 0) {
+      local_port_ = ntohs(serv_addr.sin6_port);
+    }
   }
 
   if (listen(server_fd_, 128) < 0) {

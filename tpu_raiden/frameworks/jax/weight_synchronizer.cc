@@ -14,25 +14,18 @@
 
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <utility>
-#include <vector>
 
-#include "absl/status/status.h"
-#include "absl/status/statusor.h"
-#include <nanobind/nanobind.h>
-#include "tpu_raiden/frameworks/jax/jax_utils.h"
-#include "tpu_raiden/frameworks/jax/utils.h"
-
-namespace nb = nanobind;
+#include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
 namespace jax {
 
+#ifndef WITHOUT_PYTHON
+#include <nanobind/nanobind.h>
+#include "tpu_raiden/frameworks/jax/utils.h"
 
 namespace {
 UnpackedWeights UnpackAndMove(nanobind::list jax_arrays) {
@@ -54,14 +47,57 @@ WeightSynchronizer::WeightSynchronizer(UnpackedWeights&& weights,
                                        int parallelism,
                                        bool unsafe_skip_buffer_lock,
                                        std::optional<int> control_port)
-    : weight_sync::WeightSynchronizerBase(
-          weights.layer_buffers, local_port,
-          /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
-          parallelism, control_port),
-      jax_arrays_(std::move(weights.jax_arrays)) {}
+    : jax_arrays_(std::move(weights.jax_arrays)) {
+  impl_ = std::make_unique<weight_sync::WeightSynchronizerBase>(
+      weights.layer_buffers, local_port,
+      /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock, parallelism,
+      control_port);
+}
 
+#endif  // WITHOUT_PYTHON
 
 WeightSynchronizer::~WeightSynchronizer() = default;
+
+// Forwarding methods implementations
+absl::Status WeightSynchronizer::PullWeights(absl::string_view source) {
+  return impl_->PullWeights(source);
+}
+absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::D2h() {
+  return impl_->D2h();
+}
+absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::H2d() {
+  return impl_->H2d();
+}
+absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::H2dChunk(
+    size_t shard_idx, size_t host_offset_bytes, size_t device_offset_bytes,
+    size_t size_bytes) {
+  return impl_->H2dChunk(shard_idx, host_offset_bytes, device_offset_bytes,
+                         size_bytes);
+}
+absl::Status WeightSynchronizer::PullWeightsChunk(
+    absl::string_view source, size_t src_shard_idx, size_t src_offset_bytes,
+    size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
+  return impl_->PullWeightsChunk(source, src_shard_idx, src_offset_bytes,
+                                 dst_shard_idx, dst_offset_bytes, size_bytes);
+}
+const uint8_t* WeightSynchronizer::GetHostBufferPtr(size_t layer_idx,
+                                                    size_t shard_idx) const {
+  return impl_->GetHostBufferPtr(layer_idx, shard_idx);
+}
+std::optional<int> WeightSynchronizer::local_port() const {
+  return impl_->local_port();
+}
+std::optional<int> WeightSynchronizer::control_port() const {
+  return impl_->control_port();
+}
+bool WeightSynchronizer::is_control_service_active() const {
+  return impl_->is_control_service_active();
+}
+size_t WeightSynchronizer::num_layers() const { return impl_->num_layers(); }
+size_t WeightSynchronizer::num_shards() const { return impl_->num_shards(); }
+size_t WeightSynchronizer::slice_byte_size() const {
+  return impl_->slice_byte_size();
+}
 
 }  // namespace jax
 }  // namespace tpu_raiden

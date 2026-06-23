@@ -57,10 +57,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
-        ":host_memory_allocator",
         ":raw_transfer_core",
-        ":raw_transfer_impl",
-        ":status_macros",
         ":tpu_utils",
         ":xla_raw_transfer_headers",
         "//tpu_raiden/transport:block_transport",
@@ -141,6 +138,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        "@com_google_absl//absl/strings",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:logging",
     ],
@@ -248,15 +246,14 @@ cc_library(
     deps = [
         ":host_memory_allocator",
         ":raw_transfer_core",
+        ":status_macros",
         ":tpu_utils",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/time",
-        "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:errors",
     ],
 )

@@ -14,19 +14,99 @@
 
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 
+#include <sys/mman.h>
+
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <map>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include "tpu_raiden/core/utils.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "xla/future.h"
+#include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/status_macros.h"
+#include "tpu_raiden/core/tpu_utils.h"
+#ifndef WITHOUT_PYTHON
 #include "tpu_raiden/frameworks/jax/utils.h"
 
 namespace nb = nanobind;
+#endif
 
 namespace tpu_raiden {
 namespace kv_cache {
 namespace jax {
 
+namespace {
+tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
+    xla::PjRtClient* client) {
+  return [client](size_t size_bytes, const xla::PjRtDevice* device)
+             -> absl::StatusOr<tpu_raiden::HostBufferAllocation> {
+    if (size_bytes == 0) {
+      tpu_raiden::HostBufferAllocation alloc;
+      alloc.ptr = nullptr;
+      alloc.size = 0;
+      return alloc;
+    }
+
+    // Allocate page-aligned memory
+    size_t aligned_size = (size_bytes + 4095) & ~4095;
+
+    void* ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (ptr == MAP_FAILED) {
+      return absl::ResourceExhaustedError(
+          "mmap failed in LocalCreateHostMemoryAllocator");
+    }
+
+    // Touch memory to force physical page allocation (NUMA first-touch)
+    volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
+    for (size_t i = 0; i < aligned_size; i += 4096) {
+      p[i] = 0;
+    }
+
+    // Register memory with the TPU device DMA engine
+    if (client == nullptr) {
+      munmap(ptr, aligned_size);
+      return absl::InternalError(
+          "PjRtClient is null in LocalCreateHostMemoryAllocator. Cannot "
+          "perform DmaMap!");
+    }
+
+    bool should_dma_map = (client->platform_name() != "cpu");
+    if (should_dma_map) {
+      auto status = client->DmaMap(ptr, aligned_size);
+      if (!status.ok()) {
+        munmap(ptr, aligned_size);
+        return absl::InternalError(
+            "DmaMap failed in LocalCreateHostMemoryAllocator: " +
+            std::string(status.message()));
+      }
+    }
+
+    tpu_raiden::HostBufferAllocation alloc;
+    alloc.ptr = static_cast<uint8_t*>(ptr);
+    alloc.size = size_bytes;
+    alloc.owner = std::shared_ptr<void>(
+        ptr, [client, aligned_size, should_dma_map](void* p) {
+          if (should_dma_map) {
+            (void)client->DmaUnmap(p);
+          }
+          munmap(p, aligned_size);
+        });
+
+    return alloc;
+  };
+}
+}  // namespace
+
+#ifndef WITHOUT_PYTHON
 namespace {
 UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
   auto layer_buffers = tpu_raiden::jax::UnpackJaxArrays(device_arrays);
@@ -34,74 +114,568 @@ UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
 }
 }  // namespace
 
-KVCacheManager::KVCacheManager(
-    nb::list device_arrays, std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
-    bool unsafe_skip_buffer_lock, int parallelism)
-    // NOTE: To achieve zero-copy initialization while remaining robust against
-    // unspecified C++ function/constructor argument evaluation order (Clang
-    // typically evaluates left-to-right, GCC evaluates right-to-left), we
-    // enforce sequencing through a helper function `UnpackAndMove`. The
-    // function call boundary acts as a strict sequencing barrier, guaranteeing
-    // that `UnpackJaxArrays` is fully evaluated before the Python list handle
-    // is moved into ownership, preventing use-after-move segfaults.
-    : KVCacheManager(UnpackAndMove(std::move(device_arrays)),
-                     local_port, host_blocks_to_allocate,
-                     unsafe_skip_buffer_lock, parallelism) {}
+KVCacheManager::KVCacheManager(nb::list device_arrays,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               bool unsafe_skip_buffer_lock, int parallelism)
+    : KVCacheManager(UnpackAndMove(std::move(device_arrays)), local_port,
+                     host_blocks_to_allocate, unsafe_skip_buffer_lock,
+                     parallelism) {}
 
-KVCacheManager::KVCacheManager(
-    UnpackedCache&& cache, std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
-    bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManagerWithTransfer(
-          cache.layer_buffers, local_port, host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism,
-          tpu_raiden::CreateHostMemoryAllocator(
-              cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
-                  ? nullptr
-                  : cache.layer_buffers[0][0]->device()->client()),
-          /*node_id=*/0,
-          /*local_control_port=*/-1,
-          /*max_blocks=*/0,
-          /*num_slots=*/0,
-          /*timeout_s=*/120.0),
-      device_arrays_(std::move(cache.device_arrays)) {}
+KVCacheManager::KVCacheManager(UnpackedCache&& cache,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               bool unsafe_skip_buffer_lock, int parallelism)
+    : device_arrays_(std::move(cache.device_arrays)) {
+  InitSubManagers(cache.layer_buffers, local_port, host_blocks_to_allocate,
+                  unsafe_skip_buffer_lock, parallelism, 0, -1, 0, 0, 120.0);
+}
 
 KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock)
+                               bool unsafe_skip_buffer_lock, int parallelism)
     : KVCacheManager(UnpackAndMove(std::move(kv_caches)), node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
-                     unsafe_skip_buffer_lock) {}
+                     unsafe_skip_buffer_lock, parallelism) {}
 
 KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock)
-    : KVCacheManagerWithTransfer(
-          cache.layer_buffers,
-          /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/std::nullopt,
-          unsafe_skip_buffer_lock,
-          /*parallelism=*/1,
-          tpu_raiden::CreateHostMemoryAllocator(
-              cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
-                  ? nullptr
-                  : cache.layer_buffers[0][0]->device()->client()),
-          node_id, local_control_port, max_blocks, num_slots, timeout_s),
-      device_arrays_(std::move(cache.device_arrays)) {}
+                               bool unsafe_skip_buffer_lock, int parallelism)
+    : device_arrays_(std::move(cache.device_arrays)) {
+  InitSubManagers(cache.layer_buffers, std::nullopt, std::nullopt,
+                  unsafe_skip_buffer_lock, parallelism, node_id,
+                  local_control_port, max_blocks, num_slots, timeout_s);
+}
+#endif
 
 KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
                                size_t slice_byte_size,
                                std::optional<int> local_port,
                                std::optional<int> host_blocks_to_allocate,
-                               int parallelism)
-    : KVCacheManagerWithTransfer(num_layers, num_shards, slice_byte_size,
-                                 local_port,
-                                 host_blocks_to_allocate, parallelism) {}
+                               int parallelism) {
+  auto sub_mgr = std::make_unique<KVCacheManagerWithTransfer>(
+      num_layers, num_shards, slice_byte_size, local_port,
+      host_blocks_to_allocate, parallelism);
+  sub_managers_.push_back(std::move(sub_mgr));
+  total_num_shards_ = num_shards;
+  global_shard_to_submanager_.resize(total_num_shards_);
+  for (size_t i = 0; i < total_num_shards_; ++i) {
+    global_shard_to_submanager_[i] = {0, static_cast<int>(i)};
+  }
+}
+
+KVCacheManager::KVCacheManager(
+    std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers) {
+  sub_managers_ = std::move(sub_managers);
+  total_num_shards_ = sub_managers_.size();
+  global_shard_to_submanager_.resize(total_num_shards_);
+  for (size_t i = 0; i < sub_managers_.size(); ++i) {
+    global_shard_to_submanager_[i] = {static_cast<int>(i), 0};
+  }
+}
 
 KVCacheManager::~KVCacheManager() = default;
+
+void KVCacheManager::InitSubManagers(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id,
+    int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
+    double timeout_s) {
+  if (layer_buffers.empty()) return;
+  size_t num_layers = layer_buffers.size();
+  total_num_shards_ = layer_buffers[0].size();
+  global_shard_to_submanager_.resize(total_num_shards_);
+
+  std::map<int, std::vector<int>> numa_to_shards;
+  for (size_t sh = 0; sh < total_num_shards_; ++sh) {
+    int numa = 0;
+    if (layer_buffers[0][sh] != nullptr) {
+      if (layer_buffers[0][sh]->device() != nullptr) {
+        numa = GetPjRtDeviceNumaNode(layer_buffers[0][sh]->device());
+      }
+    }
+    if (numa < 0) numa = 0;
+    numa_to_shards[numa].push_back(static_cast<int>(sh));
+  }
+
+  std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+  size_t num_ext_nics = 0;
+  for (const auto& nic : host_nics) {
+    if (nic.interface_name != "lo") num_ext_nics++;
+  }
+  if (numa_to_shards.size() > 1 && num_ext_nics < numa_to_shards.size()) {
+    std::vector<int> all_shards;
+    for (const auto& [n, sh_list] : numa_to_shards) {
+      all_shards.insert(all_shards.end(), sh_list.begin(), sh_list.end());
+    }
+    numa_to_shards.clear();
+    numa_to_shards[0] = std::move(all_shards);
+  }
+
+  submanager_to_global_shards_.reserve(numa_to_shards.size());
+  std::optional<int> bound_base_port = std::nullopt;
+  for (const auto& [numa, shards] : numa_to_shards) {
+    int sub_idx = static_cast<int>(sub_managers_.size());
+    std::vector<int64_t> gshards;
+    for (size_t local_sh = 0; local_sh < shards.size(); ++local_sh) {
+      global_shard_to_submanager_[shards[local_sh]] = {
+          sub_idx, static_cast<int>(local_sh)};
+      gshards.push_back(shards[local_sh]);
+    }
+    submanager_to_global_shards_.push_back(std::move(gshards));
+
+    std::vector<std::vector<xla::PjRtBuffer*>> sub_buffers(num_layers);
+    for (size_t l = 0; l < num_layers; ++l) {
+      sub_buffers[l].reserve(shards.size());
+      for (int sh : shards) {
+        sub_buffers[l].push_back(layer_buffers[l][sh]);
+      }
+    }
+
+    xla::PjRtClient* client = nullptr;
+    if (!sub_buffers.empty() && !sub_buffers[0].empty() &&
+        sub_buffers[0][0] != nullptr) {
+      if (sub_buffers[0][0]->device() != nullptr) {
+        client = sub_buffers[0][0]->device()->client();
+      }
+    }
+    tpu_raiden::HostBufferAllocator host_alloc =
+        LocalCreateHostMemoryAllocator(client);
+
+    std::optional<int> sub_port = local_port;
+    if (sub_port.has_value()) {
+      if (bound_base_port.has_value()) {
+        sub_port = *bound_base_port + sub_idx;
+      } else if (*sub_port > 0) {
+        sub_port = *sub_port + sub_idx;
+      }
+    }
+    int64_t sub_ctrl_port = local_control_port > 0
+                                ? local_control_port + sub_idx
+                                : local_control_port;
+
+    auto sub_mgr = std::make_unique<KVCacheManagerWithTransfer>(
+        sub_buffers, sub_port, host_blocks_to_allocate, unsafe_skip_buffer_lock,
+        parallelism, host_alloc, node_id + sub_idx, sub_ctrl_port, max_blocks,
+        num_slots, timeout_s);
+    if (local_port.has_value()) {
+      (void)sub_mgr->local_port();
+    }
+    if (!bound_base_port.has_value() && sub_mgr->local_port().has_value()) {
+      bound_base_port = sub_mgr->local_port().value();
+    }
+    sub_managers_.push_back(std::move(sub_mgr));
+  }
+}
+
+size_t KVCacheManager::num_layers() const {
+  return sub_managers_.empty() ? 0 : sub_managers_[0]->num_layers();
+}
+
+size_t KVCacheManager::num_shards() const { return total_num_shards_; }
+
+size_t KVCacheManager::slice_byte_size() const {
+  return sub_managers_.empty() ? 0 : sub_managers_[0]->slice_byte_size();
+}
+
+std::optional<int> KVCacheManager::local_port() const {
+  return sub_managers_.empty() ? std::nullopt : sub_managers_[0]->local_port();
+}
+
+int KVCacheManager::local_control_port() const {
+  return sub_managers_.empty() ? -1 : sub_managers_[0]->local_control_port();
+}
+
+int64_t KVCacheManager::node_id() const {
+  return sub_managers_.empty() ? 0 : sub_managers_[0]->node_id();
+}
+
+uint8_t* KVCacheManager::GetHostPointer(size_t layer_idx, size_t shard_idx) {
+  if (shard_idx >= global_shard_to_submanager_.size()) return nullptr;
+  auto [sub_idx, local_shard] = global_shard_to_submanager_[shard_idx];
+  return sub_managers_[sub_idx]->GetHostPointer(layer_idx, local_shard);
+}
+
+const uint8_t* KVCacheManager::GetHostPointer(size_t layer_idx,
+                                              size_t shard_idx) const {
+  if (shard_idx >= global_shard_to_submanager_.size()) return nullptr;
+  auto [sub_idx, local_shard] = global_shard_to_submanager_[shard_idx];
+  return sub_managers_[sub_idx]->GetHostPointer(layer_idx, local_shard);
+}
+
+size_t KVCacheManager::GetHostSize(size_t layer_idx, size_t shard_idx) {
+  if (shard_idx >= global_shard_to_submanager_.size()) return 0;
+  auto [sub_idx, local_shard] = global_shard_to_submanager_[shard_idx];
+  return sub_managers_[sub_idx]->GetHostSize(layer_idx, local_shard);
+}
+
+int64_t KVCacheManager::NotifyForRead(const std::string& req_id, uint64_t uuid,
+                                      const std::vector<int64_t>& block_ids) {
+  int64_t res = 0;
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    res = sub_managers_[s]->NotifyForRead(req_id, uuid, block_ids);
+  }
+  return res;
+}
+
+std::vector<EndpointDescriptor> KVCacheManager::get_local_endpoints() const {
+  std::vector<EndpointDescriptor> res;
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    auto sub_eps = sub_managers_[s]->get_local_endpoints();
+    if (!sub_eps.empty()) {
+      std::vector<int64_t> shards;
+      if (s < submanager_to_global_shards_.size()) {
+        shards = submanager_to_global_shards_[s];
+      }
+      res.push_back({sub_eps[0].endpoint, shards});
+    }
+  }
+  return res;
+}
+
+void KVCacheManager::StartRead(
+    const std::string& req_id, uint64_t uuid,
+    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<int64_t>& remote_block_ids,
+    const std::vector<int64_t>& local_block_ids, int parallelism,
+    std::optional<std::vector<int64_t>> local_host_block_ids) {
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    std::set<int64_t> sub_shards;
+    if (s < submanager_to_global_shards_.size()) {
+      sub_shards.insert(submanager_to_global_shards_[s].begin(),
+                        submanager_to_global_shards_[s].end());
+    }
+
+    std::string matched_ep;
+    for (const auto& desc : remote_descriptors) {
+      for (int64_t rsh : desc.shards) {
+        if (sub_shards.find(rsh) != sub_shards.end()) {
+          matched_ep = desc.endpoint;
+          break;
+        }
+      }
+      if (!matched_ep.empty()) break;
+    }
+    if (matched_ep.empty() && !remote_descriptors.empty()) {
+      matched_ep = remote_descriptors[0].endpoint;
+    }
+
+    if (!matched_ep.empty()) {
+      sub_managers_[s]->StartRead(req_id, uuid, matched_ep, remote_block_ids,
+                                  local_block_ids, parallelism,
+                                  local_host_block_ids);
+    }
+  }
+}
+
+void KVCacheManager::StartRead(
+    const std::string& req_id, uint64_t uuid,
+    const std::string& remote_endpoint,
+    const std::vector<int64_t>& remote_block_ids,
+    const std::vector<int64_t>& local_block_ids, int parallelism,
+    std::optional<std::vector<int64_t>> local_host_block_ids) {
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    sub_managers_[s]->StartRead(req_id, uuid, remote_endpoint, remote_block_ids,
+                                local_block_ids, parallelism,
+                                local_host_block_ids);
+  }
+}
+
+std::tuple<std::vector<std::string>, std::vector<std::string>,
+           std::vector<std::string>>
+KVCacheManager::CompleteReadRaw() {
+  std::vector<std::string> done_sending, done_recving, failed_recving;
+  int num_subs = static_cast<int>(sub_managers_.size());
+  if (num_subs == 0) return {};
+
+  for (auto& sub : sub_managers_) {
+    auto [s, r, f] = sub->CompleteReadRaw();
+    for (const auto& req : s) {
+      done_sending_counts_[req]++;
+      if (done_sending_counts_[req] == num_subs) {
+        done_sending.push_back(req);
+        done_sending_counts_.erase(req);
+      }
+    }
+    for (const auto& req : r) {
+      done_recving_counts_[req]++;
+      if (done_recving_counts_[req] == num_subs) {
+        if (failed_recving_set_.find(req) == failed_recving_set_.end()) {
+          done_recving.push_back(req);
+        }
+        done_recving_counts_.erase(req);
+        failed_recving_set_.erase(req);
+      }
+    }
+    for (const auto& req : f) {
+      if (failed_recving_set_.insert(req).second) {
+        failed_recving.push_back(req);
+      }
+    }
+  }
+  return {std::move(done_sending), std::move(done_recving),
+          std::move(failed_recving)};
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& dst_offsets,
+    const std::vector<int64_t>& copy_sizes, std::optional<int64_t> slot_idx,
+    std::optional<size_t> layer_idx, std::optional<size_t> shard_idx) {
+  if (sub_managers_.empty()) {
+    return raiden::PjRtCopyFuture();
+  }
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  futures.reserve(sub_managers_.size());
+  sub_copy_futures.reserve(sub_managers_.size());
+  for (auto& sub : sub_managers_) {
+    ASSIGN_OR_RETURN(auto f, sub->H2d(src_offsets, dst_offsets, copy_sizes,
+                                      slot_idx, layer_idx, shard_idx));
+    futures.push_back(f.future);
+    sub_copy_futures.push_back(std::move(f));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return composite;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& dst_offsets,
+    const std::vector<int64_t>& copy_sizes, std::optional<int64_t> slot_idx,
+    std::optional<size_t> layer_idx, std::optional<size_t> shard_idx) {
+  if (sub_managers_.empty()) {
+    return raiden::PjRtCopyFuture();
+  }
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  futures.reserve(sub_managers_.size());
+  sub_copy_futures.reserve(sub_managers_.size());
+  for (auto& sub : sub_managers_) {
+    ASSIGN_OR_RETURN(auto f, sub->D2h(src_offsets, dst_offsets, copy_sizes,
+                                      slot_idx, layer_idx, shard_idx));
+    futures.push_back(f.future);
+    sub_copy_futures.push_back(std::move(f));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return composite;
+}
+
+absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
+                                const std::vector<int64_t>& copy_sizes) {
+  if (sub_managers_.empty()) {
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
+  std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    ASSIGN_OR_RETURN(
+        auto res, sub_managers_[s]->D2hAutoAllocate(src_offsets, copy_sizes));
+    if (s == 0) {
+      all_ids = res.first;
+    }
+    futures.push_back(res.second.future);
+    sub_copy_futures.push_back(std::move(res.second));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return std::make_pair(std::move(all_ids), std::move(composite));
+}
+
+absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+KVCacheManager::H2hWrite(std::string peer,
+                         const std::vector<int>& src_block_ids,
+                         const std::vector<int>& dst_block_ids, uint64_t uuid) {
+  if (sub_managers_.empty()) {
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
+  std::string host_prefix;
+  int base_port = -1;
+  size_t colon = peer.find_last_of(':');
+  if (colon != std::string::npos) {
+    host_prefix = peer.substr(0, colon + 1);
+    try {
+      base_port = std::stoi(peer.substr(colon + 1));
+    } catch (...) {
+      base_port = -1;
+    }
+  }
+
+  std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    std::string sub_peer =
+        (base_port >= 0) ? host_prefix + std::to_string(base_port + s) : peer;
+    ASSIGN_OR_RETURN(auto res,
+                     sub_managers_[s]->H2hWrite(sub_peer, src_block_ids,
+                                                dst_block_ids, uuid));
+    if (s == 0) {
+      all_ids = res.first;
+    }
+    futures.push_back(res.second.future);
+    sub_copy_futures.push_back(std::move(res.second));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return std::make_pair(std::move(all_ids), std::move(composite));
+}
+
+absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+KVCacheManager::H2hRead(std::string peer,
+                        const std::vector<int>& src_block_ids) {
+  if (sub_managers_.empty()) {
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
+  std::string host_prefix;
+  int base_port = -1;
+  size_t colon = peer.find_last_of(':');
+  if (colon != std::string::npos) {
+    host_prefix = peer.substr(0, colon + 1);
+    try {
+      base_port = std::stoi(peer.substr(colon + 1));
+    } catch (...) {
+      base_port = -1;
+    }
+  }
+
+  std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    std::string sub_peer =
+        (base_port >= 0) ? host_prefix + std::to_string(base_port + s) : peer;
+    ASSIGN_OR_RETURN(auto res,
+                     sub_managers_[s]->H2hRead(sub_peer, src_block_ids));
+    if (s == 0) {
+      all_ids = res.first;
+    }
+    futures.push_back(res.second.future);
+    sub_copy_futures.push_back(std::move(res.second));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return std::make_pair(std::move(all_ids), std::move(composite));
+}
+
+absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+KVCacheManager::H2hWrite(
+    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<int>& src_block_ids,
+    const std::vector<int>& dst_block_ids, uint64_t uuid) {
+  if (sub_managers_.empty()) {
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
+  std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    const auto& sub_shards = submanager_to_global_shards_[s];
+    std::string matched_ep;
+    for (const auto& desc : remote_descriptors) {
+      for (int64_t gsh : sub_shards) {
+        if (std::find(desc.shards.begin(), desc.shards.end(), gsh) !=
+            desc.shards.end()) {
+          matched_ep = desc.endpoint;
+          break;
+        }
+      }
+      if (!matched_ep.empty()) break;
+    }
+    if (matched_ep.empty() && !remote_descriptors.empty()) {
+      matched_ep = remote_descriptors[0].endpoint;
+    }
+
+    ASSIGN_OR_RETURN(auto res,
+                     sub_managers_[s]->H2hWrite(matched_ep, src_block_ids,
+                                                dst_block_ids, uuid));
+    if (s == 0) {
+      all_ids = res.first;
+    }
+    futures.push_back(res.second.future);
+    sub_copy_futures.push_back(std::move(res.second));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return std::make_pair(std::move(all_ids), std::move(composite));
+}
+
+absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+KVCacheManager::H2hRead(
+    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<int>& src_block_ids) {
+  if (sub_managers_.empty()) {
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
+  std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    const auto& sub_shards = submanager_to_global_shards_[s];
+    std::string matched_ep;
+    for (const auto& desc : remote_descriptors) {
+      for (int64_t gsh : sub_shards) {
+        if (std::find(desc.shards.begin(), desc.shards.end(), gsh) !=
+            desc.shards.end()) {
+          matched_ep = desc.endpoint;
+          break;
+        }
+      }
+      if (!matched_ep.empty()) break;
+    }
+    if (matched_ep.empty() && !remote_descriptors.empty()) {
+      matched_ep = remote_descriptors[0].endpoint;
+    }
+
+    ASSIGN_OR_RETURN(auto res,
+                     sub_managers_[s]->H2hRead(matched_ep, src_block_ids));
+    if (s == 0) {
+      all_ids = res.first;
+    }
+    futures.push_back(res.second.future);
+    sub_copy_futures.push_back(std::move(res.second));
+  }
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return std::make_pair(std::move(all_ids), std::move(composite));
+}
 
 }  // namespace jax
 }  // namespace kv_cache

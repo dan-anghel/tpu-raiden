@@ -37,9 +37,15 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":utils",
+        "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
-        "//tpu_raiden/core:utils",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core:status_macros",
+        "//tpu_raiden/core:tpu_utils",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
         "@nanobind",
+        "@xla//xla:future",
     ],
 )
 
@@ -64,6 +70,7 @@ cc_library(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
+        "@xla//xla/tsl/concurrency:ref_count",
     ],
 )
 
@@ -260,6 +267,7 @@ cc_library(
     deps = [
         ":jax_utils",
         ":utils",
+        "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -303,14 +311,11 @@ nanobind_extension(
         "//tpu_raiden/core:status_macros",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@nanobind",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/platform:statusor",
     ],
 )
 
@@ -428,6 +433,7 @@ cc_library(
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
+        "@xla//xla/tsl/concurrency:ref_count",
     ],
 )
 
@@ -454,15 +460,12 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
-        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/concurrency:ref_count",
     ],
 )
 
@@ -499,6 +502,7 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
+        "@jax//jax/_src/lib",
         "@pypi//numpy",
     ],
 )
@@ -672,5 +676,46 @@ py_test(
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
         "@pypi//numpy",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_manager_core_lib",
+    srcs = ["kv_cache_manager.cc"],
+    hdrs = ["kv_cache_manager.h"],
+    copts = [
+        "-DWITHOUT_PYTHON",
+        "-fexceptions",
+        "-frtti",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "//tpu_raiden/core:host_memory_allocator",
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core:status_macros",
+        "//tpu_raiden/core:tpu_utils",
+        "//tpu_raiden/core:utils",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla:future",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_manager_wrapper_test",
+    srcs = ["kv_cache_manager_wrapper_test.cc"],
+    copts = [
+        "-DWITHOUT_PYTHON",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    tags = ["notap"],
+    deps = [
+        ":kv_cache_manager_core_lib",
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
     ],
 )

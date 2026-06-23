@@ -28,7 +28,7 @@
 
 """High-performance JAX KV Cache Manager (repurposed as TransferEngine)."""
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from tpu_raiden.frameworks.jax import _tpu_raiden_jax as _impl
 
 
@@ -48,7 +48,8 @@ class KVCacheManager:
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
       host_blocks_to_allocate: Optional[int] = None,
-      parallelism: int = 1,
+      parallelism: int = 4,
+      node_id: int = 0,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -62,7 +63,8 @@ class KVCacheManager:
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
       host_blocks_to_allocate: Legacy/unified total blocks to allocate in host
         pool.
-      parallelism: Transfer channel parallelism.
+      parallelism: Number of parallel network copies per layer.
+      node_id: Unique identifier for this host/node in the distributed mesh.
     """
     if host_blocks_to_allocate is not None:
       self._impl = _impl.KVCacheManager(
@@ -80,17 +82,18 @@ class KVCacheManager:
         )
       self._impl = _impl.KVCacheManager(
           kv_caches=kv_caches,
+          node_id=node_id,
           local_control_port=local_control_port,
           max_blocks=max_blocks,
           num_slots=num_slots,
           timeout_s=timeout_s,
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
+          parallelism=parallelism,
       )
 
-  @property
-  def local_control_port(self) -> int:
-    """Returns the active control plane listener port."""
-    return self._impl.local_control_port
+  def get_local_endpoints(self) -> List[Dict[str, Any]]:
+    """Returns the active Raiden endpoint descriptors."""
+    return self._impl.get_local_endpoints()
 
   def register_read(self, req_id: str, uuid: int, block_ids: List[int]) -> bool:
     """Producer node notifies the registry/peer that blocks are ready for read.
@@ -110,7 +113,7 @@ class KVCacheManager:
       self,
       req_id: str,
       uuid: int,
-      remote_endpoint: str,
+      remote_endpoint: Union[str, List[Dict[str, Any]]],
       remote_block_ids: List[int],
       local_block_ids: List[int],
       parallelism: int = 1,

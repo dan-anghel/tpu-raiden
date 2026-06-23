@@ -130,7 +130,6 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
-        ":torch_tpu_utils",
         ":torch_utils",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:utils",
@@ -289,7 +288,6 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
-        ":torch_tpu_utils_mock",
         ":torch_utils_mock",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:utils",

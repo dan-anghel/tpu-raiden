@@ -47,7 +47,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   KVCacheManager(const std::vector<at::Tensor>& kv_caches, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock,
+                 bool unsafe_skip_buffer_lock, int parallelism = 4,
                  std::optional<int> listener_port = std::nullopt);
 
   ~KVCacheManager() override;

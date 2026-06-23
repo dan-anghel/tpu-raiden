@@ -94,5 +94,27 @@ TEST(TpuUtilsTest, PinCurrentThreadToNumaNodeTest) {
   }
 }
 
+TEST(TpuUtilsTest, GetLocalHostNicAddressesTest) {
+  std::vector<HostNicAddress> nics = GetLocalHostNicAddresses();
+  LOG(INFO) << "Discovered " << nics.size() << " network interfaces:";
+  for (const auto& nic : nics) {
+    LOG(INFO) << "  Interface: " << nic.interface_name
+              << ", IP: " << nic.ip_address << ", NUMA Node: " << nic.numa_node;
+    EXPECT_FALSE(nic.interface_name.empty());
+    EXPECT_FALSE(nic.ip_address.empty());
+  }
+  EXPECT_FALSE(nics.empty());
+}
+
+TEST(TpuUtilsTest, GetLocalHostIpAddressesTest) {
+  std::vector<std::string> ips = GetLocalHostIpAddresses();
+  LOG(INFO) << "Discovered " << ips.size() << " IP addresses:";
+  for (const auto& ip : ips) {
+    LOG(INFO) << "  IP: " << ip;
+    EXPECT_FALSE(ip.empty());
+  }
+  EXPECT_FALSE(ips.empty());
+}
+
 }  // namespace
 }  // namespace tpu_raiden

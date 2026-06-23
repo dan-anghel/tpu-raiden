@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -86,7 +87,8 @@ class RawBufferTransport {
   };
 
   RawBufferTransport(RawBufferTransportDelegate* delegate, int local_port,
-                     bool enable_conn_pool = true);
+                     bool enable_conn_pool = true,
+                     std::optional<std::string> bind_ip = std::nullopt);
   virtual ~RawBufferTransport();
 
   // Directly pushes an arbitrary continuous byte array into a specific offset
@@ -125,6 +127,7 @@ class RawBufferTransport {
                                                 absl::string_view command_meta);
 
   int local_port() const { return local_port_; }
+  const std::string& bound_ip() const { return bound_ip_; }
 
   // Shared socket IO helpers.
   static absl::Status WriteExact(int fd, const void* buffer, size_t length);
@@ -147,6 +150,7 @@ class RawBufferTransport {
   RawBufferTransportDelegate* raw_delegate_;
   int local_port_;
   int server_fd_ = -1;
+  std::string bound_ip_ = "127.0.0.1";
   std::atomic<bool> stopping_{false};
 
   absl::Mutex mu_;

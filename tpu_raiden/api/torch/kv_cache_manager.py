@@ -28,35 +28,29 @@
 
 """High-performance PyTorch KV Cache Manager (repurposed as TransferEngine)."""
 
+import ctypes
 import os
+import pathlib
 import sys
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from torch_tpu import _loader as _torch_tpu_loader
 
 
+Path = pathlib.Path
+
+
 def _load_torch_tpu_common() -> None:
-  # Load torch_tpu's shared libraries so libpywrap_torch_tpu_common.so is in
-  # the process. Deliberately do NOT `ctypes.CDLL(..., RTLD_GLOBAL)` it: the
-  # extension statically links its own XLA, and globalizing libpywrap's XLA
-  # makes raiden's allocator-factory registry interpose onto libpywrap's,
-  # aborting with a duplicate `DefaultCPUAllocator` registration. The
-  # extension NEEDED-links libpywrap (see build.sh patchelf step), so its
-  # torch_tpu symbols resolve through that dependency in local scope.
   _torch_tpu_loader.load()
+  common = Path(torch_tpu.__file__).resolve().parent / "common"
+  lib = common / "libpywrap_torch_tpu_common.so"
+  if lib.exists():
+    ctypes.CDLL(str(lib), mode=os.RTLD_GLOBAL | os.RTLD_NOW)
 
 
 _load_torch_tpu_common()
 
-# Import the extension in private (RTLD_LOCAL) scope so its embedded XLA stays
-# separate from libpywrap's (mirrors how jax extensions load). A global-scope
-# load would merge the two XLA copies' allocator registries and abort.
-_prev_dlopen_flags = sys.getdlopenflags()
-sys.setdlopenflags(os.RTLD_LOCAL | os.RTLD_NOW)
-try:
-  from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
-finally:
-  sys.setdlopenflags(_prev_dlopen_flags)
+from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
 
 
 class KVCacheManager:
@@ -76,6 +70,7 @@ class KVCacheManager:
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
       listener_port: Optional[int] = None,
+      parallelism: int = 4,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -90,6 +85,7 @@ class KVCacheManager:
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
+      parallelism: Number of parallel network copies per layer.
     """
     self._impl = _impl.KVCacheManager(
         kv_caches=kv_caches,
@@ -100,12 +96,17 @@ class KVCacheManager:
         timeout_s=timeout_s,
         unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
         listener_port=listener_port,
+        parallelism=parallelism,
     )
 
   @property
   def node_id(self) -> int:
     """Returns the active Worker or Shard ID."""
     return self._impl.node_id()
+
+  def get_local_endpoints(self) -> List[Dict[str, Any]]:
+    """Returns the active Raiden endpoint descriptors."""
+    return self._impl.get_local_endpoints()
 
   @property
   def local_control_port(self) -> int:
@@ -137,7 +138,7 @@ class KVCacheManager:
       self,
       req_id: str,
       uuid: int,
-      remote_endpoint: str,
+      remote_endpoint: Union[str, List[Dict[str, Any]]],
       remote_block_ids: List[int],
       local_block_ids: List[int],
       parallelism: int = 1,

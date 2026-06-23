@@ -15,11 +15,15 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_H_
 
+#include <memory>
 #include <optional>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "tpu_raiden/core/raiden_future.h"
 #ifndef WITHOUT_PYTHON
-#include <nanobind/nanobind.h>
+#include "tpu_raiden/frameworks/jax/jax_utils.h"
 #endif
 #include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
@@ -41,9 +45,12 @@ struct UnpackedWeights {
 };
 #endif
 
-class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
+class WeightSynchronizer {
  public:
-  using WeightSynchronizerBase::WeightSynchronizerBase;
+  WeightSynchronizer(const WeightSynchronizer&) = delete;
+  WeightSynchronizer& operator=(const WeightSynchronizer&) = delete;
+  WeightSynchronizer(WeightSynchronizer&&) = default;
+  WeightSynchronizer& operator=(WeightSynchronizer&&) = default;
 
 #ifndef WITHOUT_PYTHON
   WeightSynchronizer(nanobind::list jax_arrays,
@@ -52,7 +59,26 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
                      std::optional<int> control_port = std::nullopt);
 #endif
 
-  ~WeightSynchronizer() override;
+  ~WeightSynchronizer();
+
+  // Forwarding methods to isolate RTTI from WeightSynchronizerBase
+  absl::Status PullWeights(absl::string_view source);
+  absl::StatusOr<raiden::PjRtCopyFuture> D2h();
+  absl::StatusOr<raiden::PjRtCopyFuture> H2d();
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dChunk(size_t shard_idx,
+                                                  size_t host_offset_bytes,
+                                                  size_t device_offset_bytes,
+                                                  size_t size_bytes);
+  absl::Status PullWeightsChunk(absl::string_view source, size_t src_shard_idx,
+                                size_t src_offset_bytes, size_t dst_shard_idx,
+                                size_t dst_offset_bytes, size_t size_bytes);
+  const uint8_t* GetHostBufferPtr(size_t layer_idx, size_t shard_idx) const;
+  std::optional<int> local_port() const;
+  std::optional<int> control_port() const;
+  bool is_control_service_active() const;
+  size_t num_layers() const;
+  size_t num_shards() const;
+  size_t slice_byte_size() const;
 
  private:
 #ifndef WITHOUT_PYTHON
@@ -61,6 +87,7 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
                      std::optional<int> control_port);
   std::optional<nanobind::list> jax_arrays_;
 #endif
+  std::unique_ptr<weight_sync::WeightSynchronizerBase> impl_;
 };
 
 }  // namespace jax

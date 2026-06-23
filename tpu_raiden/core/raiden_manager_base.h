@@ -63,13 +63,15 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
                                 size_t dst_offset_bytes,
                                 const uint8_t* data_ptr, size_t size_bytes);
 
-  std::optional<int> local_port() const;
+  virtual std::optional<int> local_port() const;
+  virtual std::string local_ip() const;
   std::optional<int> assigned_numa_node() const { return assigned_numa_node_; }
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override;
   size_t GetHostSize(size_t layer_idx, size_t shard_idx) override;
 
-  const uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) const;
+  virtual const uint8_t* GetHostPointer(size_t layer_idx,
+                                        size_t shard_idx) const;
 
   void SetExternalHostPointers(const std::vector<const uint8_t*>& host_ptrs,
                                const std::vector<size_t>& host_sizes);
@@ -106,17 +108,22 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t shard_factor_ = 1;
   int64_t major_dim_size_ = 0;
   std::optional<int> assigned_numa_node_ = std::nullopt;
+  int local_port_cfg_ = 0;
+
+  void InitTransportServer();
 
   void DetectAndAssignNumaNode(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);
 
-  std::unique_ptr<tpu_raiden::transport::BlockTransport> server_;
+  mutable absl::Mutex server_init_mu_;
+  std::unique_ptr<tpu_raiden::transport::BlockTransport> server_
+      ABSL_GUARDED_BY(server_init_mu_);
 
   std::vector<LayerInfoBase> layers_;
 
   // Delegate allocator overrides
-  absl::StatusOr<std::vector<int>> AllocateBlocks(
-      size_t num_blocks, uint64_t uuid = 0) override {
+  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
+                                                  uint64_t uuid = 0) override {
     return absl::UnimplementedError("Block allocator is not available");
   }
 
@@ -125,10 +132,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   }
 
   absl::Status OnDataReceived() override { return absl::OkStatus(); }
-
-  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override {
-    return absl::OkStatus();
-  }
 };
 
 }  // namespace tpu_raiden

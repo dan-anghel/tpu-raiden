@@ -92,11 +92,12 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t node_id, int64_t local_control_port,
                                int64_t max_blocks, int64_t num_slots,
                                double timeout_s, bool unsafe_skip_buffer_lock,
+                               int parallelism,
                                std::optional<int> listener_port)
     : KVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
                      /*local_port=*/std::nullopt,
                      /*host_blocks_to_allocate=*/std::nullopt,
-                     unsafe_skip_buffer_lock, /*parallelism=*/1, node_id,
+                     unsafe_skip_buffer_lock, parallelism, node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
                      kv_caches) {
   if (listener_port) {

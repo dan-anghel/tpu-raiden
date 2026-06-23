@@ -153,9 +153,13 @@ def prepare_reshard(src_sharded_array: jax.Array) -> str:
         c_ends,
     )
 
-    _COORDINATION_SERVER.set_metadata(
-        port=0, block_ids=extended_info, host_ip=host_ip
-    )
+    if _COORDINATION_SERVER is not None:
+      _COORDINATION_SERVER.set_metadata(
+          endpoints=[],
+          transfer_uuid=0,
+          transfer_req_id="",
+          block_ids=extended_info,
+      )
     if ":" in host_ip:
       address = f"[{host_ip}]:{port}"
     else:
@@ -186,7 +190,8 @@ def reshard(
   num_src_devices_arr = jnp.array([0], dtype=jnp.int32)
   if jax.process_index() == 0:
     client = coordination_helper.CoordinationClient(coordination_address)
-    _, block_ids, _ = client.get_metadata()
+    metadata = client.get_metadata()
+    block_ids = metadata.block_ids
     # Each device has 10 elements: 4 IPs, 1 port, 1 device_id, 4 slice indices
     num_src_devices = len(block_ids) // 10
     num_src_devices_arr = jnp.array([num_src_devices], dtype=jnp.int32)

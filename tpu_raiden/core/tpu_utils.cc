@@ -14,16 +14,16 @@
 
 #include "tpu_raiden/core/tpu_utils.h"
 
-#include <dirent.h>
-#include <pthread.h>
-#include <sched.h>
-#include <sys/syscall.h>
-#include <unistd.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -31,12 +31,13 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
-#include <optional>
 
+#include "absl/strings/str_cat.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
 
@@ -254,10 +255,17 @@ const std::vector<TpuPciDevice>& GetTpuPciDevices() {
   return *cached_devices;
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("default")))
+#endif
 int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device) {
   if (device == nullptr) return -1;
 
   int chip_idx = device->local_hardware_id().value();
+  if (chip_idx < 0) {
+    VLOG(1) << "Negative chip_idx (" << chip_idx << "), returning NUMA node -1";
+    return -1;
+  }
 
   const auto& pci_devices = GetTpuPciDevices();
   if (pci_devices.empty()) {

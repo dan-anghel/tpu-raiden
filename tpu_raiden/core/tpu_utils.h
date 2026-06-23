@@ -52,6 +52,9 @@ const std::vector<TpuPciDevice>& GetTpuPciDevices();
 // Returns the NUMA node for a given PjRtDevice.
 // Maps the device's local_hardware_id to the sorted PCI devices.
 // Returns -1 if the node cannot be determined.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((visibility("default")))
+#endif
 int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device);
 
 // Prints the detected TPU hardware topology to std::cout.

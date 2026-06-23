@@ -46,6 +46,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -65,15 +66,13 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/errors.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 
@@ -82,21 +81,21 @@ namespace {
 
 constexpr absl::Duration kPendingWorkTimeout = absl::Seconds(30);
 
-[[noreturn]] void ThrowStatus(absl::string_view context,
+[[noreturn]] void ThrowStatus(const std::string& context,
                               const absl::Status& status) {
-  throw std::runtime_error(absl::StrCat(context, ": ", status.message()));
+  throw std::runtime_error(context + ": " + std::string(status.message()));
 }
 
-void CheckStatus(absl::string_view context, const absl::Status& status) {
+void CheckStatus(const std::string& context, const absl::Status& status) {
   if (!status.ok()) {
     ThrowStatus(context, status);
   }
 }
 
-void EmitTimingLog(absl::string_view message) { LOG(INFO) << message; }
+void EmitTimingLog(const std::string& message) { LOG(INFO) << message; }
 
 template <typename T>
-T ValueOrThrow(absl::string_view context, absl::StatusOr<T> value_or) {
+T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
   if (!value_or.ok()) {
     ThrowStatus(context, value_or.status());
   }
@@ -141,24 +140,20 @@ absl::Status ReadExact(int fd, void* buffer, size_t length) {
   return absl::OkStatus();
 }
 
-std::pair<std::string, int> SplitEndpoint(absl::string_view endpoint) {
+std::pair<std::string, int> SplitEndpoint(const std::string& endpoint) {
   const size_t colon = endpoint.rfind(':');
-  if (colon == absl::string_view::npos) {
+  if (colon == std::string::npos) {
     throw std::invalid_argument("endpoint must be host:port");
   }
-  int port = 0;
-  if (!absl::SimpleAtoi(endpoint.substr(colon + 1), &port)) {
-    throw std::invalid_argument("invalid port in endpoint");
-  }
-  return {std::string(endpoint.substr(0, colon)), port};
+  return {endpoint.substr(0, colon), std::stoi(endpoint.substr(colon + 1))};
 }
 
-int ConnectTcp(absl::string_view endpoint) {
+int ConnectTcp(const std::string& endpoint) {
   auto [host, port] = SplitEndpoint(endpoint);
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    throw std::runtime_error(
-        absl::StrCat("socket() failed: ", std::strerror(errno)));
+    throw std::runtime_error("socket() failed: " +
+                             std::string(std::strerror(errno)));
   }
   int opt = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
@@ -169,14 +164,12 @@ int ConnectTcp(absl::string_view endpoint) {
   addr.sin_port = htons(port);
   if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
     close(fd);
-    throw std::runtime_error(
-        absl::StrCat("invalid IPv4 endpoint host: ", host));
+    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
   }
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
     std::string err = std::strerror(errno);
     close(fd);
-    throw std::runtime_error(
-        absl::StrCat("connect(", endpoint, ") failed: ", err));
+    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
   }
   return fd;
 }
@@ -336,30 +329,6 @@ static CopyPlan BuildLoadCopyPlan(
   return plan;
 }
 
-static void ReorderCompactBlocks(
-    const kv_cache::KVCacheHostSpan& compact_blocks,
-    const std::vector<size_t>& dst_to_src) {
-  if (dst_to_src.empty()) return;
-  const size_t num_blocks = dst_to_src.size();
-  if (num_blocks == 0 || compact_blocks.nbytes % num_blocks != 0) {
-    throw std::invalid_argument("host reorder view has invalid block layout");
-  }
-  const size_t block_bytes =
-      static_cast<size_t>(compact_blocks.nbytes) / num_blocks;
-  const size_t total_bytes = compact_blocks.nbytes;
-  const uint8_t* src = compact_blocks.ptr;
-  std::vector<uint8_t> reordered(total_bytes);
-  for (size_t dst_idx = 0; dst_idx < num_blocks; ++dst_idx) {
-    const size_t src_idx = dst_to_src[dst_idx];
-    if (src_idx >= num_blocks) {
-      throw std::out_of_range("host reorder source index out of range");
-    }
-    std::memcpy(reordered.data() + dst_idx * block_bytes,
-                src + src_idx * block_bytes, block_bytes);
-  }
-  std::memcpy(compact_blocks.ptr, reordered.data(), total_bytes);
-}
-
 static double DurationMs(std::chrono::steady_clock::time_point start,
                          std::chrono::steady_clock::time_point end) {
   return std::chrono::duration<double, std::milli>(end - start).count();
@@ -404,11 +373,10 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
     double timeout_s)
-    : KVCacheManagerBase(layer_buffers, local_port,
-                         host_blocks_to_allocate.has_value()
-                             ? *host_blocks_to_allocate
-                             : num_slots * max_blocks,
-                         unsafe_skip_buffer_lock, parallelism, host_allocator),
+    : KVCacheManagerBase(
+          layer_buffers, local_port,
+          host_blocks_to_allocate.value_or(num_slots * max_blocks),
+          unsafe_skip_buffer_lock, parallelism, host_allocator),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -437,15 +405,56 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
 }
 
 KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
+    size_t slice_byte_size, const std::vector<int64_t>& dimensions,
+    size_t physical_size, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+    int parallelism, HostBufferAllocator host_allocator, int64_t node_id,
+    int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
+    double timeout_s, std::optional<int> assigned_numa_node)
+    : KVCacheManagerBase(
+          layer_buffers, local_port,
+          host_blocks_to_allocate.value_or(num_slots * max_blocks),
+          unsafe_skip_buffer_lock, parallelism, host_allocator),
+      node_id_(node_id),
+      local_control_port_(static_cast<int>(local_control_port)),
+      local_data_port_(0),
+      max_blocks_(max_blocks),
+      num_slots_(num_slots),
+      timeout_s_(timeout_s),
+      unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
+  if (num_layers() == 0 || num_shards() == 0) {
+    return;
+  }
+  if (local_control_port_ >= 0) {
+    if (max_blocks_ <= 0) {
+      throw std::invalid_argument("max_blocks must be positive");
+    }
+    if (num_slots_ <= 0) {
+      throw std::invalid_argument("num_slots must be positive");
+    }
+    auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
+    if (!status.ok()) {
+      throw std::runtime_error("Failed to configure host staging slots: " +
+                               std::string(status.message()));
+    }
+    if (num_layers() > 0) {
+      ConfigureDataPortFromKvTransfer();
+    }
+    InitializeSlotPool(num_slots_);
+    StartControlServer();
+  }
+}
+
+KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     int parallelism, int64_t node_id, int64_t local_control_port,
     int64_t max_blocks, int64_t num_slots, double timeout_s)
-    : KVCacheManagerBase(num_layers, num_shards, slice_byte_size, local_port,
-                         host_blocks_to_allocate.has_value()
-                             ? *host_blocks_to_allocate
-                             : num_slots * max_blocks,
-                         parallelism, nullptr),
+    : KVCacheManagerBase(
+          num_layers, num_shards, slice_byte_size, local_port,
+          host_blocks_to_allocate.value_or(num_slots * max_blocks), parallelism,
+          nullptr),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -483,7 +492,7 @@ KVCacheManagerWithTransfer::~KVCacheManagerWithTransfer() {
 }
 
 int64_t KVCacheManagerWithTransfer::NotifyForRead(
-    absl::string_view req_id, uint64_t uuid,
+    const std::string& req_id, uint64_t uuid,
     const std::vector<int64_t>& block_ids) {
   const auto register_start = std::chrono::steady_clock::now();
   if (block_ids.empty()) {
@@ -493,7 +502,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (pending_acks_.erase(uuid) > 0) {
-      done_sending_.insert(std::string(req_id));
+      done_sending_.insert(req_id);
       return 0;
     }
   }
@@ -564,8 +573,57 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
   return absl::OkStatus();
 }
 
+std::vector<EndpointDescriptor>
+KVCacheManagerWithTransfer::get_local_endpoints() const {
+  std::vector<int64_t> all_shards(num_shards_);
+  for (size_t i = 0; i < num_shards_; ++i) {
+    all_shards[i] = static_cast<int64_t>(i);
+  }
+  int64_t port =
+      local_control_port_ > 0 ? local_control_port_ : local_port().value_or(0);
+  return {{absl::StrCat(local_ip(), ":", port), all_shards}};
+}
+
 void KVCacheManagerWithTransfer::StartRead(
-    absl::string_view req_id, uint64_t uuid, absl::string_view remote_endpoint,
+    const std::string& req_id, uint64_t uuid,
+    const std::vector<std::string>& remote_endpoints,
+    const std::vector<int64_t>& remote_block_ids,
+    const std::vector<int64_t>& local_block_ids, int parallelism,
+    std::optional<std::vector<int64_t>> local_host_block_ids) {
+  std::string target_ep;
+  if (!remote_endpoints.empty()) {
+    target_ep = remote_endpoints[0];
+  }
+  StartRead(req_id, uuid, target_ep, remote_block_ids, local_block_ids,
+            parallelism, local_host_block_ids);
+}
+
+void KVCacheManagerWithTransfer::StartRead(
+    const std::string& req_id, uint64_t uuid,
+    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<int64_t>& remote_block_ids,
+    const std::vector<int64_t>& local_block_ids, int parallelism,
+    std::optional<std::vector<int64_t>> local_host_block_ids) {
+  if (remote_descriptors.empty()) {
+    return;
+  }
+  // TODO(b/agy): Deal with the case where the shards on both sides don't
+  // perfectly match. KVCacheManagerWithTransfer is bound to a single NUMA node
+  // / single endpoint. Multi-endpoint routing across sockets is orchestrated by
+  // the JAX facade.
+  if (remote_descriptors.size() != 1) {
+    LOG(WARNING) << "KVCacheManagerWithTransfer::StartRead expected 1 remote "
+                    "descriptor, got "
+                 << remote_descriptors.size()
+                 << ". Picking the first endpoint.";
+  }
+  StartRead(req_id, uuid, remote_descriptors[0].endpoint, remote_block_ids,
+            local_block_ids, parallelism, local_host_block_ids);
+}
+
+void KVCacheManagerWithTransfer::StartRead(
+    const std::string& req_id, uint64_t uuid,
+    const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
@@ -582,27 +640,27 @@ void KVCacheManagerWithTransfer::StartRead(
     std::lock_guard<std::mutex> lock(mu_);
     RecvEntry entry;
     entry.req_id = req_id;
-    entry.total_blocks =
-        static_cast<int64_t>(load_plan.h2d_host_block_ids.size());
-    for (size_t k = 0; k < load_plan.h2d_host_block_ids.size(); ++k) {
-      entry.host_to_chip[load_plan.h2d_host_block_ids[k]] =
-          load_plan.h2d_local_block_ids[k];
+    entry.chip_block_ids = load_plan.h2d_local_block_ids;
+    entry.h2d_copy =
+        Offsets(load_plan.h2d_local_block_ids, /*source_is_compact=*/true);
+    for (size_t i = 0; i < load_plan.transport_host_block_ids.size(); ++i) {
+      entry.host_to_chip[load_plan.transport_host_block_ids[i]] =
+          load_plan.h2d_local_block_ids[i];
     }
+    entry.h2d_dispatch_futures.reserve(load_plan.h2d_local_block_ids.size());
     active_recv_entries_[uuid] = std::move(entry);
   }
 
   if (load_plan.num_blocks == 0) {
     std::lock_guard<std::mutex> lock(mu_);
-    done_recving_.insert(std::string(req_id));
+    done_recving_.insert(req_id);
     active_recv_entries_.erase(uuid);
     return;
   }
 
   std::optional<int> target_node = assigned_numa_node();
 
-  push_pool_->Schedule(target_node, [this, req_id = std::string(req_id), uuid,
-                                     remote_endpoint =
-                                         std::string(remote_endpoint),
+  push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
                                      load_plan = std::move(load_plan)]() {
     try {
       int control_fd = ConnectTcp(remote_endpoint);
@@ -1013,7 +1071,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
-    uint64_t uuid, absl::string_view remote_data_endpoint,
+    uint64_t uuid, const std::string& remote_data_endpoint,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
   // Coalesce contiguous (device,host) block runs into a few large copies. With
@@ -1036,8 +1094,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
   auto future = std::move(future_or.value());
   future.OnReady(
-      [this, uuid, remote_data_endpoint = std::string(remote_data_endpoint),
-       src_block_ids,
+      [this, uuid, remote_data_endpoint, src_block_ids,
        dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
         if (!s.ok()) {
           std::lock_guard<std::mutex> lock(mu_);
@@ -1059,69 +1116,6 @@ void KVCacheManagerWithTransfer::StartPushInternal(
           send_entries_.erase(it);
         }
       });
-}
-
-absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
-    const std::vector<int>& block_ids, uint64_t uuid) {
-  std::vector<int64_t> host_src_blocks;
-  std::vector<int64_t> chip_dst_blocks;
-  std::string target_req_id;
-  int64_t chunk_size = block_ids.size();
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = active_recv_entries_.find(uuid);
-    if (it == active_recv_entries_.end()) {
-      return absl::OkStatus();
-    }
-    target_req_id = it->second.req_id;
-    host_src_blocks.reserve(chunk_size);
-    chip_dst_blocks.reserve(chunk_size);
-    for (int h_id : block_ids) {
-      auto map_it = it->second.host_to_chip.find(h_id);
-      if (map_it == it->second.host_to_chip.end()) {
-        failed_recving_.insert(target_req_id);
-        active_recv_entries_.erase(uuid);
-        return absl::FailedPreconditionError(
-            "Received unexpected host block ID");
-      }
-      host_src_blocks.push_back(h_id);
-      chip_dst_blocks.push_back(map_it->second);
-    }
-  }
-
-  VLOG(1) << "OnBlocksReceived (Hybrid Bridge) triggered for UUID " << uuid
-          << " with " << chunk_size << " blocks. Launching H2D copy for req_id "
-          << target_req_id;
-
-  CopySpec h2d_copy = BuildCoalescedCopySpec(host_src_blocks, chip_dst_blocks);
-
-  auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
-                       h2d_copy.sizes, /*slot_idx=*/std::nullopt);
-  if (!future_or.ok()) {
-    std::lock_guard<std::mutex> lock(mu_);
-    failed_recving_.insert(target_req_id);
-    active_recv_entries_.erase(uuid);
-    return future_or.status();
-  }
-
-  auto future = std::move(future_or.value());
-  future.OnReady([this, uuid, target_req_id,
-                  chunk_size](const absl::StatusOr<raiden::BufferHolders>& s) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = active_recv_entries_.find(uuid);
-    if (it == active_recv_entries_.end()) return;
-    if (s.ok()) {
-      it->second.num_completed_blocks += chunk_size;
-      if (it->second.num_completed_blocks == it->second.total_blocks) {
-        done_recving_.insert(target_req_id);
-        active_recv_entries_.erase(uuid);
-      }
-    } else {
-      failed_recving_.insert(target_req_id);
-      active_recv_entries_.erase(uuid);
-    }
-  });
-  return absl::OkStatus();
 }
 
 absl::Status KVCacheManagerWithTransfer::WaitForPendingWork() {
@@ -1146,13 +1140,13 @@ absl::Status KVCacheManagerWithTransfer::WaitForPendingWork() {
 }
 
 std::string KVCacheManagerWithTransfer::EndpointWithPort(
-    absl::string_view endpoint, int port) const {
+    const std::string& endpoint, int port) const {
   auto [host, ignored_port] = SplitEndpoint(endpoint);
   (void)ignored_port;
-  return absl::StrCat(host, ":", port);
+  return host + ":" + std::to_string(port);
 }
 
-void KVCacheManagerWithTransfer::AckRemote(absl::string_view remote_endpoint,
+void KVCacheManagerWithTransfer::AckRemote(const std::string& remote_endpoint,
                                            uint64_t uuid) {
   int control_fd = ConnectTcp(remote_endpoint);
   auto control_cleanup =
@@ -1280,6 +1274,78 @@ std::optional<int> KVCacheManagerWithTransfer::GetLocalTpuNumaNode(
     }
   }
   return std::nullopt;
+}
+
+absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
+    const std::vector<int>& block_ids, uint64_t uuid) {
+  VLOG(1) << "KVCacheManagerWithTransfer::OnBlocksReceived called. uuid: "
+          << uuid << ", received blocks count: " << block_ids.size();
+
+  std::string req_id;
+  CopySpec h2d_copy;
+  absl::flat_hash_map<int64_t, int64_t> host_to_chip;
+  bool found = false;
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it != active_recv_entries_.end()) {
+      req_id = it->second.req_id;
+      h2d_copy = it->second.h2d_copy;
+      host_to_chip = it->second.host_to_chip;
+      found = true;
+      active_recv_entries_.erase(it);
+    }
+  }
+
+  if (!found) {
+    // Forward to base class for direct pull operations
+    return RaidenManagerBase::OnBlocksReceived(block_ids, uuid);
+  }
+
+  if (h2d_copy.src_offsets.empty()) {
+    // Rebuild on-the-fly for push transfers registered via RegisterActivePlan
+    std::vector<int64_t> host_blocks(block_ids.begin(), block_ids.end());
+    std::vector<int64_t> chip_blocks;
+    chip_blocks.reserve(host_blocks.size());
+    for (int64_t hb : host_blocks) {
+      auto it = host_to_chip.find(hb);
+      if (it != host_to_chip.end()) {
+        chip_blocks.push_back(it->second);
+      } else {
+        chip_blocks.push_back(hb);
+      }
+    }
+    h2d_copy = BuildCoalescedCopySpec(host_blocks, chip_blocks);
+  }
+
+  VLOG(1) << "OnBlocksReceived: Issuing H2D copy for req_id: " << req_id
+          << ", coalesced runs count: " << h2d_copy.src_offsets.size();
+
+  auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
+                       h2d_copy.sizes, /*slot_idx=*/std::nullopt);
+  if (!future_or.ok()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    failed_recving_.insert(req_id);
+    return future_or.status();
+  }
+
+  auto future = std::move(future_or.value());
+  future.OnReady([this, req_id](auto status_or) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (status_or.ok()) {
+      VLOG(1) << "OnBlocksReceived (H2D copy complete): successfully "
+                 "completed receive for req_id: "
+              << req_id;
+      done_recving_.insert(req_id);
+    } else {
+      LOG(ERROR) << "OnBlocksReceived (H2D copy failed) for req_id: " << req_id
+                 << ", error: " << status_or.status().ToString();
+      failed_recving_.insert(req_id);
+    }
+  });
+
+  return absl::OkStatus();
 }
 
 }  // namespace tpu_raiden

@@ -261,8 +261,9 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 }  // namespace
 
 BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                               bool enable_conn_pool)
-    : RawBufferTransport(delegate, local_port, enable_conn_pool),
+                               bool enable_conn_pool,
+                               std::optional<std::string> bind_ip)
+    : RawBufferTransport(delegate, local_port, enable_conn_pool, bind_ip),
       block_delegate_(delegate) {}
 
 BlockTransport::~BlockTransport() = default;

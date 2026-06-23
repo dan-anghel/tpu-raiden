@@ -14,11 +14,13 @@
 
 #include "tpu_raiden/core/raiden_manager_base.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>  // NOLINT
 #include <vector>
 
@@ -67,6 +69,7 @@ void RaidenManagerBase::DetectAndAssignNumaNode(
                    << unique_numa_nodes[0];
     }
   }
+  InitTransportServer();
 }
 
 RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
@@ -76,11 +79,9 @@ RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
     : num_layers_(num_layers),
       num_shards_(num_shards),
       slice_byte_size_(slice_byte_size),
-      parallelism_(parallelism) {
+      parallelism_(parallelism),
+      local_port_cfg_(local_port.value_or(0)) {
   shard_factor_ = 1;
-
-  int port = local_port.value_or(0);
-  server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(this, port);
 }
 
 RaidenManagerBase::~RaidenManagerBase() {
@@ -89,9 +90,39 @@ RaidenManagerBase::~RaidenManagerBase() {
   }
 }
 
+void RaidenManagerBase::InitTransportServer() {
+  absl::MutexLock lock(&server_init_mu_);
+  if (server_) return;
+  std::string bind_ip = "127.0.0.1";
+  std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+  if (!host_nics.empty()) {
+    int target_numa = assigned_numa_node_.value_or(-1);
+    auto it = std::find_if(
+        host_nics.begin(), host_nics.end(), [&](const HostNicAddress& n) {
+          return n.numa_node == target_numa && target_numa >= 0;
+        });
+    if (it != host_nics.end()) {
+      bind_ip = it->ip_address;
+    } else {
+      bind_ip = host_nics[0].ip_address;
+    }
+  }
+  server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(
+      this, local_port_cfg_, true, bind_ip);
+}
+
 std::optional<int> RaidenManagerBase::local_port() const {
+  const_cast<RaidenManagerBase*>(this)->InitTransportServer();
+  absl::MutexLock lock(&server_init_mu_);
   if (server_) return server_->local_port();
   return std::nullopt;
+}
+
+std::string RaidenManagerBase::local_ip() const {
+  const_cast<RaidenManagerBase*>(this)->InitTransportServer();
+  absl::MutexLock lock(&server_init_mu_);
+  if (server_) return server_->bound_ip();
+  return "127.0.0.1";
 }
 
 uint8_t* RaidenManagerBase::GetHostPointer(size_t layer_idx, size_t shard_idx) {
@@ -137,6 +168,8 @@ void RaidenManagerBase::SetExternalHostPointers(
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
     absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid) {
+  InitTransportServer();
+  absl::MutexLock lock(&server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
@@ -146,6 +179,8 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
     absl::string_view peer, const std::vector<int>& src_block_ids) {
+  InitTransportServer();
+  absl::MutexLock lock(&server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
@@ -155,6 +190,8 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
 absl::Status RaidenManagerBase::PullWeightsChunk(
     absl::string_view source, size_t src_shard_idx, size_t src_offset_bytes,
     size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
+  InitTransportServer();
+  absl::MutexLock lock(&server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
@@ -168,6 +205,8 @@ absl::Status RaidenManagerBase::PushWeightsChunk(absl::string_view peer,
                                                  size_t dst_offset_bytes,
                                                  const uint8_t* data_ptr,
                                                  size_t size_bytes) {
+  InitTransportServer();
+  absl::MutexLock lock(&server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }

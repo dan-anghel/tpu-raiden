@@ -42,28 +42,15 @@ inline std::vector<std::vector<xla::PjRtBuffer*>> UnpackJaxArrays(
   layer_buffers.reserve(num_layers);
 
   for (size_t l = 0; l < num_layers; ++l) {
-    nanobind::handle dst = jax_arrays[l];
-    xla::ifrt::Array* dst_ifrt_array =
-        ::jax::GetIfrtArrayFromPyObject(dst.ptr());
-    if (dst_ifrt_array == nullptr) {
-      throw std::runtime_error("Failed to extract JAX IFRT Array pointer");
-    }
-    auto* dst_compat_arr = ::jax::CastToPjRtCompatibleArray(dst_ifrt_array);
-    if (dst_compat_arr == nullptr) {
-      throw std::runtime_error("Not a PjRt compatible array");
-    }
+    nanobind::object dst = nanobind::cast<nanobind::object>(jax_arrays[l]);
+    std::vector<xla::PjRtBuffer*> shard_buffers =
+        ::jax::ExtractPjRtBuffersFromPyArray(dst);
 
-    auto dst_buffers = dst_compat_arr->pjrt_buffers();
-    if (dst_buffers.size() != num_shards) {
+    if (shard_buffers.size() != num_shards) {
       throw std::runtime_error(
           "Number of shards mismatch across layers during unpack");
     }
 
-    std::vector<xla::PjRtBuffer*> shard_buffers;
-    shard_buffers.reserve(num_shards);
-    for (size_t i = 0; i < num_shards; ++i) {
-      shard_buffers.push_back(dst_buffers[i].get());
-    }
     layer_buffers.push_back(std::move(shard_buffers));
   }
   return layer_buffers;

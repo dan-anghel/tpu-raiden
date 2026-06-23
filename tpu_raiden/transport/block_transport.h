@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -106,7 +107,8 @@ class BlockTransport : public RawBufferTransport {
   using BlockPacketHeader = RawBufferTransport::PacketHeader;
 
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                 bool enable_conn_pool = true);
+                 bool enable_conn_pool = true,
+                 std::optional<std::string> bind_ip = std::nullopt);
   ~BlockTransport() override;
 
   // Standard Scatter-Gather Push (op = 1 / op = 6)
