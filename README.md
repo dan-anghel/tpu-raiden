@@ -65,7 +65,7 @@ We provide a script to handle the build process and install required dependencie
 
 ## Testing `tpu_raiden`
 
-Once the build is complete, you can run the test suite across JAX and PyTorch:
+These are the core functional unit tests designed to verify the correctness of the foundational components and APIs. Once the build is complete, you can run the test suite across JAX and PyTorch:
 
 ```bash
 ./run_tests.sh [jax|torch|both]

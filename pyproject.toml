@@ -37,4 +37,5 @@ dependencies = [
     "numpy",
     "absl-py",
     "torch",
+    "requests",
 ]
