@@ -82,12 +82,12 @@ ABSL_FLAG(int32_t, peer_control_port, 9999, "Peer control port");
 ABSL_FLAG(int64_t, block_size, 1024 * 1024, "Block size in bytes");
 ABSL_FLAG(int32_t, parallelism, 1, "Parallelism");
 ABSL_FLAG(int32_t, numa_node, -1, "NUMA node to pin to");
+ABSL_FLAG(int32_t, num_blocks, 64, "Number of blocks to allocate and transfer");
 
 namespace {
 
 constexpr size_t kNumLayers = 32;
 constexpr size_t kNumShards = 1;
-constexpr int kNumBlocks = 8;
 
 std::string get_ip_of_interface(const std::string& interface_name) {
   struct ifaddrs* ifaddr;
@@ -125,8 +125,8 @@ std::string get_ip_of_interface(const std::string& interface_name) {
 
 // Dynamically discover all active data interfaces (excluding lo and eth0 unless
 // on Borg)
-std::vector<std::pair<std::string, std::string>> discover_data_interfaces() {
-  std::vector<std::pair<std::string, std::string>> interfaces;
+std::vector<tpu_raiden::HostNicAddress> discover_data_interfaces() {
+  std::vector<tpu_raiden::HostNicAddress> interfaces;
   struct ifaddrs* ifaddr;
   if (getifaddrs(&ifaddr) == -1) {
     perror("getifaddrs");
@@ -153,31 +153,42 @@ std::vector<std::pair<std::string, std::string>> discover_data_interfaces() {
       int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
                           NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
       if (s == 0) {
-        interfaces.push_back({name, host});
+        interfaces.push_back({name, host, -1});
       }
     } else if (family == AF_INET6) {
       char host[NI_MAXHOST];
       int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6), host,
                           NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
       if (s == 0) {
-        interfaces.push_back({name, host});
+        interfaces.push_back({name, host, -1});
       }
     }
   }
   freeifaddrs(ifaddr);
 
   // Deduplicate interfaces
-  std::vector<std::pair<std::string, std::string>> unique_interfaces;
+  std::vector<tpu_raiden::HostNicAddress> unique_interfaces;
   for (const auto& pair : interfaces) {
     bool found = false;
     for (const auto& upair : unique_interfaces) {
-      if (upair.first == pair.first) {
+      if (upair.interface_name == pair.interface_name) {
         found = true;
         break;
       }
     }
     if (!found) {
       unique_interfaces.push_back(pair);
+    }
+  }
+  // Fill NUMA nodes
+  std::vector<tpu_raiden::HostNicAddress> all_nics =
+      tpu_raiden::GetLocalHostNicAddresses();
+  for (auto& nic : unique_interfaces) {
+    for (const auto& all_nic : all_nics) {
+      if (all_nic.interface_name == nic.interface_name) {
+        nic.numa_node = all_nic.numa_node;
+        break;
+      }
     }
   }
   return unique_interfaces;
@@ -346,6 +357,7 @@ int main(int argc, char* argv[]) {
   int64_t block_size = absl::GetFlag(FLAGS_block_size);
   int parallelism = absl::GetFlag(FLAGS_parallelism);
   int numa_node = absl::GetFlag(FLAGS_numa_node);
+  int num_blocks = absl::GetFlag(FLAGS_num_blocks);
 
   if (role != "sender" && role != "receiver") {
     std::cerr << "Error: --role must be either 'sender' or 'receiver'"
@@ -374,14 +386,23 @@ int main(int argc, char* argv[]) {
 
   // Resolve local data interfaces (use specified flag as override, fallback to
   // auto-discovery)
-  std::vector<std::pair<std::string, std::string>> local_interfaces;
+  std::vector<tpu_raiden::HostNicAddress> local_interfaces;
   if (!data_interface.empty()) {
     std::vector<std::string> interfaces = absl::StrSplit(
         data_interface, absl::ByAnyChar(" ,"), absl::SkipEmpty());
+    std::vector<tpu_raiden::HostNicAddress> all_nics =
+        tpu_raiden::GetLocalHostNicAddresses();
     for (const auto& iface : interfaces) {
       std::string resolved_ip = get_ip_of_interface(iface);
       if (!resolved_ip.empty()) {
-        local_interfaces.push_back({iface, resolved_ip});
+        int nic_numa_node = -1;
+        for (const auto& nic : all_nics) {
+          if (nic.interface_name == iface) {
+            nic_numa_node = nic.numa_node;
+            break;
+          }
+        }
+        local_interfaces.push_back({iface, resolved_ip, nic_numa_node});
         std::cout << "Using specified data interface override: " << iface
                   << " (" << resolved_ip << ")" << std::endl;
       } else {
@@ -397,14 +418,15 @@ int main(int argc, char* argv[]) {
       std::cout
           << "No data interfaces discovered, falling back to default data IP."
           << std::endl;
-      local_interfaces.push_back({"default", data_ip});
+      local_interfaces.push_back({"default", data_ip, -1});
     }
   }
 
   std::cout << "Discovered " << local_interfaces.size()
             << " data interfaces:" << std::endl;
   for (const auto& iface : local_interfaces) {
-    std::cout << "  - " << iface.first << ": " << iface.second << std::endl;
+    std::cout << "  - " << iface.interface_name << ": " << iface.ip_address
+              << std::endl;
   }
 
   if (numa_node >= 0) {
@@ -420,38 +442,53 @@ int main(int argc, char* argv[]) {
     std::string endpoints_str = "";
 
     for (const auto& iface : local_interfaces) {
-      std::cout << "Spawning Receiver Manager on " << iface.first << " ("
-                << iface.second << ")..." << std::endl;
-      auto manager = std::make_unique<tpu_raiden::kv_cache::KVCacheManagerBase>(
-          kNumLayers, kNumShards, block_size,
-          /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/kNumBlocks, parallelism,
-          /*host_allocator=*/nullptr,
-          /*bind_ip=*/iface.second);
+      std::cout << "Spawning Receiver Manager on " << iface.interface_name
+                << " (" << iface.ip_address << ")..." << std::endl;
 
-      auto dst_block_ids_or =
-          manager->host_block_manager()->Allocate(kNumBlocks, /*lock=*/true);
-      if (!dst_block_ids_or.ok()) {
-        std::cerr << "Failed to allocate receiver blocks: "
-                  << dst_block_ids_or.status() << std::endl;
-        return 1;
-      }
-      allocated_block_ids.push_back(dst_block_ids_or.value());
+      std::unique_ptr<tpu_raiden::kv_cache::KVCacheManagerBase> manager;
+      std::vector<int> dst_block_ids;
+      bool alloc_success = true;
 
-      // Zero-initialize receiver blocks
-      for (size_t l = 0; l < kNumLayers; ++l) {
-        uint8_t* receiver_base = manager->GetHostPointer(l, 0);
-        for (int b = 0; b < kNumBlocks; ++b) {
-          uint8_t* dst_ptr =
-              receiver_base + dst_block_ids_or.value()[b] * block_size;
-          std::memset(dst_ptr, 0, block_size);
+      // Spawn thread to allocate memory on the correct NUMA node
+      std::thread t([&]() {
+        if (iface.numa_node >= 0) {
+          tpu_raiden::PinCurrentThreadToNumaNode(iface.numa_node);
         }
-      }
+
+        manager = std::make_unique<tpu_raiden::kv_cache::KVCacheManagerBase>(
+            kNumLayers, kNumShards, block_size,
+            /*local_port=*/std::nullopt,
+            /*host_blocks_to_allocate=*/num_blocks, parallelism,
+            /*host_allocator=*/nullptr,
+            /*bind_ip=*/iface.ip_address);
+
+        auto dst_block_ids_or =
+            manager->host_block_manager()->Allocate(num_blocks, /*lock=*/true);
+        if (!dst_block_ids_or.ok()) {
+          std::cerr << "Failed to allocate receiver blocks: "
+                    << dst_block_ids_or.status() << std::endl;
+          alloc_success = false;
+          return;
+        }
+        dst_block_ids = dst_block_ids_or.value();
+
+        // Zero-initialize receiver blocks
+        for (size_t l = 0; l < kNumLayers; ++l) {
+          uint8_t* receiver_base = manager->GetHostPointer(l, 0);
+          for (int b = 0; b < num_blocks; ++b) {
+            uint8_t* dst_ptr = receiver_base + dst_block_ids[b] * block_size;
+            std::memset(dst_ptr, 0, block_size);
+          }
+        }
+      });
+      t.join();
+      if (!alloc_success) return 1;
+      allocated_block_ids.push_back(dst_block_ids);
 
       int port = *manager->local_port();
       if (!endpoints_str.empty()) endpoints_str += ",";
-      endpoints_str +=
-          absl::StrFormat("%s:%s:%d", iface.first, iface.second, port);
+      endpoints_str += absl::StrFormat("%s:%s:%d", iface.interface_name,
+                                       iface.ip_address, port);
       managers.push_back(std::move(manager));
     }
 
@@ -549,14 +586,14 @@ int main(int argc, char* argv[]) {
     bool all_success = true;
     for (int m : active_indices) {
       std::cout << "Verifying manager " << m
-                << " (interface: " << local_interfaces[m].first << ")..."
-                << std::endl;
+                << " (interface: " << local_interfaces[m].interface_name
+                << ")..." << std::endl;
       bool success = true;
       const auto& manager = managers[m];
       const auto& dst_block_ids = allocated_block_ids[m];
       for (size_t l = 0; l < kNumLayers; ++l) {
         uint8_t* receiver_base = manager->GetHostPointer(l, 0);
-        for (int b = 0; b < kNumBlocks; ++b) {
+        for (int b = 0; b < num_blocks; ++b) {
           uint8_t* dst_ptr = receiver_base + dst_block_ids[b] * block_size;
           for (size_t i = 0; i < block_size; ++i) {
             uint8_t expected = static_cast<uint8_t>((l + b + i + m) & 0xFF);
@@ -634,12 +671,14 @@ int main(int argc, char* argv[]) {
     for (const auto& remote : remote_endpoints) {
       std::string local_ip = "";
       std::string local_iface = "";
+      int local_numa = -1;
 
       // Attempt to find a local interface in the same subnet
       for (const auto& local : local_interfaces) {
-        if (in_same_subnet(local.second, remote.ip)) {
-          local_ip = local.second;
-          local_iface = local.first;
+        if (in_same_subnet(local.ip_address, remote.ip)) {
+          local_ip = local.ip_address;
+          local_iface = local.interface_name;
+          local_numa = local.numa_node;
           break;
         }
       }
@@ -650,8 +689,9 @@ int main(int argc, char* argv[]) {
                   << remote.ip << " (" << remote.interface_name
                   << "). Falling back to first local interface." << std::endl;
         if (!local_interfaces.empty()) {
-          local_ip = local_interfaces[0].second;
-          local_iface = local_interfaces[0].first;
+          local_ip = local_interfaces[0].ip_address;
+          local_iface = local_interfaces[0].interface_name;
+          local_numa = local_interfaces[0].numa_node;
         } else {
           local_ip = data_ip;
         }
@@ -661,35 +701,51 @@ int main(int argc, char* argv[]) {
                 << remote.ip << ":" << remote.port << ") to local "
                 << local_iface << " (" << local_ip << ")" << std::endl;
 
-      auto manager = std::make_unique<tpu_raiden::kv_cache::KVCacheManagerBase>(
-          kNumLayers, kNumShards, block_size,
-          /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/kNumBlocks, parallelism,
-          /*host_allocator=*/nullptr,
-          /*bind_ip=*/local_ip);
+      std::unique_ptr<tpu_raiden::kv_cache::KVCacheManagerBase> manager;
+      std::vector<int> src_block_ids;
+      bool alloc_success = true;
+      int m_idx = managers.size();
 
-      auto src_block_ids_or =
-          manager->host_block_manager()->Allocate(kNumBlocks, /*lock=*/true);
-      if (!src_block_ids_or.ok()) {
-        std::cerr << "Failed to allocate sender blocks: "
-                  << src_block_ids_or.status() << std::endl;
+      std::thread t([&]() {
+        if (local_numa >= 0) {
+          tpu_raiden::PinCurrentThreadToNumaNode(local_numa);
+        }
+
+        manager = std::make_unique<tpu_raiden::kv_cache::KVCacheManagerBase>(
+            kNumLayers, kNumShards, block_size,
+            /*local_port=*/std::nullopt,
+            /*host_blocks_to_allocate=*/num_blocks, parallelism,
+            /*host_allocator=*/nullptr,
+            /*bind_ip=*/local_ip);
+
+        auto src_block_ids_or =
+            manager->host_block_manager()->Allocate(num_blocks, /*lock=*/true);
+        if (!src_block_ids_or.ok()) {
+          std::cerr << "Failed to allocate sender blocks: "
+                    << src_block_ids_or.status() << std::endl;
+          alloc_success = false;
+          return;
+        }
+        src_block_ids = src_block_ids_or.value();
+
+        // Initialize sender blocks with pattern (unique per manager)
+        for (size_t l = 0; l < kNumLayers; ++l) {
+          uint8_t* sender_base = manager->GetHostPointer(l, 0);
+          for (int b = 0; b < num_blocks; ++b) {
+            uint8_t* src_ptr = sender_base + src_block_ids[b] * block_size;
+            for (size_t i = 0; i < block_size; ++i) {
+              src_ptr[i] = static_cast<uint8_t>((l + b + i + m_idx) & 0xFF);
+            }
+          }
+        }
+      });
+      t.join();
+
+      if (!alloc_success) {
         close(control_fd);
         return 1;
       }
-      allocated_block_ids.push_back(src_block_ids_or.value());
-
-      // Initialize sender blocks with pattern (unique per manager)
-      int m_idx = managers.size();
-      for (size_t l = 0; l < kNumLayers; ++l) {
-        uint8_t* sender_base = manager->GetHostPointer(l, 0);
-        for (int b = 0; b < kNumBlocks; ++b) {
-          uint8_t* src_ptr =
-              sender_base + src_block_ids_or.value()[b] * block_size;
-          for (size_t i = 0; i < block_size; ++i) {
-            src_ptr[i] = static_cast<uint8_t>((l + b + i + m_idx) & 0xFF);
-          }
-        }
-      }
+      allocated_block_ids.push_back(src_block_ids);
 
       std::string peer_addr = absl::StrFormat("%s:%d", remote.ip, remote.port);
       mapped_peer_addresses.push_back(peer_addr);
@@ -704,7 +760,7 @@ int main(int argc, char* argv[]) {
 
     for (size_t m = 0; m < managers.size(); ++m) {
       threads.push_back(std::thread([&, m]() {
-        std::vector<int> dst_block_ids(kNumBlocks);
+        std::vector<int> dst_block_ids(num_blocks);
         std::iota(dst_block_ids.begin(), dst_block_ids.end(), 0);
         for (int i = 0; i < kNumWarmup; ++i) {
           auto status_or = managers[m]->H2hWrite(
@@ -715,6 +771,11 @@ int main(int argc, char* argv[]) {
                       << "): " << status_or.status() << std::endl;
             warmup_success[m] = false;
             break;
+          }
+          auto await_status = status_or.value().second.Await();
+          if (!await_status.ok()) {
+            std::cerr << "Warmup Await failed on manager " << m << ": "
+                      << await_status << std::endl;
           }
         }
       }));
@@ -775,7 +836,7 @@ int main(int argc, char* argv[]) {
       absl::Time start = absl::Now();
       for (size_t m = 0; m < active_managers.size(); ++m) {
         threads.push_back(std::thread([&, m]() {
-          std::vector<int> dst_block_ids(kNumBlocks);
+          std::vector<int> dst_block_ids(num_blocks);
           std::iota(dst_block_ids.begin(), dst_block_ids.end(), 0);
           auto status_or = active_managers[m]->H2hWrite(
               active_peer_addresses[m], active_allocated_block_ids[m],
@@ -783,6 +844,12 @@ int main(int argc, char* argv[]) {
           if (!status_or.ok()) {
             std::cerr << "Iteration " << i << " failed on active manager " << m
                       << ": " << status_or.status() << std::endl;
+            return;
+          }
+          auto await_status = status_or.value().second.Await();
+          if (!await_status.ok()) {
+            std::cerr << "H2H Write Await failed on active manager " << m
+                      << ": " << await_status << std::endl;
           }
         }));
       }
@@ -809,7 +876,7 @@ int main(int argc, char* argv[]) {
 
     // Combined throughput across active interfaces ONLY (telemetry correction!)
     size_t total_bytes = active_managers.size() * kNumLayers * kNumShards *
-                         kNumBlocks * block_size;
+                         num_blocks * block_size;
     double throughput_gbs =
         (static_cast<double>(total_bytes) / 1e9) / (mean_ms / 1000.0);
 

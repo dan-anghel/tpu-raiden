@@ -131,7 +131,7 @@ KVCacheManagerBase::KVCacheManagerBase(
   if (!shape.dimensions().empty()) {
     major_dim_size_ = shape.dimensions(0);
   }
-  semaphore_ = std::make_unique<xla::Semaphore>(4);
+  semaphore_ = std::make_unique<xla::Semaphore>(std::max<int>(4, parallelism));
 
   layers_.reserve(num_layers_);
   buffer_holds_.reserve(num_layers_);
@@ -232,7 +232,7 @@ KVCacheManagerBase::KVCacheManagerBase(
       host_allocator_(host_allocator) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   host_block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
-  semaphore_ = std::make_unique<xla::Semaphore>(4);
+  semaphore_ = std::make_unique<xla::Semaphore>(std::max<int>(4, parallelism));
 
   layers_.reserve(num_layers_);
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
