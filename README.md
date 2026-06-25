@@ -74,3 +74,9 @@ These are the core functional unit tests designed to verify the correctness of t
 **What this script does:**
 1. Sets up `PYTHONPATH` so Python can locate the compiled `bazel-bin` and framework wrapper modules.
 2. Executes the selected unit test suites across JAX and/or PyTorch directly via `python`.
+
+## Playing with Raiden
+
+If you'd like to try out Raiden and see it in action, please refer to the [`examples/`](examples/) directory. This folder contains a collection of hands-on scripts designed for users to interact with the library, including various testing scripts and performance microbenchmark scripts that demonstrate Raiden's capabilities.
+
+For detailed instructions on how to run these examples and interpret their outputs, please check out the [Examples README](examples/README.md).
