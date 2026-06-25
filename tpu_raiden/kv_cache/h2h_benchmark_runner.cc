@@ -430,7 +430,7 @@ int main(int argc, char* argv[]) {
           /*bind_ip=*/iface.second);
 
       auto dst_block_ids_or =
-          manager->block_manager()->Allocate(kNumBlocks, /*lock=*/true);
+          manager->host_block_manager()->Allocate(kNumBlocks, /*lock=*/true);
       if (!dst_block_ids_or.ok()) {
         std::cerr << "Failed to allocate receiver blocks: "
                   << dst_block_ids_or.status() << std::endl;
@@ -669,7 +669,7 @@ int main(int argc, char* argv[]) {
           /*bind_ip=*/local_ip);
 
       auto src_block_ids_or =
-          manager->block_manager()->Allocate(kNumBlocks, /*lock=*/true);
+          manager->host_block_manager()->Allocate(kNumBlocks, /*lock=*/true);
       if (!src_block_ids_or.ok()) {
         std::cerr << "Failed to allocate sender blocks: "
                   << src_block_ids_or.status() << std::endl;
