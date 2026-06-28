@@ -48,9 +48,36 @@ sudo apt-get install -y patchelf
   ```
 * **PyTorch Wheel Compatibility**: Ensure your environment aligns with `torch_tpu`'s pinned C++ ABI expectations (e.g., `torch==2.11.0+cpu`).
 
-## Building `tpu_raiden`
+## Installing or Building `tpu_raiden`
 
-We provide a script to handle the build process and install required dependencies. You can scope compilation to specific frameworks:
+### Option 1: Direct installation from Google Artifact Registry (Googlers only)
+
+> [!NOTE]
+> The pre-built `tpu_raiden` wheel will be available on PyPI to public shortly.
+
+If you are a Googler, you can install the pre-built `tpu_raiden` wheel directly from our Google Artifact Registry.
+
+1. Authenticate with gcloud:
+   ```bash
+   gcloud auth login
+   ```
+2. Install the Artifact Registry keyring helper to enable authenticated pip downloads:
+   ```bash
+   pip install keyrings.google-artifactregistry-auth
+   ```
+3. Install the framework-specific wheel:
+   * **For JAX version:**
+     ```bash
+     pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
+     ```
+   * **For PyTorch version:**
+     ```bash
+     pip install tpu-raiden-torch --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
+     ```
+
+### Option 2: Building from source
+
+We provide a script to handle the build process and compile extension binaries locally. You can scope compilation to specific frameworks:
 
 ```bash
 ./build.sh [jax|torch|both]
