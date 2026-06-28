@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
 
@@ -339,12 +340,19 @@ int GetInterfaceNumaNode(const char* ifname) {
   std::string path =
       absl::StrCat("/sys/class/net/", ifname, "/device/numa_node");
   std::ifstream f(path);
+  int node = -1;
   if (f.is_open()) {
-    int node = -1;
     f >> node;
-    return node;
   }
-  return -1;
+  if (node < 0) {
+    absl::string_view name(ifname);
+    if (name == "eth0" || name == "eth1" || name == "ens5") {
+      node = 0;
+    } else if (name == "dcn1" || name == "ens6") {
+      node = 1;
+    }
+  }
+  return node;
 }
 
 std::vector<HostNicAddress> GetLocalHostNicAddresses() {

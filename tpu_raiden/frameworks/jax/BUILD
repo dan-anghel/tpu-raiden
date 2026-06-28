@@ -42,6 +42,7 @@ cc_library(
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
         "@nanobind",
@@ -691,16 +692,17 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
-        "//tpu_raiden/core:utils",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
+        "@nanobind",
         "@xla//xla:future",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 

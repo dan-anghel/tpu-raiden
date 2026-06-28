@@ -201,10 +201,10 @@ KVCacheManagerBase::KVCacheManagerBase(
     buffer_holds_.push_back(std::move(hold_info));
   }
 
-  size_t pool_size = std::max<size_t>(1, static_cast<size_t>(parallelism));
-  dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
-  push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
-  pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
+  constexpr size_t kPoolSize = 4;
+  dma_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  push_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  pull_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
 }
 
 KVCacheManagerBase::KVCacheManagerBase(
@@ -270,10 +270,10 @@ KVCacheManagerBase::KVCacheManagerBase(
     }
     layers_.push_back(std::move(layer_info));
   }
-  size_t pool_size = std::max<size_t>(1, parallelism);
-  dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
-  push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
-  pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
+  constexpr size_t kPoolSize = 4;
+  dma_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  push_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  pull_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
   InitTransportServer();
 }
 

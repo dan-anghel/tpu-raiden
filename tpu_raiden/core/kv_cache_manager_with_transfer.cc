@@ -67,6 +67,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -767,6 +768,11 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
       stream_request.consumer_data_port =
           static_cast<uint32_t>(local_data_port_);
+      std::string bound_ip = local_ip();
+      if (inet_pton(AF_INET6, bound_ip.c_str(), stream_request.consumer_ip) <=
+          0) {
+        std::memset(stream_request.consumer_ip, 0, 16);
+      }
       CheckStatus(
           "control pull stream write",
           WriteExact(control_fd, &stream_request, sizeof(stream_request)));
@@ -1249,9 +1255,28 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
-  std::string peer_ip = GetPeerIp(fd);
+  bool ip_is_empty = true;
+  for (int i = 0; i < 16; ++i) {
+    if (req.consumer_ip[i] != 0) {
+      ip_is_empty = false;
+      break;
+    }
+  }
+
+  std::string peer_ip;
+  if (!ip_is_empty) {
+    char ip_str[INET6_ADDRSTRLEN];
+    if (inet_ntop(AF_INET6, req.consumer_ip, ip_str, sizeof(ip_str)) !=
+        nullptr) {
+      peer_ip = ip_str;
+    }
+  }
+  if (peer_ip.empty()) {
+    peer_ip = GetPeerIp(fd);
+  }
+
   std::string remote_data_endpoint;
-  if (peer_ip.find(':') != std::string::npos) {
+  if (absl::StrContains(peer_ip, ':')) {
     remote_data_endpoint =
         "[" + peer_ip + "]:" + std::to_string(req.consumer_data_port);
   } else {
@@ -1337,6 +1362,9 @@ void KVCacheManagerWithTransfer::StartPushInternal(
         std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
         // Push across Data Plane socket!
         auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
+        if (!push_s.ok()) {
+          LOG(ERROR) << "H2hWrite failed: " << push_s.status().ToString();
+        }
         std::lock_guard<std::mutex> lock(mu_);
         auto it = send_entries_.find(uuid);
         if (it != send_entries_.end()) {
