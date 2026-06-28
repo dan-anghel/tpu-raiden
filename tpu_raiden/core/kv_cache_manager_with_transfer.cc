@@ -643,7 +643,11 @@ KVCacheManagerWithTransfer::get_local_endpoints() const {
   }
   int64_t port =
       local_control_port_ > 0 ? local_control_port_ : local_port().value_or(0);
-  return {{absl::StrCat(local_ip(), ":", port), all_shards}};
+  std::string ip = local_ip();
+  std::string endpoint = absl::StrContains(ip, ':')
+                             ? absl::StrCat("[", ip, "]:", port)
+                             : absl::StrCat(ip, ":", port);
+  return {{endpoint, all_shards}};
 }
 
 void KVCacheManagerWithTransfer::StartRead(
@@ -689,6 +693,8 @@ void KVCacheManagerWithTransfer::StartRead(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
+  LOG(INFO) << "StartRead (initiate): req_id=" << req_id << ", uuid=" << uuid
+            << ", numa=" << assigned_numa_node().value_or(-1);
   VLOG(1) << "KVCacheManagerWithTransfer::StartRead (Hybrid Bridge) called. "
              "req_id: "
           << req_id << ", uuid: " << uuid << ", remote: " << remote_endpoint
@@ -730,6 +736,7 @@ void KVCacheManagerWithTransfer::StartRead(
     entry.chip_block_ids = load_plan.h2d_local_block_ids;
     entry.total_blocks = load_plan.num_blocks;
     entry.num_completed_blocks = 0;
+    entry.num_completed_layers = 0;
     // Read the H2D source from the actual staged host blocks (coalesced), not a
     // compact 0..n-1 region -- the producer writes into host_block_ids, so the
     // consumer must read back from the same blocks.
@@ -755,6 +762,9 @@ void KVCacheManagerWithTransfer::StartRead(
   push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
                                      load_plan = std::move(load_plan)]() {
     try {
+      LOG(INFO) << "StartRead (connecting): req_id=" << req_id
+                << ", uuid=" << uuid
+                << ", numa=" << assigned_numa_node().value_or(-1);
       int control_fd = ConnectTcp(remote_endpoint);
       auto control_cleanup =
           std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
@@ -827,9 +837,28 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
     // the timeout as a recv failure so the connector can recompute the blocks.
     for (auto it = active_recv_entries_.begin();
          it != active_recv_entries_.end();) {
-      if (it->second.deadline <= now) {
-        failed_recving_.insert(it->second.req_id);
-        ReleaseSlotLocked(it->second.slot_idx);
+      auto& entry = it->second;
+      if (entry.num_completed_layers == num_layers()) {
+        bool all_h2d_done = true;
+        for (auto& f : entry.h2d_futures) {
+          if (!f.IsReady()) {
+            all_h2d_done = false;
+            break;
+          }
+        }
+        if (all_h2d_done) {
+          LOG(INFO) << "CompleteReadRaw (polling completion): req_id="
+                    << entry.req_id;
+          done_recving_.insert(entry.req_id);
+          ReleaseSlotLocked(entry.slot_idx);
+          active_recv_entries_.erase(it++);
+          continue;
+        }
+      }
+
+      if (entry.deadline <= now) {
+        failed_recving_.insert(entry.req_id);
+        ReleaseSlotLocked(entry.slot_idx);
         active_recv_entries_.erase(it++);
       } else {
         ++it;
@@ -1060,46 +1089,25 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
   if (block_id < 0 || max_blocks_ <= 0) {
     return absl::OkStatus();
   }
-  std::shared_ptr<StagingReadinessState> state;
-  bool is_legacy = false;
+  std::shared_ptr<SendEntry> entry;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = active_producer_blocks_.find(block_id);
-    if (it != active_producer_blocks_.end()) {
-      state = it->second;
-    } else {
-      // Fallback to legacy staging slot lookup
-      const int64_t slot_idx = static_cast<int64_t>(block_id) / max_blocks_;
-      auto it_legacy = staging_readiness_.find(slot_idx);
-      if (it_legacy != staging_readiness_.end()) {
-        state = it_legacy->second;
-        is_legacy = true;
+    for (const auto& [u, e] : send_entries_) {
+      if (e->registered_block_set.find(block_id) !=
+          e->registered_block_set.end()) {
+        entry = e;
+        break;
       }
     }
   }
-  if (!state) {
+  if (!entry) {
     return absl::OkStatus();
   }
-  if (is_legacy) {
-    const int64_t local_block_idx =
-        static_cast<int64_t>(block_id) % max_blocks_;
-    if (local_block_idx < 0 || local_block_idx >= state->num_blocks) {
-      return absl::OkStatus();
-    }
-  }
-  if (layer_idx >= state->num_layers || shard_idx >= state->num_shards) {
+  if (layer_idx >= entry->d2h_layer_futures.size()) {
     return absl::OutOfRangeError(
-        "staging readiness layer or shard out of range");
+        "Layer index exceeds d2h futures size in WaitForStagingBlockRead");
   }
-  const size_t layer_state_idx = layer_idx * state->num_shards + shard_idx;
-  std::unique_lock<std::mutex> lock(state->mu);
-  state->cv.wait(lock, [&]() {
-    return state->layers[layer_state_idx].done || stopping_.load();
-  });
-  if (stopping_.load() && !state->layers[layer_state_idx].done) {
-    return absl::CancelledError("Raiden transfer engine is stopping");
-  }
-  return state->layers[layer_state_idx].status;
+  return entry->d2h_layer_futures[layer_idx].Await();
 }
 
 void KVCacheManagerWithTransfer::StartControlServer() {
@@ -1289,8 +1297,10 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
           << remote_data_endpoint;
 
   // Intercept and Execute Hybrid Push on behalf of remote consumer!
-  StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
-                    dst_block_ids);
+  std::thread([this, uuid = req.uuid, remote_data_endpoint, src_block_ids,
+               dst_block_ids]() {
+    StartPushInternal(uuid, remote_data_endpoint, src_block_ids, dst_block_ids);
+  }).detach();
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
@@ -1330,10 +1340,64 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   // that flood the command queue with small ops and serialize against prefill
   // GEMMs on the shared TensorCore; coalescing collapses a contiguous range to
   // one copy, matching the pre-Hybrid-Push pull path.
+  std::shared_ptr<SendEntry> entry;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      entry = it->second;
+    }
+  }
+
+  if (!entry) {
+    LOG(ERROR) << "SendEntry not found for UUID: " << uuid;
+    return;
+  }
+
   CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
-  auto future_or = D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets,
-                       d2h_copy.sizes, /*slot_idx=*/std::nullopt);
-  if (!future_or.ok()) {
+  entry->d2h_layer_futures.reserve(num_layers());
+
+  // 1. Issue D2H copies layer-by-layer!
+  for (size_t l = 0; l < num_layers(); ++l) {
+    LOG(INFO) << "StartPushInternal (D2H start) layer " << l
+              << ": uuid=" << uuid
+              << ", numa=" << assigned_numa_node().value_or(-1);
+    auto future_or =
+        D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets, d2h_copy.sizes,
+            /*slot_idx=*/std::nullopt, /*layer_idx=*/l);
+    if (!future_or.ok()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        done_sending_.insert(it->second->req_id);
+        ReleaseEntrySlotLocked(it->second);
+        send_entries_.erase(it);
+      }
+      ThrowStatus("Failed to issue D2H in StartPushInternal layer loop",
+                  future_or.status());
+    }
+    entry->d2h_layer_futures.push_back(std::move(future_or.value()));
+  }
+
+  entry->remote_data_endpoint = remote_data_endpoint;
+  entry->src_ints.assign(host_block_ids.begin(), host_block_ids.end());
+  entry->dst_ints.assign(dst_block_ids.begin(), dst_block_ids.end());
+
+  SendNextLayer(uuid, 0);
+}
+
+void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
+  std::shared_ptr<SendEntry> entry;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it == send_entries_.end()) {
+      return;
+    }
+    entry = it->second;
+  }
+
+  if (l >= num_layers()) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
     if (it != send_entries_.end()) {
@@ -1341,38 +1405,49 @@ void KVCacheManagerWithTransfer::StartPushInternal(
       ReleaseEntrySlotLocked(it->second);
       send_entries_.erase(it);
     }
-    ThrowStatus("Failed to issue D2H in StartPushInternal", future_or.status());
+    return;
   }
 
-  auto future = std::move(future_or.value());
-  future.OnReady(
-      [this, uuid, remote_data_endpoint, host_block_ids,
-       dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
-        if (!s.ok()) {
-          std::lock_guard<std::mutex> lock(mu_);
-          auto it = send_entries_.find(uuid);
-          if (it != send_entries_.end()) {
-            done_sending_.insert(it->second->req_id);
-            ReleaseEntrySlotLocked(it->second);
-            send_entries_.erase(it);
-          }
-          return;
-        }
-        std::vector<int> src_ints(host_block_ids.begin(), host_block_ids.end());
-        std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
-        // Push across Data Plane socket!
-        auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
-        if (!push_s.ok()) {
-          LOG(ERROR) << "H2hWrite failed: " << push_s.status().ToString();
-        }
+  entry->d2h_layer_futures[l].OnReady([this, uuid, l](auto status_or) {
+    if (!status_or.ok()) {
+      LOG(ERROR) << "StartPushInternal: D2H copy failed for layer " << l
+                 << ", status: " << status_or.status().ToString();
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        done_sending_.insert(it->second->req_id);
+        ReleaseEntrySlotLocked(it->second);
+        send_entries_.erase(it);
+      }
+      return;
+    }
+
+    push_pool_->Schedule([this, uuid, l]() {
+      std::shared_ptr<SendEntry> entry;
+      {
         std::lock_guard<std::mutex> lock(mu_);
         auto it = send_entries_.find(uuid);
-        if (it != send_entries_.end()) {
-          done_sending_.insert(it->second->req_id);
-          ReleaseEntrySlotLocked(it->second);
-          send_entries_.erase(it);
+        if (it == send_entries_.end()) {
+          return;
         }
-      });
+        entry = it->second;
+      }
+      LOG(INFO) << "StartPushInternal (H2H start layer " << l
+                << "): uuid=" << uuid
+                << ", numa=" << assigned_numa_node().value_or(-1);
+      auto push_s = H2hWrite(entry->remote_data_endpoint, entry->src_ints,
+                             entry->dst_ints, uuid, l);
+      if (!push_s.ok()) {
+        LOG(ERROR) << "H2hWrite failed for layer " << l << ": "
+                   << push_s.status().ToString();
+      } else {
+        LOG(INFO) << "StartPushInternal (H2H complete layer " << l
+                  << "): uuid=" << uuid
+                  << ", numa=" << assigned_numa_node().value_or(-1);
+      }
+      SendNextLayer(uuid, l + 1);
+    });
+  });
 }
 
 absl::Status KVCacheManagerWithTransfer::WaitForPendingWork() {
@@ -1538,18 +1613,19 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
           it->second.accumulated_host_block_ids.end(), block_ids.begin(),
           block_ids.end());
 
-      if (it->second.num_completed_blocks >= it->second.total_blocks) {
+      if (it->second.num_completed_blocks >=
+          it->second.total_blocks * num_layers()) {
+        it->second.network_completed = true;
         req_id = it->second.req_id;
-        h2d_copy = it->second.h2d_copy;
-        host_to_chip = it->second.host_to_chip;
-        accumulated_host_blocks = it->second.accumulated_host_block_ids;
         recv_slot = it->second.slot_idx;
-        found = true;
-        active_recv_entries_.erase(it);
+        if (it->second.num_completed_layers == num_layers()) {
+          found = true;
+          active_recv_entries_.erase(it);
+        }
       } else {
         VLOG(1) << "OnBlocksReceived: Partial blocks received for uuid " << uuid
                 << ", completed: " << it->second.num_completed_blocks << " / "
-                << it->second.total_blocks;
+                << it->second.total_blocks * num_layers();
         return absl::OkStatus();
       }
     }
@@ -1560,52 +1636,88 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     return RaidenManagerBase::OnBlocksReceived(block_ids, uuid);
   }
 
-  if (h2d_copy.src_offsets.empty()) {
-    // Rebuild on-the-fly for push transfers registered via RegisterActivePlan
-    std::vector<int64_t> host_blocks(accumulated_host_blocks.begin(),
-                                     accumulated_host_blocks.end());
-    std::vector<int64_t> chip_blocks;
-    chip_blocks.reserve(host_blocks.size());
-    for (int64_t hb : host_blocks) {
-      auto it = host_to_chip.find(hb);
-      if (it != host_to_chip.end()) {
-        chip_blocks.push_back(it->second);
-      } else {
-        chip_blocks.push_back(hb);
-      }
-    }
-    h2d_copy = BuildCoalescedCopySpec(host_blocks, chip_blocks);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    done_recving_.insert(req_id);
+    ReleaseSlotLocked(recv_slot);
   }
 
-  VLOG(1) << "OnBlocksReceived: Issuing H2D copy for req_id: " << req_id
-          << ", coalesced runs count: " << h2d_copy.src_offsets.size();
+  LOG(INFO) << "OnBlocksReceived (Network + H2D complete): req_id=" << req_id
+            << ", uuid=" << uuid
+            << ", numa=" << assigned_numa_node().value_or(-1);
+  return absl::OkStatus();
+}
 
-  auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
-                       h2d_copy.sizes, /*slot_idx=*/std::nullopt);
+absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
+                                                         uint64_t uuid) {
+  CopySpec h2d_copy;
+  std::string req_id;
+  int64_t recv_slot;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) {
+      return absl::OkStatus();
+    }
+    auto& entry = it->second;
+    h2d_copy = entry.h2d_copy;
+    req_id = entry.req_id;
+    recv_slot = entry.slot_idx;
+  }
+
+  LOG(INFO) << "OnLayerReceived (H2D copy start) layer " << layer_idx
+            << ": req_id=" << req_id << ", uuid=" << uuid
+            << ", numa=" << assigned_numa_node().value_or(-1);
+
+  auto future_or =
+      H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets, h2d_copy.sizes,
+          /*slot_idx=*/std::nullopt, /*layer_idx=*/layer_idx);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     failed_recving_.insert(req_id);
     ReleaseSlotLocked(recv_slot);
+    active_recv_entries_.erase(uuid);
     return future_or.status();
   }
 
-  auto future = std::move(future_or.value());
-  future.OnReady([this, req_id, recv_slot](auto status_or) {
+  auto future = future_or.value();
+  future.OnReady([this, uuid, layer_idx, recv_slot, req_id](auto status_or) {
     std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) {
+      return;
+    }
+    auto& entry = it->second;
     if (status_or.ok()) {
-      VLOG(1) << "OnBlocksReceived (H2D copy complete): successfully "
-                 "completed receive for req_id: "
-              << req_id;
-      done_recving_.insert(req_id);
+      LOG(INFO) << "OnLayerReceived (H2D copy complete) layer " << layer_idx
+                << ": req_id=" << req_id
+                << ", numa=" << assigned_numa_node().value_or(-1);
+      entry.num_completed_layers++;
+      if (entry.num_completed_layers == num_layers()) {
+        if (entry.network_completed) {
+          LOG(INFO) << "All layers H2D copy complete: req_id=" << req_id;
+          done_recving_.insert(req_id);
+          ReleaseSlotLocked(recv_slot);
+          active_recv_entries_.erase(uuid);
+        }
+      }
     } else {
-      LOG(ERROR) << "OnBlocksReceived (H2D copy failed) for req_id: " << req_id
+      LOG(ERROR) << "OnLayerReceived (H2D copy failed) layer " << layer_idx
+                 << " for req_id: " << req_id
                  << ", error: " << status_or.status().ToString();
       failed_recving_.insert(req_id);
+      ReleaseSlotLocked(recv_slot);
+      active_recv_entries_.erase(uuid);
     }
-    // The staging slot held the received KV for the H2D source; release it now
-    // that the copy has finished (success or failure).
-    ReleaseSlotLocked(recv_slot);
   });
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it != active_recv_entries_.end()) {
+      it->second.h2d_futures.push_back(future);
+    }
+  }
 
   return absl::OkStatus();
 }

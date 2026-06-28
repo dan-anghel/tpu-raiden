@@ -21,6 +21,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -434,6 +435,31 @@ struct PjRtCopyFuture {
 
   template <typename F>
   void OnReady(F&& f) {
+    if (!future.IsValid() && !event_bundles.empty()) {
+      auto [promise, fut] = xla::MakePromise();
+      future = fut;
+      std::thread([promise = std::move(promise),
+                   bundles = event_bundles]() mutable {
+        for (const auto& b : bundles) {
+          if (!b || !b->c_api) continue;
+          for (PJRT_Event* e : b->events) {
+            if (e != nullptr) {
+              PJRT_Event_Await_Args aw;
+              aw.struct_size = PJRT_Event_Await_Args_STRUCT_SIZE;
+              aw.extension_start = nullptr;
+              aw.event = e;
+              PJRT_Error* err = b->c_api->PJRT_Event_Await(&aw);
+              if (err != nullptr) {
+                promise.Set(PjrtErrorToStatusLocal(b->c_api, err));
+                return;
+              }
+            }
+          }
+        }
+        promise.Set();
+      }).detach();
+    }
+
     if (future.IsValid()) {
       future.OnReady([holds = holds, keep_alive = keep_alive,
                       f = std::forward<F>(f)](absl::Status status) mutable {

@@ -29,6 +29,7 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
+#include "xla/tsl/platform/logging.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
@@ -71,10 +72,30 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
     }
 
     // Touch memory to force physical page allocation (NUMA first-touch)
-    volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
-    for (size_t i = 0; i < aligned_size; i += 4096) {
-      p[i] = 0;
-    }
+    std::thread touch_thread([ptr, aligned_size, device]() {
+      if (device != nullptr) {
+        int node = tpu_raiden::GetPjRtDeviceNumaNode(device);
+        if (node >= 0) {
+          int rc = tpu_raiden::PinCurrentThreadToNumaNode(node);
+          LOG(INFO) << "touch_thread: Pinned to NUMA node " << node
+                    << ", status=" << rc
+                    << ", thread_id=" << std::this_thread::get_id();
+        } else {
+          LOG(INFO) << "touch_thread: No NUMA node found for device, executing "
+                       "without pinning. Thread_id="
+                    << std::this_thread::get_id();
+        }
+      } else {
+        LOG(INFO) << "touch_thread: Device is null, executing without pinning. "
+                     "Thread_id="
+                  << std::this_thread::get_id();
+      }
+      volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
+      for (size_t i = 0; i < aligned_size; i += 4096) {
+        p[i] = 0;
+      }
+    });
+    touch_thread.join();
 
     // Register memory with the TPU device DMA engine
     if (client == nullptr) {
@@ -525,7 +546,8 @@ KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManager::H2hWrite(std::string peer,
                          const std::vector<int>& src_block_ids,
-                         const std::vector<int>& dst_block_ids, uint64_t uuid) {
+                         const std::vector<int>& dst_block_ids, uint64_t uuid,
+                         int layer_idx) {
   if (sub_managers_.empty()) {
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
@@ -546,9 +568,9 @@ KVCacheManager::H2hWrite(std::string peer,
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     std::string sub_peer =
         (base_port >= 0) ? host_prefix + std::to_string(base_port + s) : peer;
-    ASSIGN_OR_RETURN(auto res,
-                     sub_managers_[s]->H2hWrite(sub_peer, src_block_ids,
-                                                dst_block_ids, uuid));
+    ASSIGN_OR_RETURN(
+        auto res, sub_managers_[s]->H2hWrite(sub_peer, src_block_ids,
+                                             dst_block_ids, uuid, layer_idx));
     if (s == 0) {
       all_ids = res.first;
     }
@@ -604,7 +626,7 @@ absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManager::H2hWrite(
     const std::vector<EndpointDescriptor>& remote_descriptors,
     const std::vector<int>& src_block_ids,
-    const std::vector<int>& dst_block_ids, uint64_t uuid) {
+    const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx) {
   if (sub_managers_.empty()) {
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
@@ -628,9 +650,9 @@ KVCacheManager::H2hWrite(
       matched_ep = remote_descriptors[0].endpoint;
     }
 
-    ASSIGN_OR_RETURN(auto res,
-                     sub_managers_[s]->H2hWrite(matched_ep, src_block_ids,
-                                                dst_block_ids, uuid));
+    ASSIGN_OR_RETURN(
+        auto res, sub_managers_[s]->H2hWrite(matched_ep, src_block_ids,
+                                             dst_block_ids, uuid, layer_idx));
     if (s == 0) {
       all_ids = res.first;
     }

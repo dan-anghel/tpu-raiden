@@ -621,10 +621,10 @@ absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hWrite(std::string peer,
                              const std::vector<int>& src_block_ids,
                              const std::vector<int>& dst_block_ids,
-                             uint64_t uuid) {
+                             uint64_t uuid, int layer_idx) {
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      H2hWriteDirect(peer, src_block_ids, dst_block_ids, uuid));
+      H2hWriteDirect(peer, src_block_ids, dst_block_ids, uuid, layer_idx));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));

@@ -237,6 +237,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     bool pull_started = false;
     bool slot_released = false;
     std::chrono::steady_clock::time_point deadline;
+    std::vector<raiden::PjRtCopyFuture> d2h_layer_futures;
+    std::string remote_data_endpoint;
+    std::vector<int> src_ints;
+    std::vector<int> dst_ints;
   };
 
   struct StagingLayerReady {
@@ -302,6 +306,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void HandleControlConnection(int fd);
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
+  absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) override;
   absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
                                        int block_id);
   std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
@@ -327,14 +332,18 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::vector<H2dIssueFuture> h2d_dispatch_futures;
     int32_t total_blocks = 0;
     int32_t num_completed_blocks = 0;
+    int32_t num_completed_layers = 0;
+    bool network_completed = false;
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
+    std::vector<raiden::PjRtCopyFuture> h2d_futures;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
   void StartPushInternal(uint64_t uuid, const std::string& remote_data_endpoint,
                          const std::vector<int64_t>& src_block_ids,
                          const std::vector<int64_t>& dst_block_ids);
+  void SendNextLayer(uint64_t uuid, size_t l);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 

@@ -28,6 +28,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -37,6 +38,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -233,11 +235,12 @@ absl::StatusOr<MajorOrder> ParseMajorOrder(uint8_t value) {
 }
 
 template <typename Fn>
-absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
+absl::Status ForEachPayload(MajorOrder major_order,
+                            const std::vector<int>& layer_ids,
                             size_t num_shards, size_t num_blocks, Fn fn) {
   switch (static_cast<int>(major_order)) {
     case static_cast<int>(MajorOrder::kLayerMajor):
-      for (size_t l = 0; l < num_layers; ++l) {
+      for (int l : layer_ids) {
         for (size_t sh = 0; sh < num_shards; ++sh) {
           for (size_t k = 0; k < num_blocks; ++k) {
             RETURN_IF_ERROR(fn(l, sh, k));
@@ -247,7 +250,7 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
       return absl::OkStatus();
     case static_cast<int>(MajorOrder::kBlockMajor):
       for (size_t k = 0; k < num_blocks; ++k) {
-        for (size_t l = 0; l < num_layers; ++l) {
+        for (int l : layer_ids) {
           for (size_t sh = 0; sh < num_shards; ++sh) {
             RETURN_IF_ERROR(fn(l, sh, k));
           }
@@ -270,6 +273,10 @@ BlockTransport::~BlockTransport() = default;
 
 absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                                                  const PacketHeader& header) {
+  LOG(INFO) << "HandleCustomRequest (H2H read start): client_fd=" << client_fd
+            << ", op=" << static_cast<int>(header.op)
+            << ", uuid=" << header.uuid
+            << ", numa=" << block_delegate_->node_id();
   ApplySocketAffinityAndBinding(client_fd);
   const size_t bytes_per_block = block_delegate_->bytes_per_block();
 
@@ -282,9 +289,17 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
                                header.count_or_size * sizeof(int)));
 
+    std::vector<int> target_layers;
+    if (header.local_id == 0xFFFFFFFF) {
+      target_layers.resize(block_delegate_->num_layers());
+      std::iota(target_layers.begin(), target_layers.end(), 0);
+    } else {
+      target_layers = {static_cast<int>(header.local_id)};
+    }
+
     RETURN_IF_ERROR(ForEachPayload(
-        major_order, block_delegate_->num_layers(),
-        block_delegate_->num_shards(), header.count_or_size,
+        major_order, target_layers, block_delegate_->num_shards(),
+        header.count_or_size,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
@@ -310,16 +325,45 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                   " bytes for Block ID: ", dst_id));
             }
 
-            return ReadVExact(client_fd, chunks);
+            RETURN_IF_ERROR(ReadVExact(client_fd, chunks));
           } else {
             RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
                                                1, bytes_per_block));
             uint8_t* dest_ptr =
                 block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-            return ReadExact(client_fd, dest_ptr, bytes_per_block);
+            RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
           }
+          return absl::OkStatus();
         }));
 
+    bool trigger_on_layer_received = false;
+    const int l =
+        (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
+    const size_t expected_chunks = header.reserved;  // P
+    {
+      absl::MutexLock lock(progress_mu_);
+      auto& progress = layer_progress_[{header.uuid, l}];
+      progress.completed_chunks++;
+      if (progress.completed_chunks == expected_chunks &&
+          !progress.on_layer_received_called) {
+        progress.on_layer_received_called = true;
+        trigger_on_layer_received = true;
+        if (l == static_cast<int>(block_delegate_->num_layers()) - 1) {
+          for (size_t layer = 0; layer < block_delegate_->num_layers();
+               ++layer) {
+            layer_progress_.erase({header.uuid, layer});
+          }
+        }
+      }
+    }
+
+    if (trigger_on_layer_received) {
+      RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
+    }
+
+    LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
+              << client_fd << ", uuid=" << header.uuid
+              << ", numa=" << block_delegate_->node_id();
     RETURN_IF_ERROR(
         block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
     uint8_t ack = 1;
@@ -332,9 +376,17 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
+    std::vector<int> target_layers;
+    if (header.local_id == 0xFFFFFFFF) {
+      target_layers.resize(block_delegate_->num_layers());
+      std::iota(target_layers.begin(), target_layers.end(), 0);
+    } else {
+      target_layers = {static_cast<int>(header.local_id)};
+    }
+
     RETURN_IF_ERROR(ForEachPayload(
-        major_order, block_delegate_->num_layers(),
-        block_delegate_->num_shards(), header.count_or_size,
+        major_order, target_layers, block_delegate_->num_shards(),
+        header.count_or_size,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
@@ -360,16 +412,45 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                   " bytes for Block ID: ", dst_id));
             }
 
-            return ReadVExact(client_fd, chunks);
+            RETURN_IF_ERROR(ReadVExact(client_fd, chunks));
           } else {
             RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
                                                1, bytes_per_block));
             uint8_t* dest_ptr =
                 block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-            return ReadExact(client_fd, dest_ptr, bytes_per_block);
+            RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
           }
+          return absl::OkStatus();
         }));
 
+    bool trigger_on_layer_received = false;
+    const int l =
+        (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
+    const size_t expected_chunks = header.reserved;  // P
+    {
+      absl::MutexLock lock(progress_mu_);
+      auto& progress = layer_progress_[{header.uuid, l}];
+      progress.completed_chunks++;
+      if (progress.completed_chunks == expected_chunks &&
+          !progress.on_layer_received_called) {
+        progress.on_layer_received_called = true;
+        trigger_on_layer_received = true;
+        if (l == static_cast<int>(block_delegate_->num_layers()) - 1) {
+          for (size_t layer = 0; layer < block_delegate_->num_layers();
+               ++layer) {
+            layer_progress_.erase({header.uuid, layer});
+          }
+        }
+      }
+    }
+
+    if (trigger_on_layer_received) {
+      RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
+    }
+
+    LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
+              << client_fd << ", uuid=" << header.uuid
+              << ", numa=" << block_delegate_->node_id();
     RETURN_IF_ERROR(
         block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
     ack = 1;
@@ -401,9 +482,10 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                            static_cast<size_t>(header.remote_id)) {
       return absl::OutOfRangeError("Requested block range exceeds int range");
     }
+    std::vector<int> target_layers(block_delegate_->num_layers());
+    std::iota(target_layers.begin(), target_layers.end(), 0);
     RETURN_IF_ERROR(ForEachPayload(
-        major_order, block_delegate_->num_layers(),
-        block_delegate_->num_shards(), local_blocks,
+        major_order, target_layers, block_delegate_->num_shards(), local_blocks,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           const int read_id = static_cast<int>(header.remote_id + k);
           if (block_delegate_->use_block_chunks(header.uuid)) {
@@ -458,7 +540,7 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
     absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
-    MajorOrder major_order, uint64_t uuid) {
+    MajorOrder major_order, uint64_t uuid, int layer_idx) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
     return absl::InvalidArgumentError("Block list cannot be empty");
@@ -481,10 +563,11 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   for (int i = 0; i < P; ++i) {
     const size_t block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
-    threads.push_back(std::thread(
-        &BlockTransport::H2hWriteWorker, this, i, peer, block_offset,
-        block_count, std::ref(src_block_ids), std::ref(dst_block_ids),
-        std::ref(allocated_ids), std::ref(statuses), major_order, uuid));
+    threads.push_back(
+        std::thread(&BlockTransport::H2hWriteWorker, this, i, peer,
+                    block_offset, block_count, std::ref(src_block_ids),
+                    std::ref(dst_block_ids), std::ref(allocated_ids),
+                    std::ref(statuses), major_order, uuid, layer_idx, P));
     block_offset += block_count;
   }
 
@@ -629,7 +712,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
                                     const std::vector<int>& dst_block_ids,
                                     std::vector<int>& allocated_ids,
                                     std::vector<absl::Status>& statuses,
-                                    MajorOrder major_order, uint64_t uuid) {
+                                    MajorOrder major_order, uint64_t uuid,
+                                    int layer_idx, int parallelism) {
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -652,8 +736,10 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   header.flags = static_cast<uint8_t>(major_order);
   header.buffer_id = 0;
   header.remote_id = static_cast<uint32_t>(block_delegate_->node_id());
-  header.local_id = 0;
+  header.local_id =
+      (layer_idx == -1) ? 0xFFFFFFFF : static_cast<uint32_t>(layer_idx);
   header.uuid = uuid;
+  header.reserved = static_cast<uint16_t>(parallelism);
   if (block_count > std::numeric_limits<uint32_t>::max()) {
     statuses[stream_idx] = absl::OutOfRangeError("Block count exceeds uint32");
     return;
@@ -698,9 +784,17 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     }
   }
 
+  std::vector<int> target_layers;
+  if (layer_idx == -1) {
+    target_layers.resize(block_delegate_->num_layers());
+    std::iota(target_layers.begin(), target_layers.end(), 0);
+  } else {
+    target_layers = {layer_idx};
+  }
+
   s = ForEachPayload(
-      major_order, block_delegate_->num_layers(), block_delegate_->num_shards(),
-      block_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+      major_order, target_layers, block_delegate_->num_shards(), block_count,
+      [&](size_t l, size_t sh, size_t k) -> absl::Status {
         ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
         const int src_id = src_block_ids[block_offset + k];
 
@@ -708,6 +802,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           std::vector<BlockChunk> chunks =
               block_delegate_->GetBlockChunks(l, sh, src_id, uuid, -1, peer);
           RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+          RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
 
           uint32_t total_size = 0;
           for (const auto& chunk : chunks) {
@@ -722,6 +817,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
           RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
                                              bytes_per_block));
+          RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
           const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
           return WriteExact(fd, src_ptr, bytes_per_block);
         }
@@ -851,10 +947,11 @@ void BlockTransport::H2hReadWorker(
       return;
     }
 
+    std::vector<int> target_layers(block_delegate_->num_layers());
+    std::iota(target_layers.begin(), target_layers.end(), 0);
     s = ForEachPayload(
-        major_order, block_delegate_->num_layers(),
-        block_delegate_->num_shards(), chunk.local_count,
-        [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        major_order, target_layers, block_delegate_->num_shards(),
+        chunk.local_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
           uint8_t* base_host_ptr = nullptr;
           if (!explicit_dst_ptrs.empty()) {
             base_host_ptr =

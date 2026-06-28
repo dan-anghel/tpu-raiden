@@ -220,14 +220,15 @@ void RaidenManagerBase::SetExternalHostPointers(
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
     absl::string_view peer, const std::vector<int>& src_block_ids,
-    const std::vector<int>& dst_block_ids, uint64_t uuid) {
+    const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx) {
   InitTransportServer();
   absl::MutexLock lock(&server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
   return server_->Push(peer, src_block_ids, dst_block_ids, parallelism_,
-                       tpu_raiden::transport::MajorOrder::kLayerMajor, uuid);
+                       tpu_raiden::transport::MajorOrder::kLayerMajor, uuid,
+                       layer_idx);
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(

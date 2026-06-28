@@ -138,7 +138,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // Symmetrical H2H writes E2E
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hWrite(std::string peer, const std::vector<int>& src_block_ids,
-           const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
+           const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+           int layer_idx = -1);
 
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hRead(std::string peer, const std::vector<int>& src_block_ids);

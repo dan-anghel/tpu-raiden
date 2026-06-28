@@ -47,6 +47,7 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@nanobind",
         "@xla//xla:future",
+        "@xla//xla/tsl/platform:logging",
     ],
 )
 
@@ -703,6 +704,7 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@nanobind",
         "@xla//xla:future",
+        "@xla//xla/tsl/platform:logging",
     ],
 )
 

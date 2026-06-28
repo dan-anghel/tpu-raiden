@@ -35,9 +35,8 @@ enum class MajorOrder : uint8_t {
   kBlockMajor = 1,
 };
 
-using BlockReceivedCallback =
-    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
-                               int block_id, size_t size_bytes)>;
+using BlockReceivedCallback = std::function<absl::Status(
+    size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
 
 // Represents a contiguous span of memory.
 struct BlockChunk {
@@ -71,6 +70,10 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
 
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(
       size_t num_blocks, uint64_t uuid = 0) = 0;
+
+  virtual absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) {
+    return absl::OkStatus();
+  }
 
   virtual absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                         uint64_t uuid = 0) {
@@ -115,7 +118,8 @@ class BlockTransport : public RawBufferTransport {
   absl::StatusOr<std::vector<int>> Push(
       absl::string_view peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
-      MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0);
+      MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
+      int layer_idx = -1);
 
   // Synchronous Scatter-Gather Pull (op = 2)
   absl::StatusOr<std::vector<int>> Pull(
@@ -125,7 +129,8 @@ class BlockTransport : public RawBufferTransport {
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0);
 
-  // Write a single block of data directly from a host pointer to a remote block ID.
+  // Write a single block of data directly from a host pointer to a remote block
+  // ID.
   absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
                                 const uint8_t* data_ptr, size_t size_bytes);
 
@@ -140,7 +145,8 @@ class BlockTransport : public RawBufferTransport {
                       const std::vector<int>& dst_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses,
-                      MajorOrder major_order, uint64_t uuid = 0);
+                      MajorOrder major_order, uint64_t uuid = 0,
+                      int layer_idx = -1, int parallelism = 1);
 
   void H2hReadWorker(int stream_idx, absl::string_view peer,
                      size_t local_block_offset, size_t local_block_count,
@@ -154,6 +160,14 @@ class BlockTransport : public RawBufferTransport {
                      uint64_t uuid = 0);
 
   BlockTransportDelegate* block_delegate_;
+
+  struct LayerProgress {
+    size_t completed_chunks = 0;
+    bool on_layer_received_called = false;
+  };
+  absl::Mutex progress_mu_;
+  absl::flat_hash_map<std::pair<uint64_t, int>, LayerProgress> layer_progress_
+      ABSL_GUARDED_BY(progress_mu_);
 };
 
 }  // namespace transport

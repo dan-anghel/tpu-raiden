@@ -50,7 +50,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   // Direct C++ H2H network write (Push)
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
       absl::string_view peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1);
 
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(
