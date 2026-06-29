@@ -17,9 +17,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
+#include <future>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -111,7 +114,8 @@ class BlockTransport : public RawBufferTransport {
 
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
                  bool enable_conn_pool = true,
-                 std::optional<std::string> bind_ip = std::nullopt);
+                 std::optional<std::string> bind_ip = std::nullopt,
+                 int parallelism = 1);
   ~BlockTransport() override;
 
   // Standard Scatter-Gather Push (op = 1 / op = 6)
@@ -120,6 +124,12 @@ class BlockTransport : public RawBufferTransport {
       const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
       int layer_idx = -1);
+
+  // Asynchronous Scatter-Gather Push
+  void Push(absl::string_view peer, const std::vector<int>& src_block_ids,
+            const std::vector<int>& dst_block_ids, int parallelism,
+            MajorOrder major_order, uint64_t uuid, int layer_idx,
+            std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
   // Synchronous Scatter-Gather Pull (op = 2)
   absl::StatusOr<std::vector<int>> Pull(
@@ -139,6 +149,23 @@ class BlockTransport : public RawBufferTransport {
                                    const PacketHeader& header) override;
 
  private:
+  struct WriteTask {
+    uint64_t uuid;
+    int layer_idx;
+    int stream_idx;
+    std::string peer;
+    std::function<void()> run;
+  };
+
+  struct PeerQueue {
+    std::deque<std::unique_ptr<WriteTask>> tasks;
+    int active_streams = 0;
+  };
+
+  void SocketWorkerLoop();
+  std::unique_ptr<WriteTask> SelectNextTask()
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(scheduler_mu_);
+
   void H2hWriteWorker(int stream_idx, absl::string_view peer,
                       size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
@@ -168,6 +195,16 @@ class BlockTransport : public RawBufferTransport {
   absl::Mutex progress_mu_;
   absl::flat_hash_map<std::pair<uint64_t, int>, LayerProgress> layer_progress_
       ABSL_GUARDED_BY(progress_mu_);
+
+  absl::Mutex scheduler_mu_;
+  absl::CondVar scheduler_cv_;
+  absl::flat_hash_map<std::string, PeerQueue> peer_queues_
+      ABSL_GUARDED_BY(scheduler_mu_);
+  std::vector<std::string> active_peers_ ABSL_GUARDED_BY(scheduler_mu_);
+  size_t rr_index_ ABSL_GUARDED_BY(scheduler_mu_) = 0;
+  int parallelism_ = 1;
+  std::atomic<bool> scheduler_stopping_{false};
+  std::vector<std::thread> socket_workers_;
 };
 
 }  // namespace transport

@@ -1404,6 +1404,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   entry->remote_data_endpoint = remote_data_endpoint;
   entry->src_ints.assign(host_block_ids.begin(), host_block_ids.end());
   entry->dst_ints.assign(dst_block_ids.begin(), dst_block_ids.end());
+  entry->remaining_h2h_layers.store(num_layers());
 
   SendNextLayer(uuid, 0);
 }
@@ -1420,13 +1421,8 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
   }
 
   if (l >= num_layers()) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = send_entries_.find(uuid);
-    if (it != send_entries_.end()) {
-      done_sending_.insert(it->second->req_id);
-      ReleaseEntrySlotLocked(it->second);
-      send_entries_.erase(it);
-    }
+    // Reached end of layer loop. Background asynchronous transfers will clean
+    // up when remaining_h2h_layers reaches 0.
     return;
   }
 
@@ -1457,16 +1453,46 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
       LOG(INFO) << "StartPushInternal (H2H start layer " << l
                 << "): uuid=" << uuid
                 << ", numa=" << assigned_numa_node().value_or(-1);
-      auto push_s = H2hWrite(entry->remote_data_endpoint, entry->src_ints,
-                             entry->dst_ints, uuid, l);
-      if (!push_s.ok()) {
-        LOG(ERROR) << "H2hWrite failed for layer " << l << ": "
-                   << push_s.status().ToString();
-      } else {
-        LOG(INFO) << "StartPushInternal (H2H complete layer " << l
-                  << "): uuid=" << uuid
-                  << ", numa=" << assigned_numa_node().value_or(-1);
-      }
+
+      H2hWriteDirectAsync(
+          entry->remote_data_endpoint, entry->src_ints, entry->dst_ints, uuid,
+          l, [this, uuid, l](absl::StatusOr<std::vector<int>> push_res) {
+            std::shared_ptr<SendEntry> entry;
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              auto it = send_entries_.find(uuid);
+              if (it != send_entries_.end()) {
+                entry = it->second;
+              }
+            }
+            if (!entry) return;
+
+            if (!push_res.ok()) {
+              LOG(ERROR) << "H2hWrite failed for layer " << l << ": "
+                         << push_res.status().ToString();
+              std::lock_guard<std::mutex> lock(mu_);
+              done_sending_.insert(entry->req_id);
+              ReleaseEntrySlotLocked(entry);
+              send_entries_.erase(uuid);
+              return;
+            }
+
+            LOG(INFO) << "StartPushInternal (H2H complete layer " << l
+                      << "): uuid=" << uuid
+                      << ", numa=" << assigned_numa_node().value_or(-1);
+
+            if (entry->remaining_h2h_layers.fetch_sub(1) == 1) {
+              LOG(INFO) << "StartPushInternal (All H2H complete): uuid="
+                        << uuid;
+              std::lock_guard<std::mutex> lock(mu_);
+              done_sending_.insert(entry->req_id);
+              ReleaseEntrySlotLocked(entry);
+              send_entries_.erase(uuid);
+            }
+          });
+
+      // Immediately queue the next layer's push without waiting for this one to
+      // finish
       SendNextLayer(uuid, l + 1);
     });
   });

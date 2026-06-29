@@ -250,6 +250,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::string remote_data_endpoint;
     std::vector<int> src_ints;
     std::vector<int> dst_ints;
+    std::atomic<size_t> remaining_h2h_layers{0};
   };
 
   struct StagingLayerReady {

@@ -265,11 +265,75 @@ absl::Status ForEachPayload(MajorOrder major_order,
 
 BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
                                bool enable_conn_pool,
-                               std::optional<std::string> bind_ip)
+                               std::optional<std::string> bind_ip,
+                               int parallelism)
     : RawBufferTransport(delegate, local_port, enable_conn_pool, bind_ip),
-      block_delegate_(delegate) {}
+      block_delegate_(delegate),
+      parallelism_(parallelism) {
+  socket_workers_.reserve(parallelism_);
+  for (int i = 0; i < parallelism_; ++i) {
+    socket_workers_.push_back(
+        std::thread(&BlockTransport::SocketWorkerLoop, this));
+  }
+}
 
-BlockTransport::~BlockTransport() = default;
+BlockTransport::~BlockTransport() {
+  {
+    absl::MutexLock lock(scheduler_mu_);
+    scheduler_stopping_ = true;
+  }
+  scheduler_cv_.SignalAll();
+  for (auto& t : socket_workers_) {
+    if (t.joinable()) t.join();
+  }
+}
+
+void BlockTransport::SocketWorkerLoop() {
+  while (!scheduler_stopping_) {
+    std::unique_ptr<WriteTask> task;
+    {
+      absl::MutexLock lock(scheduler_mu_);
+      while (true) {
+        if (scheduler_stopping_) return;
+        task = SelectNextTask();
+        if (task) break;
+        scheduler_cv_.Wait(&scheduler_mu_);
+      }
+    }
+
+    if (task) {
+      task->run();
+      {
+        absl::MutexLock lock(scheduler_mu_);
+        auto it = peer_queues_.find(task->peer);
+        if (it != peer_queues_.end()) {
+          it->second.active_streams--;
+        }
+      }
+      scheduler_cv_.SignalAll();
+    }
+  }
+}
+
+std::unique_ptr<BlockTransport::WriteTask> BlockTransport::SelectNextTask() {
+  if (active_peers_.empty()) return nullptr;
+
+  size_t start_idx = rr_index_;
+  do {
+    const std::string& peer = active_peers_[rr_index_];
+    rr_index_ = (rr_index_ + 1) % active_peers_.size();
+
+    auto& q = peer_queues_[peer];
+    if (!q.tasks.empty() && q.active_streams < parallelism_) {
+      q.active_streams++;
+      auto task = std::move(q.tasks.front());
+      q.tasks.pop_front();
+      return task;
+    }
+  } while (rr_index_ != start_idx);
+
+  return nullptr;
+}
 
 absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                                                  const PacketHeader& header) {
@@ -348,7 +412,16 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
           !progress.on_layer_received_called) {
         progress.on_layer_received_called = true;
         trigger_on_layer_received = true;
-        if (l == static_cast<int>(block_delegate_->num_layers()) - 1) {
+        bool all_layers_called = true;
+        for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
+          auto it = layer_progress_.find({header.uuid, layer});
+          if (it == layer_progress_.end() ||
+              !it->second.on_layer_received_called) {
+            all_layers_called = false;
+            break;
+          }
+        }
+        if (all_layers_called) {
           for (size_t layer = 0; layer < block_delegate_->num_layers();
                ++layer) {
             layer_progress_.erase({header.uuid, layer});
@@ -435,7 +508,16 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
           !progress.on_layer_received_called) {
         progress.on_layer_received_called = true;
         trigger_on_layer_received = true;
-        if (l == static_cast<int>(block_delegate_->num_layers()) - 1) {
+        bool all_layers_called = true;
+        for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
+          auto it = layer_progress_.find({header.uuid, layer});
+          if (it == layer_progress_.end() ||
+              !it->second.on_layer_received_called) {
+            all_layers_called = false;
+            break;
+          }
+        }
+        if (all_layers_called) {
           for (size_t layer = 0; layer < block_delegate_->num_layers();
                ++layer) {
             layer_progress_.erase({header.uuid, layer});
@@ -541,45 +623,92 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
     absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
     MajorOrder major_order, uint64_t uuid, int layer_idx) {
+  auto promise =
+      std::make_shared<std::promise<absl::StatusOr<std::vector<int>>>>();
+  auto future = promise->get_future();
+  Push(peer, src_block_ids, dst_block_ids, parallelism, major_order, uuid,
+       layer_idx, [promise](absl::StatusOr<std::vector<int>> res) {
+         promise->set_value(std::move(res));
+       });
+  return future.get();
+}
+
+void BlockTransport::Push(
+    absl::string_view peer, const std::vector<int>& src_block_ids,
+    const std::vector<int>& dst_block_ids, int parallelism,
+    MajorOrder major_order, uint64_t uuid, int layer_idx,
+    std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
-    return absl::InvalidArgumentError("Block list cannot be empty");
+    on_complete(absl::InvalidArgumentError("Block list cannot be empty"));
+    return;
   }
 
   int P = parallelism;
   if (P <= 0) {
-    return absl::InvalidArgumentError("parallelism must be positive");
+    on_complete(absl::InvalidArgumentError("parallelism must be positive"));
+    return;
   }
   if (static_cast<int>(num_blocks) < P) P = num_blocks;
 
-  std::vector<int> allocated_ids(num_blocks, 0);
-  std::vector<std::thread> threads;
-  std::vector<absl::Status> statuses(P, absl::OkStatus());
+  auto shared_src_block_ids = std::make_shared<std::vector<int>>(src_block_ids);
+  auto shared_dst_block_ids = std::make_shared<std::vector<int>>(dst_block_ids);
+  auto allocated_ids = std::make_shared<std::vector<int>>(num_blocks, 0);
+  auto statuses =
+      std::make_shared<std::vector<absl::Status>>(P, absl::OkStatus());
+  auto remaining_workers = std::make_shared<std::atomic<int>>(P);
 
-  threads.reserve(P);
   const size_t base_blocks_per_stream = num_blocks / P;
   const size_t remainder = num_blocks % P;
   size_t block_offset = 0;
+
   for (int i = 0; i < P; ++i) {
     const size_t block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
-    threads.push_back(
-        std::thread(&BlockTransport::H2hWriteWorker, this, i, peer,
-                    block_offset, block_count, std::ref(src_block_ids),
-                    std::ref(dst_block_ids), std::ref(allocated_ids),
-                    std::ref(statuses), major_order, uuid, layer_idx, P));
+
+    auto task_run = [this, i, peer = std::string(peer), block_offset,
+                     block_count, shared_src_block_ids, shared_dst_block_ids,
+                     allocated_ids, statuses, remaining_workers, major_order,
+                     uuid, layer_idx, P, on_complete]() {
+      H2hWriteWorker(i, peer, block_offset, block_count, *shared_src_block_ids,
+                     *shared_dst_block_ids, *allocated_ids, *statuses,
+                     major_order, uuid, layer_idx, P);
+
+      if (remaining_workers->fetch_sub(1) == 1) {
+        absl::Status final_status = absl::OkStatus();
+        for (const auto& s : *statuses) {
+          if (!s.ok()) {
+            final_status = s;
+            break;
+          }
+        }
+        if (!final_status.ok()) {
+          on_complete(final_status);
+        } else {
+          on_complete(*allocated_ids);
+        }
+      }
+    };
+
+    auto task = std::make_unique<WriteTask>();
+    task->uuid = uuid;
+    task->layer_idx = layer_idx;
+    task->stream_idx = i;
+    task->peer = std::string(peer);
+    task->run = std::move(task_run);
+
+    {
+      absl::MutexLock lock(scheduler_mu_);
+      auto& pq = peer_queues_[task->peer];
+      pq.tasks.push_back(std::move(task));
+      if (std::find(active_peers_.begin(), active_peers_.end(),
+                    std::string(peer)) == active_peers_.end()) {
+        active_peers_.push_back(std::string(peer));
+      }
+    }
+    scheduler_cv_.SignalAll();
     block_offset += block_count;
   }
-
-  for (auto& t : threads) {
-    if (t.joinable()) t.join();
-  }
-
-  for (int i = 0; i < P; ++i) {
-    if (!statuses[i].ok()) return statuses[i];
-  }
-
-  return allocated_ids;
 }
 
 absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
