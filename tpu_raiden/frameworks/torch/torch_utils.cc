@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-#include "third_party/py/torch/aten/src/ATen/core/TensorBody.h"
+#include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/frameworks/torch/torch_tpu_utils.h"
 

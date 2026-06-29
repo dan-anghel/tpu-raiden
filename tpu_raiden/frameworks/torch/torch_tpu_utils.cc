@@ -18,8 +18,8 @@
 #include <string>
 #include <utility>
 
-#include "third_party/py/torch/aten/src/ATen/core/TensorBody.h"
-#include "third_party/py/torch/torch/headeronly/core/DeviceType.h"
+#include "ATen/core/TensorBody.h"
+#include "torch/headeronly/core/DeviceType.h"
 
 #include "torch_tpu/eager/structured_log_buffer.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"

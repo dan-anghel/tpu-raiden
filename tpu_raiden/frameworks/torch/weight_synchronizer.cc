@@ -18,7 +18,7 @@
 #include <utility>
 #include <vector>
 
-#include "third_party/py/torch/aten/src/ATen/core/TensorBody.h"
+#include "ATen/core/TensorBody.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
