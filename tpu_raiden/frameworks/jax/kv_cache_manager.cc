@@ -727,6 +727,16 @@ KVCacheManager::H2hRead(
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
+absl::Status KVCacheManager::UnlockBlocks(const std::vector<int>& block_ids) {
+  for (auto& sub : sub_managers_) {
+    if (sub->host_block_manager() != nullptr) {
+      auto status = sub->host_block_manager()->Unlock(block_ids);
+      if (!status.ok()) return status;
+    }
+  }
+  return absl::OkStatus();
+}
+
 std::string KVCacheManager::DumpMetricsToString() const {
   if (metrics_collector_) {
     return metrics_collector_->DumpMetricsToString();

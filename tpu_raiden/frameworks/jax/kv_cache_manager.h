@@ -26,6 +26,7 @@
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
 #endif
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -127,6 +128,12 @@ class KVCacheManager {
   std::tuple<std::vector<std::string>, std::vector<std::string>,
              std::vector<std::string>>
   CompleteReadRaw();
+
+  // Unlocks host staging blocks (allocated+locked by D2hAutoAllocate) across
+  // all sub-managers, making them reclaimable. `block_ids` are the chunk ids
+  // returned by D2hAutoAllocate; sub-managers allocate in lockstep so the same
+  // ids are unlocked on each.
+  absl::Status UnlockBlocks(const std::vector<int>& block_ids);
 
   std::string DumpMetricsToString() const;
 

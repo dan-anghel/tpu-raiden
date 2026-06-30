@@ -266,6 +266,9 @@ NB_MODULE(_tpu_raiden_jax, m) {
                  self.CompleteReadRaw();
              return nb::make_tuple(done_sending, done_recving, failed_recving);
            })
+      .def("unlock_blocks",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::UnlockBlocks,
+           nb::arg("block_ids"))
       .def("dump_metrics_to_string",
            &tpu_raiden::kv_cache::jax::KVCacheManager::DumpMetricsToString);
 

@@ -316,6 +316,55 @@ class KVCacheManagerTest(parameterized.TestCase):
       ref_np = np.asarray(ref_arrs[i])
       np.testing.assert_array_equal(tpu_np[0:2], ref_np[4:6])
 
+  def test_unlock_blocks(self):
+    tpu_sharding = self.setup_shardings()
+    key = jax.random.key(909)
+
+    n_layers = 2
+    test_shape = (8, 128, 8, 8, 128)
+    tpu_src_arrs = []
+
+    for i in range(n_layers):
+      sub_key = jax.random.fold_in(key, i)
+      base = jax.random.uniform(sub_key, test_shape, dtype=jnp.float32)
+      tpu_src_arrs.append(jax.device_put(base, tpu_sharding))
+
+    jax.block_until_ready(tpu_src_arrs)
+
+    # We allocate 2 blocks in host.
+    manager = _kv_cache_manager.KVCacheManager(
+        device_arrays=tpu_src_arrs,
+        host_blocks_to_allocate=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+    )
+
+    # Allocate 2 blocks (capacity reached).
+    src_offsets = [4]
+    sizes = [2]
+    block_ids, future = manager.d2h_auto_allocate(
+        src_offsets_major_dim=src_offsets,
+        copy_sizes_major_dim=sizes,
+    )
+    self.assertLen(block_ids, 2)
+    self.assertEqual(block_ids, [0, 1])
+
+    # Try to allocate 1 more block. It should fail.
+    with self.assertRaises(RuntimeError):
+      manager.d2h_auto_allocate(
+          src_offsets_major_dim=[0],
+          copy_sizes_major_dim=[1],
+      )
+
+    # Now unlock the allocated blocks.
+    manager.unlock_blocks(block_ids)
+
+    # Now try to allocate again. It should succeed because they are unlocked and can be evicted.
+    new_block_ids, new_future = manager.d2h_auto_allocate(
+        src_offsets_major_dim=[0],
+        copy_sizes_major_dim=[1],
+    )
+    self.assertLen(new_block_ids, 1)
+
   @parameterized.named_parameters(
       ("fp8", jnp.float8_e4m3fn),
       ("bf16", jnp.bfloat16),
