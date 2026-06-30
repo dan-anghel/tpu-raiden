@@ -13,13 +13,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# One-click environment setup for the single-host disaggregated-serving example.
+# One-click environment setup for the multi-host disaggregated-serving example.
 #
 # Clones vLLM and tpu-inference (vLLM's TPU backend, which ships the Raiden
 # KV-connector) at their pinned commits into a hidden, in-tree `.src/` dir and
 # installs them editable into the CURRENTLY ACTIVE venv.
 #
-# Prerequisites:
+# RUN THIS ON BOTH VMs (prefill VM and decode VM) -- each needs its own venv with
+# vllm + tpu_inference + tpu_raiden. (Only the prefill VM uses the router/proxy,
+# but installing the full set on both keeps the two machines identical.)
+#
+# Prerequisites (on EACH VM):
 #   1. A python3.12 venv created and ACTIVATED.
 #   2. tpu_raiden already installed into that venv via EITHER supported path:
 #        - build from source: `./build.sh jax` from the repo root, or
@@ -102,5 +106,6 @@ echo "=== Setup complete! ==="
 echo "vllm + tpu_inference are installed in the active venv; tpu_raiden is"
 echo "resolved at run time by raiden_env.sh (site-packages if wheel-installed, or"
 echo "the source tree via PYTHONPATH if built from source)."
-echo "Next: run the disaggregated demo with"
-echo "    bash ${SCRIPTS_DIR}/run_all.sh"
+echo "Next (after running this on BOTH VMs + setting up SSH -- see README.md),"
+echo "from the PREFILL VM run the demo with the decode VM's IP:"
+echo "    bash ${SCRIPTS_DIR}/run_all.sh <decode-vm-ip>"
