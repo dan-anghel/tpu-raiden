@@ -143,6 +143,11 @@ cc_library(
 nanobind_extension(
     name = "_tpu_raiden_torch",
     srcs = ["tpu_raiden_torch_module.cc"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
     features = [
         "-use_header_modules",
     ],
@@ -159,6 +164,7 @@ nanobind_extension(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
+        "@nanobind",
         "@torch_tpu//shims/torch:aten_headers",
     ],
 )
