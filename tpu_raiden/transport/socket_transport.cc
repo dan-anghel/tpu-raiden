@@ -149,7 +149,7 @@ SocketTransport::~SocketTransport() {
     }
   }
 
-  absl::MutexLock _(&conn_mu_);
+  absl::MutexLock _(conn_mu_);
   for (const auto& [peer, fd] : connection_pool_) {
     close(fd);
   }
@@ -160,7 +160,7 @@ absl::StatusOr<int> SocketTransport::GetOrCreateConnection(
     std::string_view peer) {
   std::string peer_str(peer);
   {
-    absl::MutexLock _(&conn_mu_);
+    absl::MutexLock _(conn_mu_);
     auto it = connection_pool_.find(peer_str);
     if (it != connection_pool_.end()) {
       return it->second;
@@ -230,14 +230,14 @@ absl::StatusOr<int> SocketTransport::GetOrCreateConnection(
   }
   freeaddrinfo(res);
 
-  absl::MutexLock _(&conn_mu_);
+  absl::MutexLock _(conn_mu_);
   connection_pool_[peer_str] = sock_fd;
   return sock_fd;
 }
 
 void SocketTransport::CloseConnection(std::string_view peer, int fd) {
   std::string peer_str(peer);
-  absl::MutexLock _(&conn_mu_);
+  absl::MutexLock _(conn_mu_);
   auto it = connection_pool_.find(peer_str);
   if (it != connection_pool_.end() && it->second == fd) {
     close(it->second);
@@ -264,14 +264,14 @@ absl::StatusOr<peregrine::Handle> SocketTransport::Post(
 
   peregrine::Handle handle;
   {
-    absl::MutexLock _(&mu_);
+    absl::MutexLock _(mu_);
     handle = peregrine::Handle(++handle_counter_);
     status_map_[handle] = peregrine::Status::kInProgress;
   }
 
   absl::Status op_status;
   {
-    absl::MutexLock _(&post_mu_);
+    absl::MutexLock _(post_mu_);
     if (request.op == peregrine::Op::kWrite) {
       op_status = DispatchWrite(fd, request);
     } else if (request.op == peregrine::Op::kRead) {
@@ -282,7 +282,7 @@ absl::StatusOr<peregrine::Handle> SocketTransport::Post(
   }
   if (!op_status.ok()) CloseConnection(peer, fd);
 
-  absl::MutexLock _(&mu_);
+  absl::MutexLock _(mu_);
   if (op_status.ok()) {
     status_map_[handle] = peregrine::Status::kSuccess;
   } else {
@@ -337,7 +337,7 @@ absl::Status SocketTransport::DispatchReadRequest(
 
 absl::StatusOr<peregrine::Status> SocketTransport::Poll(
     peregrine::Handle handle) {
-  absl::MutexLock _(&mu_);
+  absl::MutexLock _(mu_);
   auto it = status_map_.find(handle);
   if (it == status_map_.end()) {
     return absl::NotFoundError(
