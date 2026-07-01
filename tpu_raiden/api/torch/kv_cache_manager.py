@@ -31,7 +31,6 @@
 import ctypes
 import os
 import pathlib
-import sys
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch_tpu
@@ -261,37 +260,3 @@ class KVCacheManager:
   def is_listener_active(self) -> bool:
     """Returns whether the native C++ KVCacheListener is actively running."""
     return self._impl.is_listener_active
-
-  def h2d(
-      self,
-      src_offsets: List[int] = None,
-      dst_offsets: List[int] = None,
-      sizes: List[int] = None,
-  ) -> Any:
-    """Triggers Host-to-Device (H2D) copy of staged host buffer to Device memory."""
-    src_offsets = src_offsets or []
-    dst_offsets = dst_offsets or []
-    sizes = sizes or []
-    return self._impl.H2d(src_offsets, dst_offsets, sizes)
-
-  def d2h(
-      self,
-      src_offsets: List[int] = None,
-      dst_offsets: List[int] = None,
-      sizes: List[int] = None,
-  ) -> Any:
-    """Triggers Device-to-Host (D2H) copy of Device memory to Host buffer."""
-    src_offsets = src_offsets or []
-    dst_offsets = dst_offsets or []
-    sizes = sizes or []
-    return self._impl.D2h(src_offsets, dst_offsets, sizes)
-
-  @property
-  def transfer_address(self) -> str:
-    """Returns the active data IP:port address."""
-    return self._impl.transfer_address
-
-  @property
-  def listener_address(self) -> str:
-    """Returns the active control plane IP:port address."""
-    return self._impl.listener_address
