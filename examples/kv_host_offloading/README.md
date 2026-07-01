@@ -32,8 +32,8 @@ host block pool are provided by tpu-raiden.
 - The venv must have **`tpu_raiden`**, **`vllm`**, and **`tpu_inference`** importable
   (see Step 1). These scripts do **not** activate any environment — activate your
   venv yourself before running them.
-- The benchmark (`benchmark.sh`) uses tpu-inference's `benchmark_serving.py`, which imports
-  **`evaluate`** and **`nltk`** — `pip install evaluate nltk` if missing.
+- The benchmark (`benchmark.sh`) uses tpu-inference's `benchmark_serving.py`, which
+  imports **`evaluate`** and **`nltk`** (installed by `setup.sh`).
 - Hugging Face access for the model (e.g. `export HF_TOKEN=...`) if it is gated.
 
 ---
@@ -55,12 +55,16 @@ In an **activated** python3.12 venv:
    The run scripts pick up whichever install you did (see `raiden_env.sh`).
 
 2. Install **vllm** + **tpu_inference** (the offload connector ships in
-   tpu_inference). If you don't already have them, the sibling disagg example's
-   installer fetches compatible, pinned versions:
+   tpu_inference), plus the benchmark client's `evaluate`/`nltk` deps, via this
+   example's own installer:
 
    ```bash
-   bash ../single_host_disagg/setup.sh
+   bash setup.sh
    ```
+
+   `setup.sh` clones vLLM + tpu-inference at pinned commits (which include the
+   RaidenOffloadConnector) into a hidden in-tree `.src/` and installs them editable.
+   Override `VLLM_COMMIT` / `TPU_INFERENCE_COMMIT` to use different versions.
 
 ## Step 2 — Run the demo
 
