@@ -169,31 +169,45 @@ class RaidenControllerTest(absltest.TestCase):
         ],
     )
 
-  def test_enforce_itemsize_when_shard_nd_slices_provided(self):
+  def test_enforce_metadata_completeness(self):
     controller = raiden_controller.RaidenController(port=10003)
     unit = raiden_controller.RaidenId(
         job_name="trainer", job_replica_id="0", data_name="weights"
     )
 
-    # 1. Verification during register_work_unit
+    # 1. Failure if some shape/layout fields are missing
     with self.assertRaisesWithPredicateMatch(
-        ValueError, lambda e: "itemsize must not be None" in str(e)
+        ValueError, lambda e: "all of them must be provided" in str(e)
     ):
       controller.register_work_unit(
-          unit, ["10.0.0.1:8000"], shard_nd_slices=[[[(0, 2)]]]
+          unit,
+          ["10.0.0.1:8000"],
+          mesh_shape=[1, 1, 4, 1, 1],
+          # layout and global_shape are missing
       )
 
-    # 2. Verification during start_transfer if bypassed
-    controller._registered_shard_slices[unit] = [[[(0, 2)]]]
-    controller._registered_itemsizes.pop(unit, None)
-    dst = raiden_controller.RaidenId(
-        job_name="sampler", job_replica_id="0", data_name="weights"
-    )
-
+    # 2. Failure if itemsize is missing when metadata is provided
     with self.assertRaisesWithPredicateMatch(
-        ValueError, lambda e: "itemsize must be registered" in str(e)
+        ValueError, lambda e: "itemsize must be provided" in str(e)
     ):
-      controller.start_transfer(src_units=[unit], dst_units=[dst])
+      controller.register_work_unit(
+          unit,
+          ["10.0.0.1:8000"],
+          mesh_shape=[1, 1, 4, 1, 1],
+          layout=[4, 3, 2, 1, 0],
+          global_shape=[128, 16, 8, 2, 128],
+          # itemsize is missing
+      )
+
+    # 3. Success if all are provided
+    controller.register_work_unit(
+        unit,
+        ["10.0.0.1:8000"],
+        mesh_shape=[1, 1, 4, 1, 1],
+        layout=[4, 3, 2, 1, 0],
+        global_shape=[128, 16, 8, 2, 128],
+        itemsize=4,
+    )
 
 
 if __name__ == "__main__":

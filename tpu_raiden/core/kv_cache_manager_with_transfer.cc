@@ -631,6 +631,7 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
     }
     recv_entry.total_blocks = total_blocks;
     recv_entry.num_completed_blocks = 0;
+    recv_entry.deadline = DeadlineFromNow();
     if (total_blocks > 0) {
       active_recv_entries_[uuid] = std::move(recv_entry);
       LOG(INFO) << "RegisterActivePlan (Receiver): Populated "
@@ -640,6 +641,23 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
                    "sources) for automatic H2D.";
     }
   }
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerWithTransfer::RegisterRecv(
+    uint64_t uuid, const std::string& req_id, int64_t expected_block_count) {
+  std::lock_guard<std::mutex> lock(mu_);
+  RecvEntry recv_entry;
+  recv_entry.req_id = req_id;
+  recv_entry.total_blocks = expected_block_count;
+  recv_entry.num_completed_blocks = 0;
+  recv_entry.deadline = DeadlineFromNow();
+  // host_to_chip is left empty -> defaults to 1-to-1 mapping in
+  // OnBlocksReceived
+  active_recv_entries_[uuid] = std::move(recv_entry);
+  VLOG(1)
+      << "RegisterRecv (Receiver): Registered expected block count for UUID "
+      << uuid << " with " << expected_block_count << " expected blocks.";
   return absl::OkStatus();
 }
 

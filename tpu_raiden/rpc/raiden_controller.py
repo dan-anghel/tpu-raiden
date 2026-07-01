@@ -30,6 +30,7 @@
 import asyncio
 import dataclasses
 import enum
+import logging
 import math
 import random
 import socket
@@ -38,7 +39,16 @@ import time
 import typing
 from typing import Any, Optional, Union
 
+from tpu_raiden.frameworks.jax import resharding_planner
+from tpu_raiden.rpc import controller_service_pb2
 from tpu_raiden.rpc import raiden_service_pb2
+
+
+def to_physical(logical_shape, logical_mesh_shape, minor_to_major):
+  major_to_minor = list(reversed(minor_to_major))
+  physical_shape = tuple(logical_shape[d] for d in major_to_minor)
+  physical_mesh_shape = tuple(logical_mesh_shape[d] for d in major_to_minor)
+  return physical_shape, physical_mesh_shape
 
 
 class NameResolver(typing.Protocol):
@@ -117,6 +127,9 @@ class TransferPlan:
   uuid: int = 0
   dst_mem_type: int = RaidenMemoryType.DRAM
   use_block_chunks: bool = False
+  is_sender: bool = True
+  expected_block_count: int = 0
+  req_id: str = ""
 
 
 def create_server_socket(port: int) -> socket.socket:
@@ -251,28 +264,12 @@ class WorkerRpcClient:
           f" endpoint {target_id} to self-register"
       ) from e
 
-  async def start_transfer(
-      self, target_id: RaidenId, transfer_plan: TransferPlan
-  ) -> None:
-    """Connects to remote Worker servicer and dispatches encoded collective transfer commands.
+  async def _send_rpc(self, addr: str, payload: bytes) -> bytes:
+    """Connects to remote address, sends payload, and returns the response bytes."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, self._send_rpc_sync, addr, payload)
 
-    Args:
-      target_id: Target participating worker RaidenId.
-      transfer_plan: Distributed transfer execution plan mapping source and
-        destination topology.
-
-    Raises:
-      RuntimeError: If remote servicer socket connection fails, or if remote
-        native execution reports failure status.
-    """
-    try:
-      payload = self._encode_start_transfer(target_id, transfer_plan)
-      if not payload:
-        return
-    except NotImplementedError:
-      return
-    addr = await self._resolve_endpoint(target_id)
-
+  def _send_rpc_sync(self, addr: str, payload: bytes) -> bytes:
     sock = connect_socket(addr, timeout=60.0, resolver=self._name_resolver)
     try:
       sock.sendall(len(payload).to_bytes(4, "big") + payload)
@@ -296,9 +293,33 @@ class WorkerRpcClient:
           )
         resp_bytes += chunk
 
-      self._verify_response(resp_bytes)
+      return resp_bytes
     finally:
       sock.close()
+
+  async def start_transfer(
+      self, target_id: RaidenId, transfer_plan: TransferPlan
+  ) -> None:
+    """Connects to remote Worker servicer and dispatches encoded collective transfer commands.
+
+    Args:
+      target_id: Target participating worker RaidenId.
+      transfer_plan: Distributed transfer execution plan mapping source and
+        destination topology.
+
+    Raises:
+      RuntimeError: If remote servicer socket connection fails, or if remote
+        native execution reports failure status.
+    """
+    try:
+      payload = self._encode_start_transfer(target_id, transfer_plan)
+      if not payload:
+        return
+    except NotImplementedError:
+      return
+    addr = await self._resolve_endpoint(target_id)
+    resp_bytes = await self._send_rpc(addr, payload)
+    self._verify_response(resp_bytes)
 
   def _raiden_id_to_proto(self, unit: RaidenId) -> Any:
     return self._proto_module.RaidenIdProto(
@@ -349,6 +370,8 @@ class WorkerRpcClient:
         is_sender=is_sender,
         dst_mem_type=int(transfer_plan.dst_mem_type),
         use_block_chunks=transfer_plan.use_block_chunks,
+        expected_block_count=transfer_plan.expected_block_count,
+        req_id=transfer_plan.req_id,
     )
 
     if transfer_plan.shard_push_schedules:
@@ -375,6 +398,9 @@ class WorkerRpcClient:
                 size,
                 src_block_id,
                 dst_block_id,
+                src_stride,
+                dst_stride,
+                count,
             ) in schedule:
               if dst_peer in target_endpoints:
                 entry_proto = schedule_proto.entries.add()
@@ -385,6 +411,9 @@ class WorkerRpcClient:
                 entry_proto.size_bytes = size
                 entry_proto.src_block_id = src_block_id
                 entry_proto.dst_block_id = dst_block_id
+                entry_proto.src_stride_bytes = src_stride
+                entry_proto.dst_stride_bytes = dst_stride
+                entry_proto.count = count
             if len(schedule_proto.entries) > 0:
               start_req.shard_push_schedules[src_replica_idx].CopyFrom(
                   schedule_proto
@@ -403,6 +432,9 @@ class WorkerRpcClient:
                 size,
                 src_block_id,
                 dst_block_id,
+                src_stride,
+                dst_stride,
+                count,
             ) in entries:
               entry_proto = schedule_proto.entries.add()
               entry_proto.dst_peer = dst_peer
@@ -412,6 +444,9 @@ class WorkerRpcClient:
               entry_proto.size_bytes = size
               entry_proto.src_block_id = src_block_id
               entry_proto.dst_block_id = dst_block_id
+              entry_proto.src_stride_bytes = src_stride
+              entry_proto.dst_stride_bytes = dst_stride
+              entry_proto.count = count
             start_req.shard_push_schedules[shard_idx].CopyFrom(schedule_proto)
 
     req.start_transfer_request.CopyFrom(start_req)
@@ -488,6 +523,11 @@ class RaidenFuture:
     return self._completed
 
 
+def _proto_to_nd_slice(proto_slice: Any) -> list[tuple[int, int]]:
+  """Converts an NDSliceProto message to a Python list of (start, end) tuples."""
+  return [(dim.start, dim.end) for dim in proto_slice.dimensions]
+
+
 def intersect_nd_slices(
     slice1: list[tuple[int, int]], slice2: list[tuple[int, int]]
 ) -> Optional[list[tuple[int, int]]]:
@@ -514,35 +554,62 @@ def intersect_nd_slices(
   return result
 
 
-def generate_1d_copy_chunks(
+def generate_strided_copy_chunks(
     src_shard_slice: list[tuple[int, int]],
     dst_shard_slice: list[tuple[int, int]],
     intersection_slice: list[tuple[int, int]],
     itemsize: int,
-) -> list[tuple[int, int, int]]:
-  """Translates an N-dimensional grid intersection into non-contiguous 1D memory copy byte chunks.
+) -> list[tuple[int, int, int, int, int, int]]:
+  """Translates an N-dimensional grid intersection into strided memory copy chunks.
 
-  When linearizing multi-dimensional arrays, an intersecting subgrid is often
-  non-contiguous in memory. This function computes the exact linear source and
-  destination byte offsets and chunk sizes needed to transmit the non-adjacent
-  strided minor rows over a flat 1D data stream.
-
-  Args:
-    src_shard_slice: Global multi-dimensional bounding box of the source shard.
-    dst_shard_slice: Global multi-dimensional bounding box of the destination
-      shard.
-    intersection_slice: Global multi-dimensional bounding box of the overlapping
-      subgrid.
-    itemsize: Byte size of a single array scalar element (e.g., 4 for float32).
-
-  Returns:
-    A list of (src_offset_bytes, dst_offset_bytes, size_bytes) tuples defining
-    the concrete 1D linear memory copy chunk operations.
+  Instead of returning flat 1D chunks, this function groups contiguous dimension
+  runs and returns strided chunk descriptors: (src_offset, dst_offset, size,
+  src_stride, dst_stride, count)
   """
   rank = len(src_shard_slice)
   src_shape = [e - s for s, e in src_shard_slice]
   dst_shape = [e - s for s, e in dst_shard_slice]
   int_shape = [e - s for s, e in intersection_slice]
+
+  # Calculate how many inner dimensions can be merged into a contiguous chunk
+  contiguous_elements = 1
+  split_dim = rank - 1
+  for d in range(rank - 1, -1, -1):
+    dim_size = int_shape[d]
+    contiguous_elements *= dim_size
+    split_dim = d
+
+    # Check if we can merge the next outer dimension
+    src_full = dim_size == src_shape[d]
+    dst_full = dim_size == dst_shape[d]
+    if not (src_full and dst_full):
+      break
+
+  contiguous_bytes = contiguous_elements * itemsize
+
+  # The dimension to collapse using stride is split_dim - 1
+  stride_dim = split_dim - 1
+
+  src_strides = [1] * rank
+  for i in range(rank - 2, -1, -1):
+    src_strides[i] = src_strides[i + 1] * src_shape[i + 1]
+
+  dst_strides = [1] * rank
+  for i in range(rank - 2, -1, -1):
+    dst_strides[i] = dst_strides[i + 1] * dst_shape[i + 1]
+
+  if stride_dim >= 0:
+    count = int_shape[stride_dim]
+    src_stride = src_strides[stride_dim] * itemsize
+    dst_stride = dst_strides[stride_dim] * itemsize
+    outer_shape = int_shape[:stride_dim]
+  else:
+    count = 1
+    src_stride = 0
+    dst_stride = 0
+    outer_shape = []
+
+  num_outer_elements = math.prod(outer_shape) if outer_shape else 1
 
   src_local_int_slice = [
       (int_s - src_s, int_e - src_s)
@@ -553,21 +620,7 @@ def generate_1d_copy_chunks(
       for (dst_s, _), (int_s, int_e) in zip(dst_shard_slice, intersection_slice)
   ]
 
-  src_strides = [1] * rank
-  for i in range(rank - 2, -1, -1):
-    src_strides[i] = src_strides[i + 1] * src_shape[i + 1]
-
-  dst_strides = [1] * rank
-  for i in range(rank - 2, -1, -1):
-    dst_strides[i] = dst_strides[i + 1] * dst_shape[i + 1]
-
-  minor_dim_size = int_shape[-1]
-  contiguous_bytes = minor_dim_size * itemsize
-
   chunks = []
-  outer_shape = int_shape[:-1]
-  num_outer_elements = math.prod(outer_shape) if outer_shape else 1
-
   for i in range(num_outer_elements):
     multi_index = []
     temp = i
@@ -579,20 +632,28 @@ def generate_1d_copy_chunks(
     src_offset_items = 0
     dst_offset_items = 0
 
-    for d in range(rank - 1):
+    # Calculate offset for outer dimensions
+    for d in range(len(outer_shape)):
       src_idx = src_local_int_slice[d][0] + multi_index[d]
       src_offset_items += src_idx * src_strides[d]
 
       dst_idx = dst_local_int_slice[d][0] + multi_index[d]
       dst_offset_items += dst_idx * dst_strides[d]
 
-    src_offset_items += src_local_int_slice[-1][0] * src_strides[-1]
-    dst_offset_items += dst_local_int_slice[-1][0] * dst_strides[-1]
+    # For merged dimensions (and the stride dim), we use the start of the intersection
+    # as the base offset for this chunk
+    start_d = len(outer_shape)
+    for d in range(start_d, rank):
+      src_offset_items += src_local_int_slice[d][0] * src_strides[d]
+      dst_offset_items += dst_local_int_slice[d][0] * dst_strides[d]
 
     chunks.append((
         src_offset_items * itemsize,
         dst_offset_items * itemsize,
         contiguous_bytes,
+        src_stride,
+        dst_stride,
+        count,
     ))
 
   return chunks
@@ -607,9 +668,9 @@ class RaidenController:
     self.port = port
     self._active_transfers: dict[str, TransferPlan] = {}
     self._registered_shards: dict[RaidenId, list[str]] = {}
-    self._registered_shard_slices: dict[
-        RaidenId, list[list[tuple[int, int]]]
-    ] = {}
+    self._registered_mesh_shapes: dict[RaidenId, list[int]] = {}
+    self._registered_layouts: dict[RaidenId, list[int]] = {}
+    self._registered_global_shapes: dict[RaidenId, list[int]] = {}
     self._registered_itemsizes: dict[RaidenId, int] = {}
     self._lock = threading.Lock()
     self.worker_rpc_client = worker_rpc_client or WorkerRpcClient()
@@ -619,23 +680,35 @@ class RaidenController:
       unit: RaidenId,
       shards: list[str],
       control_plane_rpc_address: Optional[str] = None,
-      shard_nd_slices: Optional[
-          Union[
-              list[list[tuple[int, int]]],
-              list[raiden_service_pb2.NDSliceProto],
-          ]
-      ] = None,
+      mesh_shape: Optional[typing.Sequence[int]] = None,
+      layout: Optional[typing.Sequence[int]] = None,
+      global_shape: Optional[typing.Sequence[int]] = None,
       itemsize: Optional[int] = None,
   ) -> None:
     """Registers physical worker shard Data addresses and optional Control-Plane RPC endpoint."""
-    if shard_nd_slices is not None and itemsize is None:
-      raise ValueError(
-          "itemsize must not be None if shard_nd_slices is provided."
-      )
+    has_metadata = (
+        mesh_shape is not None or layout is not None or global_shape is not None
+    )
+    if has_metadata:
+      if mesh_shape is None or layout is None or global_shape is None:
+        raise ValueError(
+            "If any of mesh_shape, layout, or global_shape is provided, "
+            "all of them must be provided to enable centralized slice planning."
+        )
+      if itemsize is None or itemsize <= 0:
+        raise ValueError(
+            "itemsize must be provided and must be greater than 0 if resharding"
+            " metadata is provided."
+        )
+
     with self._lock:
       self._registered_shards[unit] = shards
-      if shard_nd_slices:
-        self._registered_shard_slices[unit] = shard_nd_slices
+      if mesh_shape:
+        self._registered_mesh_shapes[unit] = list(mesh_shape)
+      if layout:
+        self._registered_layouts[unit] = list(layout)
+      if global_shape:
+        self._registered_global_shapes[unit] = list(global_shape)
       if itemsize:
         self._registered_itemsizes[unit] = itemsize
       if control_plane_rpc_address and hasattr(
@@ -644,6 +717,31 @@ class RaidenController:
         self.worker_rpc_client.register_worker_endpoint(
             unit, control_plane_rpc_address
         )
+
+  def get_all_metadata(self) -> list[Any]:
+    """Returns a list of RegisterWorkUnitRequest protos for all registered units."""
+    protos = []
+    with self._lock:
+      for unit in self._registered_shards:
+        reg_req = raiden_service_pb2.RegisterWorkUnitRequest(
+            unit=self.worker_rpc_client._raiden_id_to_proto(unit),
+            shards=self._registered_shards[unit],
+            control_plane_rpc_address=self.worker_rpc_client.get_worker_endpoints().get(
+                unit, ""
+            ),
+            itemsize=self._registered_itemsizes.get(unit, 0),
+        )
+        mesh = self._registered_mesh_shapes.get(unit)
+        if mesh:
+          reg_req.mesh_shape.extend(mesh)
+        lay = self._registered_layouts.get(unit)
+        if lay:
+          reg_req.layout.extend(lay)
+        glob_shape = self._registered_global_shapes.get(unit)
+        if glob_shape:
+          reg_req.global_shape.extend(glob_shape)
+        protos.append(reg_req)
+    return protos
 
   def _resolve_shards(self, unit: RaidenId) -> list[str]:
     with self._lock:
@@ -654,6 +752,44 @@ class RaidenController:
     with self._lock:
       return self._active_transfers.get(req_id)
 
+  async def _query_remote_metadata(self, addr: str) -> list[Any]:
+    req = raiden_service_pb2.ControlRequest(
+        command=raiden_service_pb2.ControlRequest.COMMAND_GET_METADATA
+    )
+    resp_bytes = await self.worker_rpc_client._send_rpc(
+        addr, req.SerializeToString()
+    )
+    resp = raiden_service_pb2.ControlResponse()
+    resp.ParseFromString(resp_bytes)
+    if not resp.success:
+      raise RuntimeError(f"Failed to query remote metadata: {resp.message}")
+    return list(resp.get_metadata_response.metadata)
+
+  def _get_local_metadata(self, units: list[RaidenId]) -> list[Any]:
+    protos = []
+    with self._lock:
+      for unit in units:
+        if unit in self._registered_shards:
+          reg_req = raiden_service_pb2.RegisterWorkUnitRequest(
+              unit=self.worker_rpc_client._raiden_id_to_proto(unit),
+              shards=self._registered_shards[unit],
+              control_plane_rpc_address=self.worker_rpc_client.get_worker_endpoints().get(
+                  unit, ""
+              ),
+              itemsize=self._registered_itemsizes.get(unit, 0),
+          )
+          mesh = self._registered_mesh_shapes.get(unit)
+          if mesh:
+            reg_req.mesh_shape.extend(mesh)
+          lay = self._registered_layouts.get(unit)
+          if lay:
+            reg_req.layout.extend(lay)
+          glob_shape = self._registered_global_shapes.get(unit)
+          if glob_shape:
+            reg_req.global_shape.extend(glob_shape)
+          protos.append(reg_req)
+    return protos
+
   def start_transfer(
       self,
       src_units: list[RaidenId],
@@ -663,6 +799,12 @@ class RaidenController:
       dst_device_block_ids: Optional[list[int]] = None,
       dst_mem_type: RaidenMemoryType = RaidenMemoryType.DRAM,
       use_block_chunks: bool = False,
+      src_controller_address: Optional[str] = None,
+      dst_controller_address: Optional[str] = None,
+      uuid: Optional[int] = None,
+      is_sender: bool = True,
+      expected_block_count: int = 0,
+      shard_push_schedules: Optional[dict] = None,
   ) -> RaidenFuture:
     """For a requested data transfer, generates a transfer plan for the work units to carry out and start it.
 
@@ -674,10 +816,22 @@ class RaidenController:
       dst_device_block_ids: list of destination device block IDs to receive the
         data. This is only needed when the destination memory type is HBM.
       dst_mem_type: The dst memory type of the data written to.
+      use_block_chunks: Whether to use chunked transport.
+      src_controller_address: Optional address of the source controller.
+      dst_controller_address: Optional address of the destination controller.
+      uuid: Optional pre-determined UUID for the transfer.
+      is_sender: If True, this controller acts as the Sender Coordinator,
+        querying destination metadata and triggering the active push on source
+        workers. If False, this controller acts as the Destination Coordinator,
+        preparing local receiver workers and setting up their expected block
+        count.
+      expected_block_count: The total number of physical block-pushes expected
+        per destination rank (only applicable when is_sender=False).
 
     Returns:
       A Future for the call site to wait for the transfer to complete.
     """
+
     if not src_units:
       raise ValueError("src_units must not be empty.")
     if not dst_units:
@@ -706,79 +860,272 @@ class RaidenController:
         src_units, key=lambda s: active_src_counts.get(s.job_replica_id, 0)
     )
 
+    if uuid is None:
+      uuid = random.randint(1, 2**63 - 1)
+
+    # Determine session_id and req_id synchronously
+    with self._lock:
+      session_id = len(self._active_transfers)
+      if not req_id:
+        req_id = f"req_{session_id}"
+
+    # Generate default plan (always needed as fallback or for old workflow)
     num_src = len(self._resolve_shards(selected_src))
-    plan: dict[
-        RaidenId, list[list[tuple[RaidenId, int, list[NDSlice]]]]
-    ] = {}
-
-    src_plan: list[list[tuple[RaidenId, int, list[NDSlice]]]] = [
-        [] for _ in range(num_src)
-    ]
-
+    default_plan_dict = {}
+    src_plan = [[] for _ in range(num_src)]
     for dst_unit in dst_units:
       num_dst = len(self._resolve_shards(dst_unit))
-
       for i in range(num_src):
         src_start = i * num_dst
         src_end = (i + 1) * num_dst
-
         for j in range(num_dst):
           dst_start = j * num_src
           dst_end = (j + 1) * num_src
-
           intersect_start = max(src_start, dst_start)
           intersect_end = min(src_end, dst_end)
-
           if intersect_start < intersect_end:
             local_start = intersect_start - src_start
             local_end = intersect_end - src_start
-            nd_slice: NDSlice = [(local_start, local_end)]
+            nd_slice = [(local_start, local_end)]
             src_plan[i].append((dst_unit, j, [nd_slice]))
+    default_plan_dict[selected_src] = src_plan
 
-    plan[selected_src] = src_plan
+    if not use_block_chunks:
+      # === OLD WORKFLOW: Fully build and store plan SYNCHRONOUSLY ===
+      rpc_addresses = {}
+      if hasattr(self.worker_rpc_client, "get_worker_endpoints"):
+        rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
+      data_addresses = {unit: self._resolve_shards(unit) for unit in dst_units}
 
-    src_slices = self._registered_shard_slices.get(selected_src)
-    dst_slices = {}
-    for d in dst_units:
-      d_slices = self._registered_shard_slices.get(d)
-      if d_slices:
-        dst_slices[d] = d_slices
+      plan = TransferPlan(
+          src_units=[selected_src],
+          dst_units=dst_units,
+          plan=default_plan_dict,
+          shard_push_schedules={},
+          worker_rpc_addresses=rpc_addresses,
+          worker_data_addresses=data_addresses,
+          uuid=uuid,
+          dst_mem_type=dst_mem_type,
+          use_block_chunks=False,
+      )
+      with self._lock:
+        self._active_transfers[req_id] = plan
+    else:
+      # === NEW WORKFLOW: Store partial plan SYNCHRONOUSLY ===
+      plan = TransferPlan(
+          src_units=src_units,
+          dst_units=dst_units,
+          plan=None,
+          shard_push_schedules=shard_push_schedules or {},
+          worker_rpc_addresses=dict(
+              self.worker_rpc_client.get_worker_endpoints()
+          ),
+          worker_data_addresses=dict(self._registered_shards),
+          uuid=uuid,
+          dst_mem_type=dst_mem_type,
+          use_block_chunks=True,
+          is_sender=is_sender,
+          expected_block_count=expected_block_count,
+          req_id=req_id,
+      )
+      with self._lock:
+        self._active_transfers[req_id] = plan
 
-    # Check if we have slices for any of the src_units and enforce itemsize
-    for src_unit in src_units:
-      src_slices = self._registered_shard_slices.get(src_unit)
-      if src_slices is not None:
-        itemsize = self._registered_itemsizes.get(src_unit)
-        if itemsize is None:
-          raise ValueError(
-              "itemsize must be registered if shard_nd_slices is provided."
+    async def _execute_transfer() -> None:
+      if use_block_chunks:
+        # === NEW SYMMETRIC DECENTRALIZED WORKFLOW ===
+
+        if not is_sender:
+          # --- ROLE: DESTINATION CONTROLLER (RECEIVER COORDINATOR) ---
+          logging.info(
+              "RaidenController acting as DESTINATION COORDINATOR"
+              " (is_sender=False) for uuid %s",
+              uuid,
           )
 
-    has_slices = any(self._registered_shard_slices.get(s) for s in src_units)
-    shard_push_schedules: dict[
-        RaidenId, dict[int, list[tuple[str, int, int, int, int, int, int]]]
-    ] = {}
+          # 1. Discover local destination units
+          local_dst_units = [
+              u for u in dst_units if u in self._registered_shards
+          ]
+          if not local_dst_units:
+            logging.warning("No local destination units found to prepare!")
+            return
 
-    if has_slices and len(dst_slices) == len(dst_units):
-      for src_unit in src_units:
-        src_slices = self._registered_shard_slices.get(src_unit)
-        if not src_slices:
-          continue
-        itemsize = self._registered_itemsizes.get(src_unit)
+          # 2. Build rpc_addresses for local destination workers
+          rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
 
-        push_schedules: dict[
-            int, list[tuple[str, int, int, int, int, int, int]]
-        ] = {}
-        for src_shard_idx, src_slice in enumerate(src_slices):
-          shard_entries = []
-          for dst_unit in dst_units:
-            d_slices = dst_slices[dst_unit]
-            dst_shards = self._resolve_shards(dst_unit)
-            for dst_shard_idx, dst_slice in enumerate(d_slices):
+          # 3. Construct a lightweight TransferPlan containing receiver parameters
+          receiver_plan = TransferPlan(
+              src_units=src_units,
+              dst_units=dst_units,
+              plan=None,
+              shard_push_schedules=shard_push_schedules or {},
+              worker_rpc_addresses=rpc_addresses,
+              worker_data_addresses={
+                  u: self._registered_shards[u] for u in local_dst_units
+              },
+              uuid=uuid,
+              dst_mem_type=dst_mem_type,
+              use_block_chunks=True,
+              is_sender=False,
+              expected_block_count=expected_block_count,
+              req_id=req_id,
+          )
+
+          # 4. Trigger COMMAND_START_TRANSFER (is_sender=False) on local workers
+          logging.info(
+              "Triggering preparation RPCs on local destination workers: %s,"
+              " expected blocks: %d",
+              local_dst_units,
+              expected_block_count,
+          )
+          await asyncio.gather(*[
+              self.worker_rpc_client.start_transfer(unit, receiver_plan)
+              for unit in local_dst_units
+          ])
+          logging.info(
+              "Symmetric preparation complete on all local destination workers."
+          )
+
+        else:
+          # --- ROLE: SENDER CONTROLLER (SENDER COORDINATOR) ---
+          logging.info(
+              "RaidenController acting as SENDER COORDINATOR (is_sender=True)"
+              " for uuid %s",
+              uuid,
+          )
+
+          # 1. Retrieve destination metadata (either from remote dst_controller or local)
+          dst_metadata = []
+          if dst_controller_address:
+            logging.info(
+                "Querying remote destination controller %s for metadata",
+                dst_controller_address,
+            )
+            dst_metadata = await self._query_remote_metadata(
+                dst_controller_address
+            )
+          else:
+            logging.info("Using local registration for destination metadata")
+            dst_metadata = self._get_local_metadata(dst_units)
+
+          # 2. Compute slices for all source and destination units centrally
+          computed_slices = {}
+
+          # Source slices (always local to sender controller)
+          for unit in src_units:
+            with self._lock:
+              global_shape = self._registered_global_shapes.get(unit)
+              mesh_shape = self._registered_mesh_shapes.get(unit)
+              layout = self._registered_layouts.get(unit)
+            if global_shape and mesh_shape and layout:
+              phys_shape, phys_mesh = to_physical(
+                  global_shape, mesh_shape, layout
+              )
+              slices = resharding_planner.compute_nd_shard_slices(
+                  phys_shape, phys_mesh
+              )
+              computed_slices[unit] = slices
+              logging.info("Computed source slices for %s: %s", unit, slices)
+
+          # Destination slices
+          data_address_to_unit = {}
+          for meta in dst_metadata:
+            unit = RaidenId(
+                meta.unit.job_name,
+                meta.unit.job_replica_id,
+                meta.unit.data_name,
+            )
+            for shard in meta.shards:
+              data_address_to_unit[shard] = unit
+            if meta.global_shape and meta.mesh_shape and meta.layout:
+              phys_shape, phys_mesh = to_physical(
+                  list(meta.global_shape),
+                  list(meta.mesh_shape),
+                  list(meta.layout),
+              )
+              slices = resharding_planner.compute_nd_shard_slices(
+                  phys_shape, phys_mesh
+              )
+              computed_slices[unit] = slices
+              logging.info(
+                  "Computed destination slices for %s: %s", unit, slices
+              )
+
+          # 3. Generate plan (Intersection)
+          computed_schedules = {}
+          for src_unit in src_units:
+            src_slices = computed_slices.get(src_unit)
+            if not src_slices:
+              continue
+
+            # Get itemsize
+            with self._lock:
+              itemsize = self._registered_itemsizes.get(src_unit)
+            if not itemsize:
+              itemsize = 4  # default fallback
+
+            # Map src_unit to its specific shard index
+            try:
+              src_shard_idx = int(src_unit.job_replica_id)
+            except ValueError:
+              src_shard_idx = 0
+
+            if src_shard_idx >= len(src_slices):
+              logging.warning(
+                  "src_shard_idx %d out of range of src_slices (%d)",
+                  src_shard_idx,
+                  len(src_slices),
+              )
+              continue
+
+            src_slice_proto = src_slices[src_shard_idx]
+            src_slice = _proto_to_nd_slice(src_slice_proto)
+
+            # The worker daemon always expects its local schedule at index 0
+            local_shard_idx = 0
+            shard_entries = []
+
+            for dst_unit in dst_units:
+              d_slices = computed_slices.get(dst_unit)
+              if not d_slices:
+                continue
+
+              try:
+                dst_shard_idx = int(dst_unit.job_replica_id)
+              except ValueError:
+                dst_shard_idx = 0
+
+              if dst_shard_idx >= len(d_slices):
+                logging.warning(
+                    "dst_shard_idx %d out of range of d_slices (%d)",
+                    dst_shard_idx,
+                    len(d_slices),
+                )
+                continue
+
+              dst_slice_proto = d_slices[dst_shard_idx]
+              dst_slice = _proto_to_nd_slice(dst_slice_proto)
+
+              # Resolve destination shards
+              dst_shards = []
+              for meta in dst_metadata:
+                meta_unit = RaidenId(
+                    meta.unit.job_name,
+                    meta.unit.job_replica_id,
+                    meta.unit.data_name,
+                )
+                if meta_unit == dst_unit:
+                  dst_shards = list(meta.shards)
+                  break
+              if not dst_shards:
+                dst_shards = ["127.0.0.1:8000"]  # fallback
+
               intersection = intersect_nd_slices(src_slice, dst_slice)
               if intersection:
-                dst_peer = dst_shards[dst_shard_idx % len(dst_shards)]
-                chunks = generate_1d_copy_chunks(
+                # Map to the correct destination peer (always index 0 for single-task worker)
+                dst_peer = dst_shards[0]
+                chunks = generate_strided_copy_chunks(
                     src_slice, dst_slice, intersection, itemsize
                 )
                 src_block_bytes = (
@@ -791,61 +1138,150 @@ class RaidenController:
                     if len(dst_slice) > 1
                     else itemsize
                 )
-                for src_offset, dst_offset, size in chunks:
+                for (
+                    src_offset,
+                    dst_offset,
+                    size,
+                    src_stride,
+                    dst_stride,
+                    count,
+                ) in chunks:
                   src_block_id = src_offset // src_block_bytes
                   dst_block_id = dst_offset // dst_block_bytes
+
+                  # Make offsets block-relative
+                  src_block_offset = src_offset % src_block_bytes
+                  dst_block_offset = dst_offset % dst_block_bytes
+
                   shard_entries.append((
                       dst_peer,
-                      dst_shard_idx,
-                      dst_offset,
-                      src_offset,
+                      0,  # dst_shard_idx on receiver is always 0 (local)
+                      dst_block_offset,
+                      src_block_offset,
                       size,
                       src_block_id,
                       dst_block_id,
+                      src_stride,
+                      dst_stride,
+                      count,
                   ))
-          if shard_entries:
-            push_schedules[src_shard_idx] = shard_entries
-        if push_schedules:
-          shard_push_schedules[src_unit] = push_schedules
+            if shard_entries:
+              computed_schedules[src_unit] = {local_shard_idx: shard_entries}
 
-    rpc_addresses = {}
-    if hasattr(self.worker_rpc_client, "get_worker_endpoints"):
-      rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
+          # Build rpc_addresses for local source workers
+          rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
+          # Merge destination rpc addresses from metadata
+          for meta in dst_metadata:
+            unit = RaidenId(
+                meta.unit.job_name,
+                meta.unit.job_replica_id,
+                meta.unit.data_name,
+            )
+            if meta.control_plane_rpc_address:
+              rpc_addresses[unit] = meta.control_plane_rpc_address
 
-    data_addresses = {unit: self._resolve_shards(unit) for unit in dst_units}
+          data_addresses = {unit: [] for unit in dst_units}
+          for meta in dst_metadata:
+            unit = RaidenId(
+                meta.unit.job_name,
+                meta.unit.job_replica_id,
+                meta.unit.data_name,
+            )
+            if unit in data_addresses:
+              data_addresses[unit] = list(meta.shards)
 
-    plan = TransferPlan(
-        src_units=list(shard_push_schedules.keys())
-        if shard_push_schedules
-        else [selected_src],
-        dst_units=dst_units,
-        plan=None if shard_push_schedules else plan,
-        shard_push_schedules=shard_push_schedules,
-        worker_rpc_addresses=rpc_addresses,
-        worker_data_addresses=data_addresses,
-        uuid=random.randint(1, 2**63 - 1),
-        dst_mem_type=dst_mem_type,
-        use_block_chunks=use_block_chunks,
-    )
+          # Build final plan and replace the partial plan
+          final_plan = TransferPlan(
+              src_units=list(computed_schedules.keys())
+              if computed_schedules
+              else src_units,
+              dst_units=dst_units,
+              plan=None,
+              shard_push_schedules=computed_schedules,
+              worker_rpc_addresses=rpc_addresses,
+              worker_data_addresses=data_addresses,
+              uuid=uuid,
+              dst_mem_type=dst_mem_type,
+              use_block_chunks=use_block_chunks,
+              is_sender=True,
+              expected_block_count=expected_block_count,
+              req_id=req_id,
+          )
+          with self._lock:
+            self._active_transfers[req_id] = final_plan
 
-    with self._lock:
-      session_id = len(self._active_transfers)
-      if not req_id:
-        req_id = f"req_{session_id}"
-      self._active_transfers[req_id] = plan
+          # 3.5 Prepare Receivers (Symmetric plan registration)
+          if dst_controller_address:
+            logging.info(
+                "Triggering preparation on remote destination controller %s",
+                dst_controller_address,
+            )
+            dst_facade = RaidenControllerClientFacade(
+                dst_controller_address,
+                name_resolver=self.worker_rpc_client._name_resolver,
+            )
+            loop = asyncio.get_running_loop()
+            success = await loop.run_in_executor(
+                None,
+                dst_facade.register_transfer_schedule,
+                src_units,
+                dst_units,
+                req_id,
+                use_block_chunks,
+                False,  # is_sender=False
+                expected_block_count,
+                uuid,
+                dst_controller_address,
+                src_controller_address,
+                computed_schedules,
+                dst_mem_type,
+            )
+            if not success:
+              raise RuntimeError(
+                  "Failed to prepare remote receivers via destination"
+                  " controller!"
+              )
+          else:
+            local_dst_units = [
+                u for u in dst_units if u in self._registered_shards
+            ]
+            if local_dst_units:
+              logging.info("Preparing local receivers: %s", local_dst_units)
+              await asyncio.gather(*[
+                  self.worker_rpc_client.start_transfer(unit, final_plan)
+                  for unit in local_dst_units
+              ])
 
-    async def _execute_transfer() -> None:
-      # 1. Send start_transfer to Destination workers first to register the plan.
-      # Since destinations have no push schedules, they will register and return immediately.
-      for unit in dst_units:
-        await self.worker_rpc_client.start_transfer(unit, plan)
+          # 4. Trigger Push on Source Workers
+          local_src_units = [
+              u for u in final_plan.src_units if u in self._registered_shards
+          ]
+          print(
+              f"Triggering push on local source workers: {local_src_units}",
+              flush=True,
+          )
+          await asyncio.gather(*[
+              self.worker_rpc_client.start_transfer(unit, final_plan)
+              for unit in local_src_units
+          ])
+          print("Push complete on all local source workers.", flush=True)
 
-      # 2. Send start_transfer to Source workers to trigger the actual push.
-      # These will block until the push is complete.
-      await asyncio.gather(*[
-          self.worker_rpc_client.start_transfer(unit, plan)
-          for unit in plan.src_units
-      ])
+      else:
+        # === OLD PLAN-BASED WORKFLOW (Backward Compatibility) ===
+        # Retrieve the plan that was stored synchronously
+        with self._lock:
+          old_plan = self._active_transfers[req_id]
+
+        # 1. Send start_transfer to Destination workers first to register the plan.
+        # This is REQUIRED in the old workflow because they need the plan to unpack!
+        for unit in dst_units:
+          await self.worker_rpc_client.start_transfer(unit, old_plan)
+
+        # 2. Send start_transfer to Source workers to trigger the actual push.
+        await asyncio.gather(*[
+            self.worker_rpc_client.start_transfer(unit, old_plan)
+            for unit in old_plan.src_units
+        ])
 
     transfer_task = _execute_transfer()
     return RaidenFuture(session_id=session_id, transfer_task=transfer_task)
@@ -856,18 +1292,22 @@ class RaidenControllerServer:
 
   def __init__(
       self,
-      controller: RaidenController,
+      controller: "RaidenController",
       proto_module: Optional[Any] = None,
+      raiden_proto_module: Optional[Any] = None,
   ):
     """Instantiates RaidenControllerServer on an active RaidenController instance.
 
     Args:
       controller: High-level RaidenController instance managing transfer plans.
-      proto_module: Optional protobuf module to use for ControlRequest/Response.
-        Defaults to raiden_service_pb2.
+      proto_module: Optional protobuf module to use for
+        ControllerRequest/Response. Defaults to controller_service_pb2.
+      raiden_proto_module: Optional protobuf module for raiden service
+        primitives.
     """
     self._controller = controller
-    self._proto_module = proto_module or raiden_service_pb2
+    self._proto_module = proto_module or controller_service_pb2
+    self._raiden_proto_module = raiden_proto_module or raiden_service_pb2
     self._sock = create_server_socket(controller.port)
     self._stopped = False
     self._thread = None
@@ -885,12 +1325,21 @@ class RaidenControllerServer:
   def stop(self) -> None:
     """Signals servicer loop shutdown and unblocks pending accept state."""
     self._stopped = True
-    try:
-      connect_socket(f"127.0.0.1:{self._controller.port}", timeout=1.0)
-    except Exception:  # pylint: disable=broad-except
-      pass
+    for host in ("[::1]", "127.0.0.1"):
+      try:
+        connect_socket(f"{host}:{self._controller.port}", timeout=0.5)
+        break
+      except Exception:  # pylint: disable=broad-except
+        pass
 
-    self._sock.close()
+    try:
+      self._sock.shutdown(socket.SHUT_RDWR)
+    except Exception:
+      pass
+    try:
+      self._sock.close()
+    except Exception:
+      pass
 
   def _server_loop(self) -> None:
     """Internal socket server connection acceptance coroutine loop."""
@@ -915,7 +1364,7 @@ class RaidenControllerServer:
   def _handle_conn(
       self, conn: socket.socket, loop: asyncio.AbstractEventLoop
   ) -> None:
-    """Internal connection processing handler executing deserialized ControlRequest Protobuf RPC payloads.
+    """Internal connection processing handler executing deserialized ControllerRequest Protobuf RPC payloads.
 
     Args:
       conn: Accepted incoming TCP socket client handle.
@@ -935,70 +1384,176 @@ class RaidenControllerServer:
       while len(req_bytes) < req_len:
         req_bytes += conn.recv(req_len - len(req_bytes))
 
-      req = self._proto_module.ControlRequest()
-      req.ParseFromString(req_bytes)
-
-      resp = self._proto_module.ControlResponse()
-      resp.success = False
-
+      req = self._proto_module.ControllerRequest()
       try:
-        if (
-            req.command
-            == self._proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT
-        ):
-          reg = req.register_work_unit_request
-          unit = RaidenId(
-              reg.unit.job_name, reg.unit.job_replica_id, reg.unit.data_name
-          )
-          shards = list(reg.shards)
-          ctrl_addr = (
-              reg.control_plane_rpc_address
-              if reg.control_plane_rpc_address
-              else None
-          )
-          shard_slices = []
-          for nd_slice_proto in reg.shard_nd_slices:
-            dims = []
-            for dim_proto in nd_slice_proto.dimensions:
-              dims.append((dim_proto.start, dim_proto.end))
-            shard_slices.append(dims)
+        req.ParseFromString(req_bytes)
+      except Exception:
+        req.command = self._proto_module.ControllerRequest.COMMAND_UNSPECIFIED
 
-          itemsize = reg.itemsize if reg.itemsize > 0 else None
+      if (
+          req.command
+          == self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER
+          and req.HasField("coordinate_transfer_request")
+      ):
+        resp = self._proto_module.ControllerResponse()
+        resp.success = False
+        try:
+          if (
+              req.command
+              == self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER
+          ):
+            coord_req = req.coordinate_transfer_request
+            srcs = [
+                RaidenId(u.job_name, u.job_replica_id, u.data_name)
+                for u in coord_req.src_units
+            ]
+            dsts = [
+                RaidenId(u.job_name, u.job_replica_id, u.data_name)
+                for u in coord_req.dst_units
+            ]
+            dst_mem_type = RaidenMemoryType.DRAM
+            if (
+                coord_req.dst_mem_type
+                == self._raiden_proto_module.MEMORY_TYPE_HBM
+            ):
+              dst_mem_type = RaidenMemoryType.HBM
 
-          self._controller.register_work_unit(
-              unit, shards, ctrl_addr, shard_slices, itemsize
-          )
-          resp.success = True
-        elif (
-            req.command
-            == self._proto_module.ControlRequest.COMMAND_START_TRANSFER
-        ):
-          start_req = req.start_transfer_request
-          srcs = [
-              RaidenId(u.job_name, u.job_replica_id, u.data_name)
-              for u in start_req.src_units
-          ]
-          dsts = [
-              RaidenId(u.job_name, u.job_replica_id, u.data_name)
-              for u in start_req.dst_units
-          ]
-          future = self._controller.start_transfer(
-              srcs, dsts, None, use_block_chunks=start_req.use_block_chunks
-          )
-          loop.run_until_complete(future.wait())
-          resp.success = True
-        elif req.command == self._proto_module.ControlRequest.COMMAND_SHUTDOWN:
-          if hasattr(self._controller.worker_rpc_client, "shutdown_workers"):
-            loop.run_until_complete(
-                self._controller.worker_rpc_client.shutdown_workers()
+            future = self._controller.start_transfer(
+                src_units=srcs,
+                dst_units=dsts,
+                req_id=coord_req.req_id if coord_req.req_id else None,
+                dst_mem_type=dst_mem_type,
+                use_block_chunks=coord_req.use_block_chunks,
+                src_controller_address=coord_req.src_controller_address
+                if coord_req.src_controller_address
+                else None,
+                dst_controller_address=coord_req.dst_controller_address
+                if coord_req.dst_controller_address
+                else None,
+                uuid=coord_req.uuid if coord_req.uuid > 0 else None,
+                is_sender=coord_req.is_sender,
+                expected_block_count=coord_req.expected_block_count,
+                shard_push_schedules=None,
             )
-          self.stop()
-          resp.success = True
-      except Exception as e:  # pylint: disable=broad-except
-        resp.message = str(e)
+            loop.run_until_complete(future.wait())
+            resp.success = True
+        except Exception as e:
+          resp.message = str(e)
+        resp_bytes = resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+      else:
+        raiden_req = self._raiden_proto_module.ControlRequest()
+        raiden_req.ParseFromString(req_bytes)
+        raiden_resp = self._raiden_proto_module.ControlResponse()
+        raiden_resp.success = False
+        try:
+          if (
+              raiden_req.command
+              == self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT
+          ):
+            reg = raiden_req.register_work_unit_request
+            unit = RaidenId(
+                reg.unit.job_name, reg.unit.job_replica_id, reg.unit.data_name
+            )
+            shards = list(reg.shards)
+            ctrl_addr = (
+                reg.control_plane_rpc_address
+                if reg.control_plane_rpc_address
+                else None
+            )
+            mesh_shape = list(reg.mesh_shape) if reg.mesh_shape else None
+            layout = list(reg.layout) if reg.layout else None
+            global_shape = list(reg.global_shape) if reg.global_shape else None
+            itemsize = reg.itemsize if reg.itemsize > 0 else None
 
-      resp_bytes = resp.SerializeToString()
-      conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+            self._controller.register_work_unit(
+                unit,
+                shards,
+                control_plane_rpc_address=ctrl_addr,
+                mesh_shape=mesh_shape,
+                layout=layout,
+                global_shape=global_shape,
+                itemsize=itemsize,
+            )
+            raiden_resp.success = True
+          elif (
+              raiden_req.command
+              == self._raiden_proto_module.ControlRequest.COMMAND_GET_METADATA
+          ):
+            metadata_protos = self._controller.get_all_metadata()
+            raiden_resp.get_metadata_response.metadata.extend(metadata_protos)
+            raiden_resp.success = True
+          elif (
+              raiden_req.command
+              == self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_TRANSFER_SCHEDULE
+          ):
+            start_req = raiden_req.start_transfer_request
+            srcs = [
+                RaidenId(u.job_name, u.job_replica_id, u.data_name)
+                for u in start_req.src_units
+            ]
+            dsts = [
+                RaidenId(u.job_name, u.job_replica_id, u.data_name)
+                for u in start_req.dst_units
+            ]
+            dst_mem_type = RaidenMemoryType.DRAM
+            if (
+                start_req.dst_mem_type
+                == self._raiden_proto_module.MEMORY_TYPE_HBM
+            ):
+              dst_mem_type = RaidenMemoryType.HBM
+
+            shard_push_schedules = {}
+            for src_unit in srcs:
+              src_replica_idx = int(src_unit.job_replica_id)
+              if src_replica_idx in start_req.shard_push_schedules:
+                schedule_proto = start_req.shard_push_schedules[src_replica_idx]
+                entries = []
+                for e in schedule_proto.entries:
+                  entries.append((
+                      e.dst_peer,
+                      e.dst_shard_idx,
+                      e.dst_offset_bytes,
+                      e.src_offset_bytes,
+                      e.size_bytes,
+                      e.src_block_id,
+                      e.dst_block_id,
+                      e.src_stride_bytes,
+                      e.dst_stride_bytes,
+                      e.count,
+                  ))
+                if entries:
+                  shard_push_schedules[src_unit] = {0: entries}
+
+            future = self._controller.start_transfer(
+                src_units=srcs,
+                dst_units=dsts,
+                req_id=start_req.req_id if start_req.req_id else None,
+                dst_mem_type=dst_mem_type,
+                use_block_chunks=start_req.use_block_chunks,
+                src_controller_address=None,
+                dst_controller_address=None,
+                uuid=start_req.uuid if start_req.uuid > 0 else None,
+                is_sender=start_req.is_sender,
+                expected_block_count=start_req.expected_block_count,
+                shard_push_schedules=shard_push_schedules,
+            )
+            loop.run_until_complete(future.wait())
+            raiden_resp.success = True
+          elif (
+              raiden_req.command
+              == self._raiden_proto_module.ControlRequest.COMMAND_SHUTDOWN
+          ):
+            if hasattr(self._controller.worker_rpc_client, "shutdown_workers"):
+              loop.run_until_complete(
+                  self._controller.worker_rpc_client.shutdown_workers()
+              )
+            self.stop()
+            raiden_resp.success = True
+        except Exception as e:
+          raiden_resp.message = str(e)
+        resp_bytes = raiden_resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
     except Exception:  # pylint: disable=broad-except
       pass
 
@@ -1014,17 +1569,19 @@ class RaidenControllerClientFacade:
       controller_address: str,
       name_resolver: Optional[NameResolver] = None,
       proto_module: Optional[Any] = None,
+      raiden_proto_module: Optional[Any] = None,
   ):
     """Accepts Controller server coordinate 'ip:port'."""
     self._address = controller_address
     self._name_resolver = name_resolver
-    self._proto_module = proto_module or raiden_service_pb2
+    self._proto_module = proto_module or controller_service_pb2
+    self._raiden_proto_module = raiden_proto_module or raiden_service_pb2
 
   def _raiden_id_to_proto(
       self,
       unit: RaidenId,
   ) -> Any:
-    return self._proto_module.RaidenIdProto(
+    return self._raiden_proto_module.RaidenIdProto(
         job_name=unit.job_name,
         job_replica_id=unit.job_replica_id,
         data_name=unit.data_name,
@@ -1055,7 +1612,41 @@ class RaidenControllerClientFacade:
           raise RuntimeError("Connection closed while reading response data")
         resp_bytes += chunk
 
-      resp = self._proto_module.ControlResponse()
+      resp = self._proto_module.ControllerResponse()
+      resp.ParseFromString(resp_bytes)
+      if not resp.success:
+        raise RuntimeError(
+            f"Remote Controller Server execution failed: {resp.message}"
+        )
+      return True
+    finally:
+      sock.close()
+
+  def _send_raiden_protobuf_rpc(self, req: Any) -> bool:
+    sock = connect_socket(
+        self._address, timeout=300.0, resolver=self._name_resolver
+    )
+
+    try:
+      payload = req.SerializeToString()
+      sock.sendall(len(payload).to_bytes(4, "big") + payload)
+
+      resp_len_bytes = b""
+      while len(resp_len_bytes) < 4:
+        chunk = sock.recv(4 - len(resp_len_bytes))
+        if not chunk:
+          raise RuntimeError("Connection closed while reading response length")
+        resp_len_bytes += chunk
+      resp_len = int.from_bytes(resp_len_bytes, "big")
+
+      resp_bytes = b""
+      while len(resp_bytes) < resp_len:
+        chunk = sock.recv(resp_len - len(resp_bytes))
+        if not chunk:
+          raise RuntimeError("Connection closed while reading response data")
+        resp_bytes += chunk
+
+      resp = self._raiden_proto_module.ControlResponse()
       resp.ParseFromString(resp_bytes)
       if not resp.success:
         raise RuntimeError(
@@ -1070,12 +1661,9 @@ class RaidenControllerClientFacade:
       unit: RaidenId,
       shards: list[str],
       control_plane_rpc_address: Optional[str] = None,
-      shard_nd_slices: Optional[
-          Union[
-              list[list[tuple[int, int]]],
-              list[Any],
-          ]
-      ] = None,
+      mesh_shape: Optional[typing.Sequence[int]] = None,
+      layout: Optional[typing.Sequence[int]] = None,
+      global_shape: Optional[typing.Sequence[int]] = None,
       itemsize: Optional[int] = None,
   ) -> None:
     """Sends remote RPC to register a physical worker entity with the central RaidenControllerServer.
@@ -1085,60 +1673,181 @@ class RaidenControllerClientFacade:
       shards: list of physical Data TCP addresses (e.g. 'IP:Port').
       control_plane_rpc_address: Optional worker Control-Plane RPC servicer
         endpoint coordinate.
-      shard_nd_slices: Optional bounding boxes for each shard.
+      mesh_shape: Optional logical mesh shape.
+      layout: Optional minor_to_major mapping layout.
+      global_shape: Optional global array shape.
       itemsize: Optional item size in bytes.
     """
-    if shard_nd_slices is not None and itemsize is None:
-      raise ValueError(
-          "itemsize must not be None if shard_nd_slices is provided."
-      )
-    reg_req = self._proto_module.RegisterWorkUnitRequest(
+    reg_req = self._raiden_proto_module.RegisterWorkUnitRequest(
         unit=self._raiden_id_to_proto(unit),
         shards=shards,
         control_plane_rpc_address=(
             control_plane_rpc_address if control_plane_rpc_address else ""
         ),
     )
-    if shard_nd_slices:
-      for nd_slice in shard_nd_slices:
-        if isinstance(nd_slice, self._proto_module.NDSliceProto):
-          reg_req.shard_nd_slices.add().CopyFrom(nd_slice)
-        else:
-          slice_proto = reg_req.shard_nd_slices.add()
-          for s, e in nd_slice:
-            dim_proto = slice_proto.dimensions.add()
-            dim_proto.start = s
-            dim_proto.end = e
+    if mesh_shape:
+      reg_req.mesh_shape.extend(mesh_shape)
+    if layout:
+      reg_req.layout.extend(layout)
+    if global_shape:
+      reg_req.global_shape.extend(global_shape)
     if itemsize:
       reg_req.itemsize = itemsize
 
-    req = self._proto_module.ControlRequest(
-        command=self._proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT,
+    req = self._raiden_proto_module.ControlRequest(
+        command=self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT,
         register_work_unit_request=reg_req,
     )
-    self._send_protobuf_rpc(req)
+    self._send_raiden_protobuf_rpc(req)
 
-  def start_transfer(
+  def coordinate_transfer(
       self,
       src_units: list[RaidenId],
       dst_units: list[RaidenId],
       req_id: Optional[str] = None,
       use_block_chunks: bool = False,
+      is_sender: bool = True,
+      expected_block_count: int = 0,
+      uuid: int = 0,
+      dst_controller_address: Optional[str] = None,
+      src_controller_address: Optional[str] = None,
+      shard_push_schedules: Optional[dict] = None,
+      dst_mem_type: RaidenMemoryType = RaidenMemoryType.DRAM,
   ) -> bool:
-    """Sends remote RPC to start global least-loaded transfer and blocks until fully complete."""
-    req = self._proto_module.ControlRequest(
-        command=self._proto_module.ControlRequest.COMMAND_START_TRANSFER,
-        start_transfer_request=self._proto_module.StartTransferRequest(
-            src_units=[self._raiden_id_to_proto(u) for u in src_units],
-            dst_units=[self._raiden_id_to_proto(u) for u in dst_units],
-            use_block_chunks=use_block_chunks,
-        ),
+    """Sends remote RPC to coordinate global least-loaded transfer and blocks until fully complete."""
+    coord_req = self._proto_module.CoordinateTransferRequest(
+        src_units=[self._raiden_id_to_proto(u) for u in src_units],
+        dst_units=[self._raiden_id_to_proto(u) for u in dst_units],
+        use_block_chunks=use_block_chunks,
+        is_sender=is_sender,
+        expected_block_count=expected_block_count,
+        uuid=uuid,
+        req_id=req_id if req_id else "",
+        dst_controller_address=dst_controller_address
+        if dst_controller_address
+        else "",
+        src_controller_address=src_controller_address
+        if src_controller_address
+        else "",
+        dst_mem_type=int(dst_mem_type),
+    )
+
+    req = self._proto_module.ControllerRequest(
+        command=self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER,
+        coordinate_transfer_request=coord_req,
     )
     return self._send_protobuf_rpc(req)
 
+  def register_transfer_schedule(
+      self,
+      src_units: list[RaidenId],
+      dst_units: list[RaidenId],
+      req_id: Optional[str] = None,
+      use_block_chunks: bool = False,
+      is_sender: bool = False,
+      expected_block_count: int = 0,
+      uuid: int = 0,
+      dst_controller_address: Optional[str] = None,
+      src_controller_address: Optional[str] = None,
+      shard_push_schedules: Optional[dict] = None,
+      dst_mem_type: RaidenMemoryType = RaidenMemoryType.DRAM,
+  ) -> bool:
+    """Inter-controller RPC to register computed push schedules and prepare receivers."""
+    start_req = self._raiden_proto_module.StartTransferRequest(
+        src_units=[self._raiden_id_to_proto(u) for u in src_units],
+        dst_units=[self._raiden_id_to_proto(u) for u in dst_units],
+        use_block_chunks=use_block_chunks,
+        is_sender=is_sender,
+        expected_block_count=expected_block_count,
+        uuid=uuid,
+        req_id=req_id if req_id else "",
+        dst_mem_type=int(dst_mem_type),
+    )
+
+    if shard_push_schedules:
+      for src_unit, push_schedules in shard_push_schedules.items():
+        src_replica_idx = int(src_unit.job_replica_id)
+        schedule = push_schedules.get(0)
+        if schedule:
+          schedule_proto = self._raiden_proto_module.ShardPushScheduleProto()
+          for (
+              dst_peer,
+              dst_shard_idx,
+              dst_offset,
+              src_offset,
+              size,
+              src_block_id,
+              dst_block_id,
+              src_stride,
+              dst_stride,
+              count,
+          ) in schedule:
+            entry_proto = schedule_proto.entries.add()
+            entry_proto.dst_peer = dst_peer
+            entry_proto.dst_shard_idx = dst_shard_idx
+            entry_proto.dst_offset_bytes = dst_offset
+            entry_proto.src_offset_bytes = src_offset
+            entry_proto.size_bytes = size
+            entry_proto.src_block_id = src_block_id
+            entry_proto.dst_block_id = dst_block_id
+            entry_proto.src_stride_bytes = src_stride
+            entry_proto.dst_stride_bytes = dst_stride
+            entry_proto.count = count
+          if len(schedule_proto.entries) > 0:
+            start_req.shard_push_schedules[src_replica_idx].CopyFrom(
+                schedule_proto
+            )
+
+    req = self._raiden_proto_module.ControlRequest(
+        command=self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_TRANSFER_SCHEDULE,
+        start_transfer_request=start_req,
+    )
+    return self._send_raiden_protobuf_rpc(req)
+
+  def start_transfer(self, *args, **kwargs) -> bool:
+    """Alias for coordinate_transfer for backward compatibility."""
+    return self.coordinate_transfer(*args, **kwargs)
+
   def shutdown(self) -> bool:
     """Sends remote RPC to trigger global cluster shutdown across all cooperating jobs."""
-    req = self._proto_module.ControlRequest(
-        command=self._proto_module.ControlRequest.COMMAND_SHUTDOWN
+    req = self._raiden_proto_module.ControlRequest(
+        command=self._raiden_proto_module.ControlRequest.COMMAND_SHUTDOWN
     )
-    return self._send_protobuf_rpc(req)
+    return self._send_raiden_protobuf_rpc(req)
+
+  def get_metadata(self) -> list[Any]:
+    """Queries the controller for all registered work units' metadata."""
+    sock = connect_socket(
+        self._address, timeout=300.0, resolver=self._name_resolver
+    )
+    try:
+      req = self._raiden_proto_module.ControlRequest(
+          command=self._raiden_proto_module.ControlRequest.COMMAND_GET_METADATA
+      )
+      payload = req.SerializeToString()
+      sock.sendall(len(payload).to_bytes(4, "big") + payload)
+
+      resp_len_bytes = b""
+      while len(resp_len_bytes) < 4:
+        chunk = sock.recv(4 - len(resp_len_bytes))
+        if not chunk:
+          raise RuntimeError("Connection closed while reading response length")
+        resp_len_bytes += chunk
+      resp_len = int.from_bytes(resp_len_bytes, "big")
+
+      resp_bytes = b""
+      while len(resp_bytes) < resp_len:
+        chunk = sock.recv(resp_len - len(resp_bytes))
+        if not chunk:
+          raise RuntimeError("Connection closed while reading response data")
+        resp_bytes += chunk
+
+      resp = self._raiden_proto_module.ControlResponse()
+      resp.ParseFromString(resp_bytes)
+      if not resp.success:
+        raise RuntimeError(
+            f"Remote Controller Server execution failed: {resp.message}"
+        )
+      return list(resp.get_metadata_response.metadata)
+    finally:
+      sock.close()

@@ -89,7 +89,7 @@ KVCacheListener::~KVCacheListener() {
       sockaddr_in6 serv_addr{};
       serv_addr.sin6_family = AF_INET6;
       serv_addr.sin6_port = htons(listener_port_);
-      serv_addr.sin6_addr = in6addr_loopback;
+      inet_pton(AF_INET6, "::1", &serv_addr.sin6_addr);
       if (connect(sock, reinterpret_cast<sockaddr*>(&serv_addr),
                   sizeof(serv_addr)) == 0) {
         ControlRequest req;
@@ -177,14 +177,16 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
                      << status;
         }
       } else {
-        LOG(INFO) << "C++ KVCacheListener received START_TRANSFER (Receiver), registering plan";
+        LOG(INFO) << "C++ KVCacheListener received START_TRANSFER (Receiver), "
+                     "registering expected buffers for uuid "
+                  << start_req.uuid()
+                  << ", expected blocks: " << start_req.expected_block_count();
         absl::Status status = engine_->RegisterActivePlan(
             start_req.uuid(), start_req, /*is_sender=*/false);
         if (!status.ok()) {
           resp.set_success(false);
           resp.set_message(std::string(status.message()));
-          LOG(ERROR) << "RegisterActivePlan native execution failed: "
-                     << status;
+          LOG(ERROR) << "RegisterRecv native execution failed: " << status;
         }
       }
     } else {

@@ -217,6 +217,12 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
       bool is_sender);
 
+  virtual absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
+                                    int64_t expected_block_count) {
+    return absl::UnimplementedError(
+        "RegisterRecv not implemented in base class");
+  }
+
   std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
       int64_t sender_node_id = -1, absl::string_view peer = "") override;

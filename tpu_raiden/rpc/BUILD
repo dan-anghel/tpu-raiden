@@ -44,6 +44,18 @@ py_proto_library(
     deps = [":raiden_service_proto"],
 )
 
+proto_library(
+    name = "controller_service_proto",
+    srcs = ["controller_service.proto"],
+    deps = [":raiden_service_proto"],
+)
+
+py_proto_library(
+    name = "controller_service_py_pb2",
+    visibility = ["//visibility:public"],
+    deps = [":controller_service_proto"],
+)
+
 cc_proto_library(
     name = "coordination_cc_proto",
     deps = [":coordination_proto"],
@@ -80,7 +92,9 @@ py_library(
     name = "raiden_controller",
     srcs = ["raiden_controller.py"],
     deps = [
+        ":controller_service_py_pb2",
         ":raiden_service_py_pb2",
+        "//tpu_raiden/frameworks/jax:resharding_planner",
     ],
 )
 

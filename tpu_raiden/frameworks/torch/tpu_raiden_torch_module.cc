@@ -129,6 +129,18 @@ NB_MODULE(_tpu_raiden_torch, m) {
            nb::arg("unsafe_skip_buffer_lock") = true,
            nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none())
       .def(
+          "RegisterRecv",
+          [](KVCacheManager& self, uint64_t uuid, const std::string& req_id,
+             int expected_block_count) {
+            absl::Status status =
+                self.RegisterRecv(uuid, req_id, expected_block_count);
+            if (!status.ok()) {
+              throw std::runtime_error("KVCacheManager RegisterRecv failed: " +
+                                       std::string(status.message()));
+            }
+          },
+          nb::arg("uuid"), nb::arg("req_id"), nb::arg("expected_block_count"))
+      .def(
           "H2d",
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
@@ -235,6 +247,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
            })
       .def_prop_ro("listener_port", &KVCacheManager::listener_port)
       .def_prop_ro("is_listener_active", &KVCacheManager::is_listener_active)
+      .def_prop_ro("transfer_address", &KVCacheManager::transfer_address)
+      .def_prop_ro("listener_address", &KVCacheManager::listener_address)
 
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("block_ids"))

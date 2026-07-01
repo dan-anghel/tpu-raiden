@@ -211,6 +211,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
                                   const rpc::StartTransferRequest& request,
                                   bool is_sender) override;
 
+  absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
+                            int64_t expected_block_count) override;
+
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 

@@ -119,6 +119,36 @@ class KVCacheManager:
     """Returns the active data port."""
     return self._impl.local_port
 
+  @property
+  def transfer_address(self) -> str:
+    """Returns the formatted data transfer endpoint string (host:port)."""
+    return self._impl.transfer_address
+
+  @property
+  def listener_address(self) -> str:
+    """Returns the formatted control listener endpoint string (host:port)."""
+    return self._impl.listener_address
+
+  def register_recv(
+      self, uuid: int, req_id: str, expected_block_count: int
+  ) -> None:
+    """[EXPERIMENTAL] Registers expected incoming blocks for decentralized push resharding.
+
+    This allocates staging slots in the C++ receiver engine and sets the
+    synchronization barrier for the expected physical block-pushes. The
+    engine will automatically trigger Host-to-Device (H2D) copy to TPU HBM
+    once this count is reached.
+
+    This API is experimental and subject to change.
+
+    Args:
+      uuid: Unique identifier for the transfer transaction.
+      req_id: Request ID associated with the transfer.
+      expected_block_count: The total number of physical block-pushes expected
+        from all contributing source ranks.
+    """
+    self._impl.RegisterRecv(uuid, req_id, expected_block_count)
+
   def register_read(
       self, req_id: str, uuid: int, block_ids: List[int]
   ) -> bool:
@@ -238,3 +268,13 @@ class KVCacheManager:
     dst_offsets = dst_offsets or []
     sizes = sizes or []
     return self._impl.D2h(src_offsets, dst_offsets, sizes)
+
+  @property
+  def transfer_address(self) -> str:
+    """Returns the active data IP:port address."""
+    return self._impl.transfer_address
+
+  @property
+  def listener_address(self) -> str:
+    """Returns the active control plane IP:port address."""
+    return self._impl.listener_address

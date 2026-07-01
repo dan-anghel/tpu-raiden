@@ -63,6 +63,9 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   std::optional<int> listener_port() const;
   bool is_listener_active() const;
 
+  std::string transfer_address() const;
+  std::string listener_address() const;
+
  private:
   // Buffers unpacked from a 2D tensor list, together with the owning
   // DeviceBufferRefs that must outlive their use (see UnpackTorchTensor).

@@ -49,6 +49,8 @@ namespace transport {
 
 namespace {
 
+constexpr uint8_t kUseBlockChunksFlag = 0x80;
+
 std::string GetLocalAddr(int fd) {
   struct sockaddr_storage addr;
   socklen_t addr_len = sizeof(addr);
@@ -223,7 +225,8 @@ absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
 }
 
 absl::StatusOr<MajorOrder> ParseMajorOrder(uint8_t value) {
-  switch (value) {
+  uint8_t order_val = value & ~kUseBlockChunksFlag;
+  switch (order_val) {
     case static_cast<uint8_t>(MajorOrder::kLayerMajor):
       return MajorOrder::kLayerMajor;
     case static_cast<uint8_t>(MajorOrder::kBlockMajor):
@@ -361,27 +364,33 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
       target_layers = {static_cast<int>(header.local_id)};
     }
 
+    bool use_chunks = (header.flags & kUseBlockChunksFlag) != 0;
+
     RETURN_IF_ERROR(ForEachPayload(
         major_order, target_layers, block_delegate_->num_shards(),
         header.count_or_size,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
-          if (block_delegate_->use_block_chunks(header.uuid)) {
-            std::string local_addr = GetLocalAddr(client_fd);
+          if (use_chunks) {
+            uint32_t sender_size = 0;
+            RETURN_IF_ERROR(
+                ReadExact(client_fd, &sender_size, sizeof(sender_size)));
+
             std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
-                l, sh, dst_id, header.uuid, header.remote_id, local_addr);
+                l, sh, dst_id, header.uuid,
+                static_cast<int64_t>(header.remote_id));
+            if (chunks.empty()) {
+              return absl::NotFoundError(
+                  absl::StrCat("No transfer chunks found for block ", dst_id,
+                               " and uuid ", header.uuid));
+            }
             RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
 
             uint32_t expected_size = 0;
             for (const auto& chunk : chunks) {
               expected_size += chunk.size;
             }
-
-            uint32_t sender_size = 0;
-            RETURN_IF_ERROR(
-                ReadExact(client_fd, &sender_size, sizeof(sender_size)));
-
             if (sender_size != expected_size) {
               return absl::InternalError(absl::StrCat(
                   "Block transfer size mismatch! Sender offered: ", sender_size,
@@ -457,27 +466,33 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
       target_layers = {static_cast<int>(header.local_id)};
     }
 
+    bool use_chunks = (header.flags & kUseBlockChunksFlag) != 0;
+
     RETURN_IF_ERROR(ForEachPayload(
         major_order, target_layers, block_delegate_->num_shards(),
         header.count_or_size,
         [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
-          if (block_delegate_->use_block_chunks(header.uuid)) {
-            std::string local_addr = GetLocalAddr(client_fd);
+          if (use_chunks) {
+            uint32_t sender_size = 0;
+            RETURN_IF_ERROR(
+                ReadExact(client_fd, &sender_size, sizeof(sender_size)));
+
             std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
-                l, sh, dst_id, header.uuid, header.remote_id, local_addr);
+                l, sh, dst_id, header.uuid,
+                static_cast<int64_t>(header.remote_id));
+            if (chunks.empty()) {
+              return absl::NotFoundError(
+                  absl::StrCat("No transfer chunks found for block ", dst_id,
+                               " and uuid ", header.uuid));
+            }
             RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
 
             uint32_t expected_size = 0;
             for (const auto& chunk : chunks) {
               expected_size += chunk.size;
             }
-
-            uint32_t sender_size = 0;
-            RETURN_IF_ERROR(
-                ReadExact(client_fd, &sender_size, sizeof(sender_size)));
-
             if (sender_size != expected_size) {
               return absl::InternalError(absl::StrCat(
                   "Block transfer size mismatch! Sender offered: ", sender_size,
@@ -862,7 +877,9 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
 
   PacketHeader header = {};
   header.op = dst_block_ids.empty() ? 1 : 6;
-  header.flags = static_cast<uint8_t>(major_order);
+  bool use_chunks = block_delegate_->use_block_chunks(uuid);
+  header.flags = static_cast<uint8_t>(major_order) |
+                 (use_chunks ? kUseBlockChunksFlag : 0);
   header.buffer_id = 0;
   header.remote_id = static_cast<uint32_t>(block_delegate_->node_id());
   header.local_id =
@@ -927,9 +944,14 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
         const int src_id = src_block_ids[block_offset + k];
 
-        if (block_delegate_->use_block_chunks(uuid)) {
+        if (use_chunks) {
           std::vector<BlockChunk> chunks =
               block_delegate_->GetBlockChunks(l, sh, src_id, uuid, -1, peer);
+          if (chunks.empty()) {
+            return absl::NotFoundError(
+                absl::StrCat("No transfer chunks found for block ", src_id,
+                             " and uuid ", uuid));
+          }
           RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
           RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
 
@@ -939,7 +961,6 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           }
 
           RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
-
           return WriteVExact(fd, chunks);
         } else {
           size_t bytes_per_block = block_delegate_->bytes_per_block();
@@ -1105,6 +1126,11 @@ void BlockTransport::H2hReadWorker(
           if (block_delegate_->use_block_chunks(uuid)) {
             std::vector<BlockChunk> chunks =
                 block_delegate_->GetBlockChunks(l, sh, dst_id, uuid);
+            if (chunks.empty()) {
+              return absl::NotFoundError(
+                  absl::StrCat("No transfer chunks found for block ", dst_id,
+                               " and uuid ", uuid));
+            }
             RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
 
             if (!explicit_dst_ptrs.empty()) {

@@ -41,9 +41,11 @@ enum class MajorOrder : uint8_t {
 using BlockReceivedCallback = std::function<absl::Status(
     size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
 
-// Represents a contiguous span of memory.
+// Represents a contiguous span of memory within a block transport operation.
 struct BlockChunk {
+  // Pointer to the local host memory address of this chunk.
   uint8_t* ptr;
+  // Length of this memory chunk in bytes.
   size_t size;
 };
 

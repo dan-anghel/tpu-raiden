@@ -21,6 +21,8 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/utils.h"
@@ -41,6 +43,13 @@ std::vector<std::vector<at::Tensor>> SingleShardLayers(
     layers.push_back({kv_cache});
   }
   return layers;
+}
+
+std::string FormatAddressWithPort(absl::string_view ip, int port) {
+  if (absl::StrContains(ip, ':')) {
+    return absl::StrCat("[", ip, "]:", port);
+  }
+  return absl::StrCat(ip, ":", port);
 }
 
 }  // namespace
@@ -121,6 +130,18 @@ bool KVCacheManager::is_listener_active() const {
     return listener_->is_active();
   }
   return false;
+}
+
+std::string KVCacheManager::transfer_address() const {
+  auto port = local_port();
+  if (!port.has_value()) return "";
+  return FormatAddressWithPort(local_ip(), *port);
+}
+
+std::string KVCacheManager::listener_address() const {
+  auto port = listener_port();
+  if (!port.has_value()) return "";
+  return FormatAddressWithPort(local_ip(), *port);
 }
 
 }  // namespace torch
