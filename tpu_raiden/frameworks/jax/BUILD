@@ -170,7 +170,7 @@ cc_library(
         "@xla//xla/stream_executor:platform_manager",
         "@xla//xla/stream_executor:stream",
         "@xla//xla/stream_executor:stream_executor_h",
-        "@xla//xla/stream_executor/tpu:tpu_executor",
+        "@xla//xla/tpu:tpu_library_init_fns",
     ],
     alwayslink = 1,
 )
