@@ -1280,9 +1280,20 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
   TF_RETURN_IF_ERROR(
       RegisterActivePlan(request.uuid(), request, /*is_sender=*/true));
 
+  int numa = assigned_numa_node().value_or(-1);
+  for (size_t l = 0; l < num_layers_; ++l) {
+    VLOG(1) << "StartPushInternal (D2H start) layer " << l
+            << ": uuid=" << request.uuid() << ", numa=" << numa;
+  }
+
   // 2. D2H to copy from device to host.
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
   TF_RETURN_IF_ERROR(d2h_future.Await());
+
+  for (size_t l = 0; l < num_layers_; ++l) {
+    VLOG(1) << "StartPushInternal (H2H start layer " << l
+            << "): uuid=" << request.uuid() << ", numa=" << numa;
+  }
 
   // 3. Group entries by dst_peer and collect unique block IDs
   std::map<std::string, std::vector<std::pair<int, int>>> peer_transfers;
@@ -1319,6 +1330,11 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
                       transport::MajorOrder::kLayerMajor, request.uuid()));
   }
 
+  for (size_t l = 0; l < num_layers_; ++l) {
+    VLOG(1) << "StartPushInternal (H2H complete layer " << l
+            << "): uuid=" << request.uuid() << ", numa=" << numa;
+  }
+
   return absl::OkStatus();
 }
 
@@ -1332,7 +1348,7 @@ absl::Status KVCacheManagerBase::RegisterActivePlan(
     return absl::AlreadyExistsError(
         absl::StrCat("Plan with UUID ", uuid, " is already registered!"));
   }
-  LOG(INFO) << "RegisterActivePlan: Registered plan for UUID " << uuid
+  VLOG(1) << "RegisterActivePlan: Registered plan for UUID " << uuid
             << ", is_sender: " << is_sender << ", shard_push_schedules size: "
             << request.shard_push_schedules().size();
   return absl::OkStatus();
