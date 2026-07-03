@@ -28,19 +28,20 @@ namespace torch {
 WeightSynchronizer::WeightSynchronizer(
     const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, int parallelism,
-    std::optional<std::string> bind_ip)
+    std::optional<int> listener_port, std::optional<std::string> bind_ip)
     : WeightSynchronizer(UnpackTorchTensors(device_tensors), local_port,
-                         parallelism, bind_ip) {}
+                         parallelism, listener_port, bind_ip) {}
 
 WeightSynchronizer::WeightSynchronizer(UnpackedTensors unpacked,
                                        std::optional<int> local_port,
                                        int parallelism,
+                                       std::optional<int> listener_port,
                                        std::optional<std::string> bind_ip)
-    : weight_sync::WeightSynchronizerBase(
-          std::move(unpacked.buffers), local_port,
-          /*external_host_ptrs=*/std::nullopt,
-          /*unsafe_skip_buffer_lock=*/true, parallelism,
-          /*listener_port=*/std::nullopt, bind_ip),
+    : weight_sync::WeightSynchronizerBase(std::move(unpacked.buffers),
+                                          local_port,
+                                          /*external_host_ptrs=*/std::nullopt,
+                                          /*unsafe_skip_buffer_lock=*/true,
+                                          parallelism, listener_port, bind_ip),
       buffer_refs_(std::move(unpacked.refs)) {}
 
 WeightSynchronizer::~WeightSynchronizer() = default;

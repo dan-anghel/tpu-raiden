@@ -32,6 +32,7 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
   WeightSynchronizer(const std::vector<std::vector<at::Tensor>>& device_tensors,
                      std::optional<int> local_port = std::nullopt,
                      int parallelism = 1,
+                     std::optional<int> listener_port = std::nullopt,
                      std::optional<std::string> bind_ip = std::nullopt);
 
   ~WeightSynchronizer() override;
@@ -40,7 +41,7 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
   // Delegated-to ctor: moves the keep-alive refs into buffer_refs_ so the
   // materialized (possibly view) device buffers survive for our lifetime.
   WeightSynchronizer(UnpackedTensors unpacked, std::optional<int> local_port,
-                     int parallelism,
+                     int parallelism, std::optional<int> listener_port,
                      std::optional<std::string> bind_ip);
 
   std::vector<torch_tpu::DeviceBufferRef> buffer_refs_;

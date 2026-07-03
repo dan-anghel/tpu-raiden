@@ -546,17 +546,27 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
     for (const auto& entry : schedule.entries()) {
       const std::string& dst_peer = entry.dst_peer();
       size_t dst_shard_idx = entry.dst_shard_idx();
-      size_t dst_offset = entry.dst_offset_bytes();
-      size_t src_offset = entry.src_offset_bytes();
+      size_t count = entry.count() > 0 ? entry.count() : 1;
+      size_t src_stride = entry.src_stride_bytes();
+      size_t dst_stride = entry.dst_stride_bytes();
+      size_t dst_offset =
+          entry.dst_offset_bytes() + entry.dst_block_id() * dst_stride;
+      size_t src_offset =
+          entry.src_offset_bytes() + entry.src_block_id() * src_stride;
       size_t size = entry.size_bytes();
 
-      if (src_offset + size > shard_host_size) {
-        return absl::InvalidArgumentError("Push range out of bounds");
-      }
+      for (size_t c = 0; c < count; ++c) {
+        size_t curr_src_offset = src_offset + c * src_stride;
+        size_t curr_dst_offset = dst_offset + c * dst_stride;
 
-      const uint8_t* data_ptr = base_host_ptr + src_offset;
-      TF_RETURN_IF_ERROR(PushWeightsChunk(dst_peer, dst_shard_idx, dst_offset,
-                                          data_ptr, size));
+        if (curr_src_offset + size > shard_host_size) {
+          return absl::InvalidArgumentError("Push range out of bounds");
+        }
+
+        const uint8_t* data_ptr = base_host_ptr + curr_src_offset;
+        TF_RETURN_IF_ERROR(PushWeightsChunk(dst_peer, dst_shard_idx,
+                                            curr_dst_offset, data_ptr, size));
+      }
     }
   }
   return absl::OkStatus();

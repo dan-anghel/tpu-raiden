@@ -299,9 +299,10 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
-                    std::optional<int>, int, std::optional<std::string>>(),
+                    std::optional<int>, int, std::optional<int>,
+                    std::optional<std::string>>(),
            nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
-           nb::arg("parallelism") = 1,
+           nb::arg("parallelism") = 1, nb::arg("listener_port") = nb::none(),
            nb::arg("bind_ip") = nb::none())
       .def(
           "PushWeights",
@@ -342,44 +343,20 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::call_guard<nb::gil_scoped_release>())
       .def(
-          "H2dChunk",
-          [](WeightSynchronizer& self, size_t shard_idx,
-             size_t host_offset_bytes, size_t device_offset_bytes,
-             size_t size_bytes) {
-            auto status_or_future = self.H2dChunk(
-                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes);
+          "H2d",
+          [](WeightSynchronizer& self) {
+            auto status_or_future = self.H2d();
             if (!status_or_future.ok()) {
               throw std::runtime_error(
-                  "WeightSynchronizer H2dChunk failed: " +
+                  "WeightSynchronizer H2D failed: " +
                   std::string(status_or_future.status().message()));
             }
             absl::Status status = status_or_future.value().Await();
             if (!status.ok()) {
-              throw std::runtime_error(
-                  "WeightSynchronizer H2dChunk copy failed: " +
-                  std::string(status.message()));
+              throw std::runtime_error("WeightSynchronizer H2D copy failed: " +
+                                       std::string(status.message()));
             }
           },
-          nb::arg("shard_idx"), nb::arg("host_offset_bytes"),
-          nb::arg("device_offset_bytes"), nb::arg("size_bytes"),
-          nb::call_guard<nb::gil_scoped_release>())
-      .def(
-          "PullWeightsChunk",
-          [](WeightSynchronizer& self, absl::string_view source,
-             size_t src_shard_idx, size_t src_offset_bytes,
-             size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
-            absl::Status s = self.PullWeightsChunk(
-                source, src_shard_idx, src_offset_bytes, dst_shard_idx,
-                dst_offset_bytes, size_bytes);
-            if (!s.ok()) {
-              throw std::runtime_error(
-                  "WeightSynchronizer PullWeightsChunk failed: " +
-                  std::string(s.message()));
-            }
-          },
-          nb::arg("source"), nb::arg("src_shard_idx"),
-          nb::arg("src_offset_bytes"), nb::arg("dst_shard_idx"),
-          nb::arg("dst_offset_bytes"), nb::arg("size_bytes"),
           nb::call_guard<nb::gil_scoped_release>())
       .def(
           "get_host_buffer",
@@ -395,6 +372,9 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("layer_idx") = 0, nb::arg("shard_idx") = 0)
       .def_prop_ro("local_port", &WeightSynchronizer::local_port)
+      .def_prop_ro("listener_port", &WeightSynchronizer::listener_port)
+      .def_prop_ro("is_listener_active",
+                   &WeightSynchronizer::is_listener_active)
       .def_prop_ro("num_layers", &WeightSynchronizer::num_layers)
       .def_prop_ro("num_shards", &WeightSynchronizer::num_shards)
       .def_prop_ro("slice_byte_size", &WeightSynchronizer::slice_byte_size);

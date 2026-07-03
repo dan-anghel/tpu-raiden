@@ -30,6 +30,7 @@ class WeightSynchronizer:
       device_tensors: List[List[torch.Tensor]],
       local_port: Optional[int] = None,
       parallelism: int = 1,
+      listener_port: Optional[int] = None,
       bind_ip: Optional[str] = None,
   ):
     """Instantiates the PyTorch Weight Synchronizer shims.
@@ -40,10 +41,11 @@ class WeightSynchronizer:
       local_port: Sockets listener port assigned for incoming pulls (inference
         mode).
       parallelism: Parallel TCP sockets workers count.
+      listener_port: RPC control listener port.
       bind_ip: Sockets server bind IP address.
     """
     self._impl = _weight_synchronizer.WeightSynchronizer(
-        device_tensors, local_port, parallelism, bind_ip
+        device_tensors, local_port, parallelism, listener_port, bind_ip
     )
 
   def push_weights(self, peers: List[str]) -> None:
@@ -58,52 +60,9 @@ class WeightSynchronizer:
     """Triggers asynchronous Device-to-Host (D2H) copy of current weights to Host buffer."""
     self._impl.D2h()
 
-  def pull_weights_chunk(
-      self,
-      source: str,
-      src_shard_idx: int,
-      src_offset_bytes: int,
-      dst_shard_idx: int,
-      dst_offset_bytes: int,
-      size_bytes: int,
-  ) -> None:
-    """Inference server pulling a specific byte range directly from a source worker peer.
-
-    Args:
-      source: "host:port" coordinate of the source peer.
-      src_shard_idx: Target source device shard index to read.
-      src_offset_bytes: Offset in bytes inside source shard staging buffer.
-      dst_shard_idx: Local destination device shard index to write.
-      dst_offset_bytes: Offset in bytes inside local destination staging buffer.
-      size_bytes: Number of bytes to transfer.
-    """
-    self._impl.PullWeightsChunk(
-        source,
-        src_shard_idx,
-        src_offset_bytes,
-        dst_shard_idx,
-        dst_offset_bytes,
-        size_bytes,
-    )
-
-  def h2d_chunk(
-      self,
-      shard_idx: int,
-      host_offset_bytes: int,
-      device_offset_bytes: int,
-      size_bytes: int,
-  ) -> None:
-    """Triggers asynchronous Host-to-Device (H2D) chunk copy directly to Device HBM.
-
-    Args:
-      shard_idx: Target shard index.
-      host_offset_bytes: Source offset in Host staging buffer.
-      device_offset_bytes: Destination offset in Device memory.
-      size_bytes: Number of bytes to copy.
-    """
-    self._impl.H2dChunk(
-        shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
-    )
+  def h2d(self) -> None:
+    """Triggers asynchronous Host-to-Device (H2D) copy of weights from Host buffer to Device."""
+    self._impl.H2d()
 
   def get_host_buffer(
       self, layer_idx: int = 0, shard_idx: int = 0
@@ -120,6 +79,16 @@ class WeightSynchronizer:
   def local_port(self) -> Optional[int]:
     """Returns assigned ephemeral listener port coordinates."""
     return self._impl.local_port
+
+  @property
+  def listener_port(self) -> Optional[int]:
+    """Returns assigned RPC listener port coordinate."""
+    return self._impl.listener_port
+
+  @property
+  def is_listener_active(self) -> bool:
+    """Returns whether the native C++ listener thread is actively running."""
+    return self._impl.is_listener_active
 
   @property
   def num_layers(self) -> int:
