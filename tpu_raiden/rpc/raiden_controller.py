@@ -385,10 +385,13 @@ class WorkerRpcClient:
             src_unit,
             push_schedules,
         ) in transfer_plan.shard_push_schedules.items():
-          src_replica_idx = int(src_unit.job_replica_id)
-          # We assume each source worker has only 1 shard (shard_idx = 0)
-          schedule = push_schedules.get(0)
-          if schedule:
+          num_src_shards = len(push_schedules)
+          for shard_idx, schedule in push_schedules.items():
+            key_idx = (
+                int(src_unit.job_replica_id)
+                if num_src_shards == 1
+                else shard_idx
+            )
             schedule_proto = self._proto_module.ShardPushScheduleProto()
             for (
                 dst_peer,
@@ -415,9 +418,7 @@ class WorkerRpcClient:
                 entry_proto.dst_stride_bytes = dst_stride
                 entry_proto.count = count
             if len(schedule_proto.entries) > 0:
-              start_req.shard_push_schedules[src_replica_idx].CopyFrom(
-                  schedule_proto
-              )
+              start_req.shard_push_schedules[key_idx].CopyFrom(schedule_proto)
       else:
         # Sender path: only send local schedule
         push_schedules = transfer_plan.shard_push_schedules.get(target_id)
@@ -467,14 +468,13 @@ class WorkerRpcClient:
 
   async def shutdown_workers(self) -> None:
     """Dispatches remote shutdown signaling payloads to all registered worker daemons."""
-    for _, addr in list(self._endpoints.items()):
-      try:
-        sock = connect_socket(addr, timeout=10.0, resolver=self._name_resolver)
-        payload = self._encode_shutdown()
-        sock.sendall(len(payload).to_bytes(4, "big") + payload)
-        sock.close()
-      except Exception:  # pylint: disable=broad-except
-        pass
+    payload = self._encode_shutdown()
+    unique_addrs = set(self._endpoints.values())
+    if unique_addrs:
+      await asyncio.gather(
+          *[self._send_rpc(addr, payload) for addr in unique_addrs],
+          return_exceptions=True,
+      )
 
   def _encode_shutdown(self) -> bytes:
     """Serializes domain-specific binary command for remote shutdown signaling."""
@@ -1065,108 +1065,122 @@ class RaidenController:
             if not itemsize:
               itemsize = 4  # default fallback
 
-            # Map src_unit to its specific shard index
-            try:
-              src_shard_idx = int(src_unit.job_replica_id)
-            except ValueError:
-              src_shard_idx = 0
+            src_shards = self._resolve_shards(src_unit)
+            unit_schedules = {}
 
-            if src_shard_idx >= len(src_slices):
-              logging.warning(
-                  "src_shard_idx %d out of range of src_slices (%d)",
-                  src_shard_idx,
-                  len(src_slices),
-              )
-              continue
-
-            src_slice_proto = src_slices[src_shard_idx]
-            src_slice = _proto_to_nd_slice(src_slice_proto)
-
-            # The worker daemon always expects its local schedule at index 0
-            local_shard_idx = 0
-            shard_entries = []
-
-            for dst_unit in dst_units:
-              d_slices = computed_slices.get(dst_unit)
-              if not d_slices:
-                continue
-
+            if len(src_shards) == 1:
               try:
-                dst_shard_idx = int(dst_unit.job_replica_id)
+                src_indices = [(0, int(src_unit.job_replica_id))]
               except ValueError:
-                dst_shard_idx = 0
+                src_indices = [(0, 0)]
+            else:
+              src_indices = [(i, i) for i in range(len(src_slices))]
 
-              if dst_shard_idx >= len(d_slices):
+            for local_src_idx, global_src_idx in src_indices:
+              if global_src_idx >= len(src_slices):
                 logging.warning(
-                    "dst_shard_idx %d out of range of d_slices (%d)",
-                    dst_shard_idx,
-                    len(d_slices),
+                    "global_src_idx %d out of range of src_slices (%d)",
+                    global_src_idx,
+                    len(src_slices),
                 )
                 continue
 
-              dst_slice_proto = d_slices[dst_shard_idx]
-              dst_slice = _proto_to_nd_slice(dst_slice_proto)
+              src_slice_proto = src_slices[global_src_idx]
+              src_slice = _proto_to_nd_slice(src_slice_proto)
+              shard_entries = []
 
-              # Resolve destination shards
-              dst_shards = []
-              for meta in dst_metadata:
-                meta_unit = RaidenId(
-                    meta.unit.job_name,
-                    meta.unit.job_replica_id,
-                    meta.unit.data_name,
-                )
-                if meta_unit == dst_unit:
-                  dst_shards = list(meta.shards)
-                  break
-              if not dst_shards:
-                dst_shards = ["127.0.0.1:8000"]  # fallback
+              for dst_unit in dst_units:
+                d_slices = computed_slices.get(dst_unit)
+                if not d_slices:
+                  continue
 
-              intersection = intersect_nd_slices(src_slice, dst_slice)
-              if intersection:
-                # Map to the correct destination peer (always index 0 for single-task worker)
-                dst_peer = dst_shards[0]
-                chunks = generate_strided_copy_chunks(
-                    src_slice, dst_slice, intersection, itemsize
-                )
-                src_block_bytes = (
-                    math.prod([e - s for s, e in src_slice[1:]]) * itemsize
-                    if len(src_slice) > 1
-                    else itemsize
-                )
-                dst_block_bytes = (
-                    math.prod([e - s for s, e in dst_slice[1:]]) * itemsize
-                    if len(dst_slice) > 1
-                    else itemsize
-                )
-                for (
-                    src_offset,
-                    dst_offset,
-                    size,
-                    src_stride,
-                    dst_stride,
-                    count,
-                ) in chunks:
-                  src_block_id = src_offset // src_block_bytes
-                  dst_block_id = dst_offset // dst_block_bytes
+                dst_shards = []
+                for meta in dst_metadata:
+                  meta_unit = RaidenId(
+                      meta.unit.job_name,
+                      meta.unit.job_replica_id,
+                      meta.unit.data_name,
+                  )
+                  if meta_unit == dst_unit:
+                    dst_shards = list(meta.shards)
+                    break
+                if not dst_shards:
+                  dst_shards = ["127.0.0.1:8000"]  # fallback
 
-                  # Make offsets block-relative
-                  src_block_offset = src_offset % src_block_bytes
-                  dst_block_offset = dst_offset % dst_block_bytes
+                if len(dst_shards) == 1:
+                  try:
+                    dst_indices = [(0, int(dst_unit.job_replica_id))]
+                  except ValueError:
+                    dst_indices = [(0, 0)]
+                else:
+                  dst_indices = [(j, j) for j in range(len(d_slices))]
 
-                  shard_entries.append((
-                      dst_peer,
-                      0,  # dst_shard_idx on receiver is always 0 (local)
-                      dst_block_offset,
-                      src_block_offset,
-                      size,
-                      src_block_id,
-                      dst_block_id,
-                      src_stride,
-                      dst_stride,
-                      count,
-                  ))
-            if shard_entries:
-              computed_schedules[src_unit] = {local_shard_idx: shard_entries}
+                for local_dst_idx, global_dst_idx in dst_indices:
+                  if global_dst_idx >= len(d_slices):
+                    logging.warning(
+                        "global_dst_idx %d out of range of d_slices (%d)",
+                        global_dst_idx,
+                        len(d_slices),
+                    )
+                    continue
+
+                  dst_slice_proto = d_slices[global_dst_idx]
+                  dst_slice = _proto_to_nd_slice(dst_slice_proto)
+
+                  dst_peer = (
+                      dst_shards[local_dst_idx]
+                      if local_dst_idx < len(dst_shards)
+                      else dst_shards[0]
+                  )
+
+                  intersection = intersect_nd_slices(src_slice, dst_slice)
+                  if intersection:
+                    chunks = generate_strided_copy_chunks(
+                        src_slice, dst_slice, intersection, itemsize
+                    )
+                    src_block_bytes = (
+                        math.prod([e - s for s, e in src_slice[1:]]) * itemsize
+                        if len(src_slice) > 1
+                        else itemsize
+                    )
+                    dst_block_bytes = (
+                        math.prod([e - s for s, e in dst_slice[1:]]) * itemsize
+                        if len(dst_slice) > 1
+                        else itemsize
+                    )
+                    for (
+                        src_offset,
+                        dst_offset,
+                        size,
+                        src_stride,
+                        dst_stride,
+                        count,
+                    ) in chunks:
+                      src_block_id = src_offset // src_block_bytes
+                      dst_block_id = dst_offset // dst_block_bytes
+
+                      # Make offsets block-relative
+                      src_block_offset = src_offset % src_block_bytes
+                      dst_block_offset = dst_offset % dst_block_bytes
+
+                      shard_entries.append((
+                          dst_peer,
+                          local_dst_idx,
+                          dst_block_offset,
+                          src_block_offset,
+                          size,
+                          src_block_id,
+                          dst_block_id,
+                          src_stride,
+                          dst_stride,
+                          count,
+                      ))
+
+              if shard_entries:
+                unit_schedules[local_src_idx] = shard_entries
+
+            if unit_schedules:
+              computed_schedules[src_unit] = unit_schedules
 
           # Build rpc_addresses for local source workers
           rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
@@ -1504,10 +1518,12 @@ class RaidenControllerServer:
               dst_mem_type = RaidenMemoryType.HBM
 
             shard_push_schedules = {}
-            for src_unit in srcs:
-              src_replica_idx = int(src_unit.job_replica_id)
-              if src_replica_idx in start_req.shard_push_schedules:
-                schedule_proto = start_req.shard_push_schedules[src_replica_idx]
+            if len(srcs) == 1 and len(start_req.shard_push_schedules) > 1:
+              unit_schedules = {}
+              for (
+                  key_idx,
+                  schedule_proto,
+              ) in start_req.shard_push_schedules.items():
                 entries = []
                 for e in schedule_proto.entries:
                   entries.append((
@@ -1523,7 +1539,32 @@ class RaidenControllerServer:
                       e.count,
                   ))
                 if entries:
-                  shard_push_schedules[src_unit] = {0: entries}
+                  unit_schedules[key_idx] = entries
+              if unit_schedules:
+                shard_push_schedules[srcs[0]] = unit_schedules
+            else:
+              for src_unit in srcs:
+                src_replica_idx = int(src_unit.job_replica_id)
+                if src_replica_idx in start_req.shard_push_schedules:
+                  schedule_proto = start_req.shard_push_schedules[
+                      src_replica_idx
+                  ]
+                  entries = []
+                  for e in schedule_proto.entries:
+                    entries.append((
+                        e.dst_peer,
+                        e.dst_shard_idx,
+                        e.dst_offset_bytes,
+                        e.src_offset_bytes,
+                        e.size_bytes,
+                        e.src_block_id,
+                        e.dst_block_id,
+                        e.src_stride_bytes,
+                        e.dst_stride_bytes,
+                        e.count,
+                    ))
+                  if entries:
+                    shard_push_schedules[src_unit] = {0: entries}
 
             future = self._controller.start_transfer(
                 src_units=srcs,
@@ -1766,9 +1807,11 @@ class RaidenControllerClientFacade:
 
     if shard_push_schedules:
       for src_unit, push_schedules in shard_push_schedules.items():
-        src_replica_idx = int(src_unit.job_replica_id)
-        schedule = push_schedules.get(0)
-        if schedule:
+        num_src_shards = len(push_schedules)
+        for shard_idx, schedule in push_schedules.items():
+          key_idx = (
+              int(src_unit.job_replica_id) if num_src_shards == 1 else shard_idx
+          )
           schedule_proto = self._raiden_proto_module.ShardPushScheduleProto()
           for (
               dst_peer,
@@ -1794,9 +1837,7 @@ class RaidenControllerClientFacade:
             entry_proto.dst_stride_bytes = dst_stride
             entry_proto.count = count
           if len(schedule_proto.entries) > 0:
-            start_req.shard_push_schedules[src_replica_idx].CopyFrom(
-                schedule_proto
-            )
+            start_req.shard_push_schedules[key_idx].CopyFrom(schedule_proto)
 
     req = self._raiden_proto_module.ControlRequest(
         command=self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_TRANSFER_SCHEDULE,

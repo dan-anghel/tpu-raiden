@@ -209,7 +209,42 @@ class RaidenControllerTest(absltest.TestCase):
         itemsize=4,
     )
 
+  def test_multi_shard_worker_resharding(self):
+    dummy_client = DummyWorkerRpcClient()
+    controller = raiden_controller.RaidenController(
+        port=10004, worker_rpc_client=dummy_client
+    )
+    src = raiden_controller.RaidenId("trainer", "0", "weights")
+    dst = raiden_controller.RaidenId("sampler", "1", "weights")
+
+    controller.register_work_unit(
+        src,
+        ["10.0.0.1:8000", "10.0.0.1:8001", "10.0.0.1:8002", "10.0.0.1:8003"],
+        mesh_shape=(2, 2),
+        layout=(1, 0),
+        global_shape=(128, 1024),
+        itemsize=4,
+    )
+    controller.register_work_unit(
+        dst,
+        ["10.0.0.2:8000", "10.0.0.2:8001", "10.0.0.2:8002", "10.0.0.2:8003"],
+        mesh_shape=(1, 4),
+        layout=(1, 0),
+        global_shape=(128, 1024),
+        itemsize=4,
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[dst],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+    plan = controller.get_plan("req_0")
+    self.assertIn(src, plan.shard_push_schedules)
+    schedules = plan.shard_push_schedules[src]
+    self.assertSetEqual(set(schedules.keys()), {0, 1, 2, 3})
+
 
 if __name__ == "__main__":
-
   absltest.main()
