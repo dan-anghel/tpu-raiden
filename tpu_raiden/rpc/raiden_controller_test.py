@@ -245,6 +245,88 @@ class RaidenControllerTest(absltest.TestCase):
     schedules = plan.shard_push_schedules[src]
     self.assertSetEqual(set(schedules.keys()), {0, 1, 2, 3})
 
+  def test_greedy_tree_broadcast(self):
+    recorded_calls = []
+
+    class MockBroadcastWorkerClient(raiden_controller.WorkerRpcClient):
+
+      def __init__(self):
+        super().__init__()
+        self.endpoints = {}
+
+      def get_worker_endpoints(self):
+        return self.endpoints
+
+      async def start_transfer(self, target_id, transfer_plan) -> None:
+        is_sender = transfer_plan.is_sender
+        recorded_calls.append((target_id, is_sender))
+
+    mock_client = MockBroadcastWorkerClient()
+    controller = raiden_controller.RaidenController(
+        port=10004, worker_rpc_client=mock_client
+    )
+    controller.broadcast_k = 2
+
+    src = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="weights"
+    )
+    target_0 = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="0", data_name="weights"
+    )
+    target_1 = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="1", data_name="weights"
+    )
+    target_2 = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="2", data_name="weights"
+    )
+
+    controller.register_work_unit(
+        src,
+        ["10.0.0.1:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.1:9000",
+    )
+    controller.register_work_unit(
+        target_0,
+        ["10.0.0.2:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.2:9000",
+    )
+    controller.register_work_unit(
+        target_1,
+        ["10.0.0.3:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.3:9000",
+    )
+    controller.register_work_unit(
+        target_2,
+        ["10.0.0.4:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.4:9000",
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[target_0, target_1, target_2],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    self.assertTrue(future.done())
+    self.assertGreater(len(recorded_calls), 0)
+
 
 if __name__ == "__main__":
   absltest.main()

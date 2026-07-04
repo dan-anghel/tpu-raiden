@@ -32,6 +32,7 @@ import dataclasses
 import enum
 import logging
 import math
+import os
 import random
 import socket
 import threading
@@ -666,6 +667,7 @@ class RaidenController:
       self, port: int, worker_rpc_client: Optional[WorkerRpcClient] = None
   ):
     self.port = port
+    self.broadcast_k = int(os.environ.get("RAIDEN_BROADCAST_K", "2"))
     self._active_transfers: dict[str, TransferPlan] = {}
     self._registered_shards: dict[RaidenId, list[str]] = {}
     self._registered_mesh_shapes: dict[RaidenId, list[int]] = {}
@@ -789,6 +791,141 @@ class RaidenController:
             reg_req.global_shape.extend(glob_shape)
           protos.append(reg_req)
     return protos
+
+  async def _execute_slice_broadcast(
+      self,
+      key: tuple,
+      targets: list[tuple],
+      final_plan: TransferPlan,
+      fanout_k: int,
+      req_id: str,
+      uuid: int,
+      dst_mem_type: int,
+      expected_block_count: int,
+      dst_controller_address: Optional[str],
+      src_controller_address: Optional[str],
+  ) -> None:
+    # key: (src_unit, src_block_id, src_block_offset, size, src_stride, count)
+    src_unit, src_block_id, src_block_offset, size, src_stride, count = key
+
+    available_sources = [src_unit]
+    node_slice_offsets = {
+        src_unit: (src_block_id, src_block_offset, src_stride)
+    }
+
+    pending_targets = list(targets)
+    active_pushes = {u: 0 for u in [src_unit] + [t[0] for t in targets]}
+    transfers_in_progress = {}
+
+    while pending_targets or transfers_in_progress:
+      # 1. Greedy assignment step
+      scheduled_any = False
+      for s in list(available_sources):
+        while active_pushes[s] < fanout_k and pending_targets:
+          t = pending_targets.pop(0)
+          dst_unit, dst_peer, dst_block_id, dst_block_offset, dst_stride = t
+
+          active_pushes[s] += 1
+          scheduled_any = True
+
+          s_block_id, s_block_offset, s_stride = node_slice_offsets[s]
+
+          entry = (
+              dst_peer,
+              0,
+              dst_block_offset,
+              s_block_offset,
+              size,
+              s_block_id,
+              dst_block_id,
+              s_stride,
+              dst_stride,
+              count,
+          )
+
+          sub_schedule = {s: {0: [entry]}}
+          sub_plan = TransferPlan(
+              src_units=[s],
+              dst_units=[dst_unit],
+              plan=None,
+              shard_push_schedules=sub_schedule,
+              worker_rpc_addresses=dict(final_plan.worker_rpc_addresses),
+              worker_data_addresses=dict(final_plan.worker_data_addresses),
+              uuid=uuid,
+              dst_mem_type=dst_mem_type,
+              use_block_chunks=True,
+              is_sender=True,
+              expected_block_count=expected_block_count,
+              req_id=req_id,
+          )
+
+          async def _run_single_transfer(s_node, d_node, plan):
+            if dst_controller_address:
+              dst_facade = RaidenControllerClientFacade(
+                  dst_controller_address,
+                  name_resolver=self.worker_rpc_client._name_resolver,
+              )
+              loop = asyncio.get_running_loop()
+              success = await loop.run_in_executor(
+                  None,
+                  dst_facade.register_transfer_schedule,
+                  [s_node],
+                  [d_node],
+                  req_id,
+                  True,
+                  False,
+                  expected_block_count,
+                  uuid,
+                  dst_controller_address,
+                  src_controller_address,
+                  plan.shard_push_schedules,
+                  dst_mem_type,
+              )
+              if not success:
+                raise RuntimeError(
+                    "Failed remote prepare in slice tree broadcast"
+                )
+            else:
+              await self.worker_rpc_client.start_transfer(d_node, plan)
+
+            await self.worker_rpc_client.start_transfer(s_node, plan)
+
+          task = asyncio.create_task(
+              _run_single_transfer(s, dst_unit, sub_plan)
+          )
+          transfers_in_progress[t] = (
+              s,
+              dst_unit,
+              dst_block_id,
+              dst_block_offset,
+              dst_stride,
+              task,
+          )
+
+      # 2. Wait step
+      if transfers_in_progress:
+        futures_to_targets = {
+            info[5]: t for t, info in transfers_in_progress.items()
+        }
+        done, _ = await asyncio.wait(
+            futures_to_targets.keys(), return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # 3. Promotion step
+        for fut in done:
+          t = futures_to_targets[fut]
+          s, dst_unit, dst_block_id, dst_block_offset, dst_stride, _ = (
+              transfers_in_progress.pop(t)
+          )
+          active_pushes[s] -= 1
+          available_sources.append(dst_unit)
+          node_slice_offsets[dst_unit] = (
+              dst_block_id,
+              dst_block_offset,
+              dst_stride,
+          )
+      elif not scheduled_any:
+        break
 
   def start_transfer(
       self,
@@ -1224,61 +1361,174 @@ class RaidenController:
           with self._lock:
             self._active_transfers[req_id] = final_plan
 
-          # 3.5 Prepare Receivers (Symmetric plan registration)
-          if dst_controller_address:
-            logging.info(
-                "Triggering preparation on remote destination controller %s",
-                dst_controller_address,
-            )
-            dst_facade = RaidenControllerClientFacade(
-                dst_controller_address,
-                name_resolver=self.worker_rpc_client._name_resolver,
-            )
-            loop = asyncio.get_running_loop()
-            success = await loop.run_in_executor(
-                None,
-                dst_facade.register_transfer_schedule,
-                src_units,
-                dst_units,
-                req_id,
-                use_block_chunks,
-                False,  # is_sender=False
-                expected_block_count,
-                uuid,
-                dst_controller_address,
-                src_controller_address,
-                computed_schedules,
-                dst_mem_type,
-            )
-            if not success:
-              raise RuntimeError(
-                  "Failed to prepare remote receivers via destination"
-                  " controller!"
-              )
-          else:
-            local_dst_units = [
-                u for u in dst_units if u in self._registered_shards
-            ]
-            if local_dst_units:
-              logging.info("Preparing local receivers: %s", local_dst_units)
-              await asyncio.gather(*[
-                  self.worker_rpc_client.start_transfer(unit, final_plan)
-                  for unit in local_dst_units
-              ])
+            # Group flat entries into slices for broadcast
+            groups = {}
+            for src_unit, schedules in computed_schedules.items():
+              for shard_idx, entries in schedules.items():
+                for entry in entries:
+                  (
+                      dst_peer,
+                      _,
+                      dst_block_offset,
+                      src_block_offset,
+                      size,
+                      src_block_id,
+                      dst_block_id,
+                      src_stride,
+                      dst_stride,
+                      count,
+                  ) = entry
+                  dst_unit = data_address_to_unit.get(dst_peer)
+                  if not dst_unit:
+                    continue
+                  key = (
+                      src_unit,
+                      src_block_id,
+                      src_block_offset,
+                      size,
+                      src_stride,
+                      count,
+                  )
+                  val = (
+                      dst_unit,
+                      dst_peer,
+                      dst_block_id,
+                      dst_block_offset,
+                      dst_stride,
+                  )
+                  groups.setdefault(key, []).append(val)
 
-          # 4. Trigger Push on Source Workers
-          local_src_units = [
-              u for u in final_plan.src_units if u in self._registered_shards
-          ]
-          print(
-              f"Triggering push on local source workers: {local_src_units}",
-              flush=True,
-          )
-          await asyncio.gather(*[
-              self.worker_rpc_client.start_transfer(unit, final_plan)
-              for unit in local_src_units
-          ])
-          print("Push complete on all local source workers.", flush=True)
+            # Partition slices into direct transfers and tree-broadcast
+            # transfers.
+            direct_schedules = {}
+            tree_broadcast_tasks = []
+
+            for key, targets in groups.items():
+              (
+                  src_unit,
+                  src_block_id,
+                  src_block_offset,
+                  size,
+                  src_stride,
+                  count,
+              ) = key
+              if len(targets) <= 1:
+                # Re-assemble entry for flat schedule
+                for (
+                    dst_unit,
+                    dst_peer,
+                    dst_block_id,
+                    dst_block_offset,
+                    dst_stride,
+                ) in targets:
+                  entry = (
+                      dst_peer,
+                      0,
+                      dst_block_offset,
+                      src_block_offset,
+                      size,
+                      src_block_id,
+                      dst_block_id,
+                      src_stride,
+                      dst_stride,
+                      count,
+                  )
+                  direct_schedules.setdefault(src_unit, {}).setdefault(
+                      0, []
+                  ).append(entry)
+              else:
+                # TODO(b/12345678): Optimize early stages with topology-aware
+                # branching based on IP/subnet closeness to minimize
+                # inter-switch DCN traffic.
+                task = self._execute_slice_broadcast(
+                    key=key,
+                    targets=targets,
+                    final_plan=final_plan,
+                    fanout_k=self.broadcast_k,
+                    req_id=req_id,
+                    uuid=uuid,
+                    dst_mem_type=dst_mem_type,
+                    expected_block_count=expected_block_count,
+                    dst_controller_address=dst_controller_address,
+                    src_controller_address=src_controller_address,
+                )
+                tree_broadcast_tasks.append(task)
+
+            # Execute direct schedules (traditional flat route) and tree
+            # broadcasts in parallel!
+            if direct_schedules:
+              direct_plan = TransferPlan(
+                  src_units=list(direct_schedules.keys()),
+                  dst_units=dst_units,
+                  plan=None,
+                  shard_push_schedules=direct_schedules,
+                  worker_rpc_addresses=dict(final_plan.worker_rpc_addresses),
+                  worker_data_addresses=dict(final_plan.worker_data_addresses),
+                  uuid=uuid,
+                  dst_mem_type=dst_mem_type,
+                  use_block_chunks=True,
+                  is_sender=True,
+                  expected_block_count=expected_block_count,
+                  req_id=req_id,
+              )
+
+              direct_dsts = []
+              for src, scheds in direct_schedules.items():
+                for sh, entries in scheds.items():
+                  for entry in entries:
+                    dst_peer = entry[0]
+                    d_node = data_address_to_unit.get(dst_peer)
+                    if d_node and d_node not in direct_dsts:
+                      direct_dsts.append(d_node)
+
+              if dst_controller_address:
+                dst_facade = RaidenControllerClientFacade(
+                    dst_controller_address,
+                    name_resolver=self.worker_rpc_client._name_resolver,
+                )
+                loop = asyncio.get_running_loop()
+                success = await loop.run_in_executor(
+                    None,
+                    dst_facade.register_transfer_schedule,
+                    list(direct_schedules.keys()),
+                    direct_dsts,
+                    req_id,
+                    True,
+                    False,
+                    expected_block_count,
+                    uuid,
+                    dst_controller_address,
+                    src_controller_address,
+                    direct_schedules,
+                    dst_mem_type,
+                )
+                if not success:
+                  raise RuntimeError(
+                      "Failed remote prepare for direct schedules"
+                  )
+              else:
+                local_direct_dsts = [
+                    u for u in direct_dsts if u in self._registered_shards
+                ]
+                if local_direct_dsts:
+                  await asyncio.gather(*[
+                      self.worker_rpc_client.start_transfer(unit, direct_plan)
+                      for unit in local_direct_dsts
+                  ])
+
+              local_direct_srcs = [
+                  u
+                  for u in direct_schedules.keys()
+                  if u in self._registered_shards
+              ]
+              if local_direct_srcs:
+                await asyncio.gather(*[
+                    self.worker_rpc_client.start_transfer(unit, direct_plan)
+                    for unit in local_direct_srcs
+                ])
+
+            if tree_broadcast_tasks:
+              await asyncio.gather(*tree_broadcast_tasks)
 
       else:
         # === OLD PLAN-BASED WORKFLOW (Backward Compatibility) ===
@@ -1286,8 +1536,10 @@ class RaidenController:
         with self._lock:
           old_plan = self._active_transfers[req_id]
 
-        # 1. Send start_transfer to Destination workers first to register the plan.
-        # This is REQUIRED in the old workflow because they need the plan to unpack!
+        # 1. Send start_transfer to Destination workers first to register the
+        # plan.
+        # This is REQUIRED in the old workflow because they need the plan to
+        # unpack!
         for unit in dst_units:
           await self.worker_rpc_client.start_transfer(unit, old_plan)
 

@@ -274,6 +274,160 @@ TEST(KVCacheManagerWithTransferTest,
   }
 }
 
+TEST(KVCacheManagerWithTransferTest, TreeBroadcastCorrectness8Nodes) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+
+  // Rank 3 shape: {2, 32, 32} of float.
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  int64_t elements_per_slice = 32 * 32;
+  int64_t total_elements = 2 * elements_per_slice;
+
+  // Initialize source data with distinct values
+  std::vector<float> src_host_data(total_elements);
+  for (int i = 0; i < total_elements; ++i) {
+    src_host_data[i] = static_cast<float>(i + 1);
+  }
+
+  // Create 8 separate PjRtBuffers representing the TPU buffers for the 8 nodes
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> buffers(8);
+  for (int i = 0; i < 8; ++i) {
+    if (i == 0) {
+      TF_ASSERT_OK_AND_ASSIGN(
+          buffers[i], pjrt_manager->BufferFromHost(src_host_data.data(),
+                                                   xla::F32, shape_dims));
+    } else {
+      // Destination buffers initialized to zeros
+      std::vector<float> zeros(total_elements, 0.0f);
+      TF_ASSERT_OK_AND_ASSIGN(
+          buffers[i],
+          pjrt_manager->BufferFromHost(zeros.data(), xla::F32, shape_dims));
+    }
+    ASSERT_THAT(buffers[i]->GetReadyFuture().Await(), IsOk());
+  }
+
+  // Create 8 KVCacheManagerWithTransfer engines
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> engines(8);
+  std::vector<std::string> endpoints(8);
+
+  for (int i = 0; i < 8; ++i) {
+    std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {
+        {buffers[i].get()}};
+    engines[i] = std::make_unique<KVCacheManagerWithTransfer>(
+        layer_buffers,
+        /*local_port=*/std::nullopt,
+        /*host_blocks_to_allocate=*/std::nullopt,
+        /*unsafe_skip_buffer_lock=*/true,
+        /*parallelism=*/1,
+        /*host_allocator=*/nullptr,
+        /*node_id=*/i,
+        /*local_control_port=*/0,
+        /*max_blocks=*/2,
+        /*num_slots=*/2,
+        /*timeout_s=*/10.0);
+
+    ASSERT_THAT(engines[i]->ConfigureHostStagingSlots(2, 2), IsOk());
+    int port = engines[i]->local_control_port();
+    ASSERT_GT(port, 0);
+    endpoints[i] = "127.0.0.1:" + std::to_string(port);
+  }
+
+  uint64_t uuid_1 = 88881;
+  uint64_t uuid_2 = 88882;
+  uint64_t uuid_3 = 88883;
+  uint64_t uuid_4 = 88884;
+  uint64_t uuid_5 = 88885;
+  uint64_t uuid_6 = 88886;
+  uint64_t uuid_7 = 88887;
+  std::string req_id_prefix = "tree_broadcast_req_";
+
+  // Phase 1: Node 0 (Source) notifies read. Nodes 1 and 2 start read pulling
+  // from Node 0.
+  engines[0]->NotifyForRead(absl::StrCat(req_id_prefix, "1"), uuid_1, {0});
+  engines[0]->NotifyForRead(absl::StrCat(req_id_prefix, "2"), uuid_2, {0});
+
+  engines[1]->StartRead(absl::StrCat(req_id_prefix, "1"), uuid_1, endpoints[0],
+                        {0}, {1});
+  engines[2]->StartRead(absl::StrCat(req_id_prefix, "2"), uuid_2, endpoints[0],
+                        {0}, {1});
+
+  // Await completion of Phase 1
+  auto await_completion = [](KVCacheManagerWithTransfer* engine,
+                             const std::string& req_id) {
+    bool done = false;
+    for (int i = 0; i < 200; ++i) {
+      auto [done_sending, done_recving, failed_recving] =
+          engine->CompleteReadRaw();
+      if (std::find(failed_recving.begin(), failed_recving.end(), req_id) !=
+          failed_recving.end()) {
+        return false;
+      }
+      if (std::find(done_recving.begin(), done_recving.end(), req_id) !=
+          done_recving.end()) {
+        done = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return done;
+  };
+
+  ASSERT_TRUE(
+      await_completion(engines[1].get(), absl::StrCat(req_id_prefix, "1")));
+  ASSERT_TRUE(
+      await_completion(engines[2].get(), absl::StrCat(req_id_prefix, "2")));
+
+  // Phase 2: Nodes 0, 1, 2 notify read.
+  // Nodes 3, 4 pull from Node 1.
+  // Nodes 5, 6 pull from Node 2.
+  engines[1]->NotifyForRead(absl::StrCat(req_id_prefix, "3"), uuid_3, {1});
+  engines[1]->NotifyForRead(absl::StrCat(req_id_prefix, "4"), uuid_4, {1});
+  engines[2]->NotifyForRead(absl::StrCat(req_id_prefix, "5"), uuid_5, {1});
+  engines[2]->NotifyForRead(absl::StrCat(req_id_prefix, "6"), uuid_6, {1});
+
+  engines[3]->StartRead(absl::StrCat(req_id_prefix, "3"), uuid_3, endpoints[1],
+                        {1}, {1});
+  engines[4]->StartRead(absl::StrCat(req_id_prefix, "4"), uuid_4, endpoints[1],
+                        {1}, {1});
+  engines[5]->StartRead(absl::StrCat(req_id_prefix, "5"), uuid_5, endpoints[2],
+                        {1}, {1});
+  engines[6]->StartRead(absl::StrCat(req_id_prefix, "6"), uuid_6, endpoints[2],
+                        {1}, {1});
+
+  // Await completion of Phase 2
+  ASSERT_TRUE(
+      await_completion(engines[3].get(), absl::StrCat(req_id_prefix, "3")));
+  ASSERT_TRUE(
+      await_completion(engines[4].get(), absl::StrCat(req_id_prefix, "4")));
+  ASSERT_TRUE(
+      await_completion(engines[5].get(), absl::StrCat(req_id_prefix, "5")));
+  ASSERT_TRUE(
+      await_completion(engines[6].get(), absl::StrCat(req_id_prefix, "6")));
+
+  // Phase 3: Node 3 notifies read. Node 7 pulls from Node 3.
+  engines[3]->NotifyForRead(absl::StrCat(req_id_prefix, "7"), uuid_7, {1});
+  engines[7]->StartRead(absl::StrCat(req_id_prefix, "7"), uuid_7, endpoints[3],
+                        {1}, {1});
+
+  // Await completion of Phase 3
+  ASSERT_TRUE(
+      await_completion(engines[7].get(), absl::StrCat(req_id_prefix, "7")));
+
+  // Verify all 7 destinations got the data correctly in their device buffers
+  // (Block 1)
+  for (int i = 1; i < 8; ++i) {
+    TF_ASSERT_OK_AND_ASSIGN(auto literal, buffers[i]->ToLiteral().Await());
+    auto read_back = literal->data<float>();
+    ASSERT_EQ(read_back.size(), total_elements);
+
+    // Block 1 should be overwritten with Block 0's data (values 1..1024)
+    for (int j = 0; j < elements_per_slice; ++j) {
+      EXPECT_EQ(read_back[elements_per_slice + j], src_host_data[j])
+          << "Node " << i << " mismatch at index " << j;
+    }
+  }
+}
+
 using ::tpu_raiden::kv_cache::KVCacheManagerBase;
 
 
