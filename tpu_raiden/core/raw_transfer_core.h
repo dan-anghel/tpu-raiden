@@ -33,7 +33,6 @@
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
-#include "xla/pjrt/c/pjrt_c_api_raw_buffer_external.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/raw_buffer.h"
@@ -53,12 +52,127 @@ struct RawBufferHolder {
                   PJRT_RawBuffer* buf)
       : c_api(api), extension(ext), buffer(buf) {}
 
-  ~RawBufferHolder() {
-    if (buffer) {
-      pjrt::PjRtCApiRawBuffer_Destroy(c_api, extension, buffer);
-    }
-  }
+  ~RawBufferHolder(); // Forward declaration to define it after the helpers
 };
+
+// Self-contained PJRT_Error -> absl::Status (consumes/destroys the error).
+inline absl::Status PjrtErrorToStatusLocal(const PJRT_Api* c_api,
+                                           PJRT_Error* error);
+
+namespace pjrt {
+
+inline void PjRtCApiRawBuffer_Destroy(const PJRT_Api* c_api,
+                                      const PJRT_RawBuffer_Extension* extension,
+                                      PJRT_RawBuffer* buffer) {
+  PJRT_RawBuffer_Destroy_Args args;
+  args.struct_size = PJRT_RawBuffer_Destroy_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  PJRT_Error* error = extension->PJRT_RawBuffer_Destroy(&args);
+  if (error != nullptr) {
+    (void)PjrtErrorToStatusLocal(c_api, error);
+  }
+}
+
+inline xla::Future<> ConvertCEventToCppFuture(PJRT_Event* c_event,
+                                              const PJRT_Api* c_api) {
+  PJRT_Event_OnReady_Args event_onready_args;
+  event_onready_args.struct_size = PJRT_Event_OnReady_Args_STRUCT_SIZE;
+  event_onready_args.extension_start = nullptr;
+  event_onready_args.event = c_event;
+
+  auto [promise, future] = xla::MakePromise();
+  event_onready_args.user_arg = new std::function<void(PJRT_Error*)>(
+      [promise = std::move(promise).ToShared(), c_event,
+       c_api](PJRT_Error* error) mutable {
+        if (error != nullptr) {
+          promise->Set(PjrtErrorToStatusLocal(c_api, error));
+        } else {
+          promise->Set();
+        }
+        if (c_event != nullptr) {
+          PJRT_Event_Destroy_Args a;
+          a.struct_size = PJRT_Event_Destroy_Args_STRUCT_SIZE;
+          a.extension_start = nullptr;
+          a.event = c_event;
+          c_api->PJRT_Event_Destroy(&a);
+        }
+      });
+  event_onready_args.callback = [](PJRT_Error* error, void* arg) {
+    auto* set_future =
+        reinterpret_cast<std::function<void(PJRT_Error*)>*>(arg);
+    (*set_future)(error);
+    delete set_future;
+  };
+
+  PJRT_Error* error = c_api->PJRT_Event_OnReady(&event_onready_args);
+  if (error != nullptr) {
+    return xla::Future<>(PjrtErrorToStatusLocal(c_api, error));
+  }
+  return future;
+}
+
+inline xla::Future<> PjRtCApiRawBuffer_CopyRawHostToDevice(
+    const PJRT_Api* c_api, const PJRT_RawBuffer_Extension* extension,
+    PJRT_RawBuffer* buffer, const void* src, int64_t offset,
+    int64_t transfer_size) {
+  PJRT_RawBuffer_CopyRawHostToDevice_Args args;
+  args.struct_size = PJRT_RawBuffer_CopyRawHostToDevice_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  args.src = src;
+  args.offset = offset;
+  args.transfer_size = transfer_size;
+  args.event = nullptr;
+
+  PJRT_Error* error = extension->PJRT_RawBuffer_CopyRawHostToDevice(&args);
+  if (error != nullptr) {
+    return xla::Future<>(PjrtErrorToStatusLocal(c_api, error));
+  }
+  return ConvertCEventToCppFuture(args.event, c_api);
+}
+
+inline xla::Future<> PjRtCApiRawBuffer_CopyRawDeviceToHost(
+    const PJRT_Api* c_api, const PJRT_RawBuffer_Extension* extension,
+    PJRT_RawBuffer* buffer, void* dst, int64_t offset, int64_t transfer_size) {
+  PJRT_RawBuffer_CopyRawDeviceToHost_Args args;
+  args.struct_size = PJRT_RawBuffer_CopyRawDeviceToHost_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  args.dst = dst;
+  args.offset = offset;
+  args.transfer_size = transfer_size;
+  args.event = nullptr;
+
+  PJRT_Error* error = extension->PJRT_RawBuffer_CopyRawDeviceToHost(&args);
+  if (error != nullptr) {
+    return xla::Future<>(PjrtErrorToStatusLocal(c_api, error));
+  }
+  return ConvertCEventToCppFuture(args.event, c_api);
+}
+
+inline absl::StatusOr<PJRT_RawBuffer*> PjRtCApiBuffer_CreateRawAliasOfBuffer(
+    const PJRT_Api* c_api, const PJRT_RawBuffer_Extension* extension,
+    PJRT_Buffer* buffer) {
+  PJRT_RawBuffer_CreateRawAliasOfBuffer_Args args;
+  args.struct_size = PJRT_RawBuffer_CreateRawAliasOfBuffer_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  args.raw_buffer = nullptr;
+  PJRT_Error* error = extension->PJRT_RawBuffer_CreateRawAliasOfBuffer(&args);
+  if (error != nullptr) {
+    return PjrtErrorToStatusLocal(c_api, error);
+  }
+  return args.raw_buffer;
+}
+
+}  // namespace pjrt
+
+inline RawBufferHolder::~RawBufferHolder() {
+  if (buffer) {
+    pjrt::PjRtCApiRawBuffer_Destroy(c_api, extension, buffer);
+  }
+}
 
 // Self-contained PJRT_Error -> absl::Status (consumes/destroys the error).
 inline absl::Status PjrtErrorToStatusLocal(const PJRT_Api* c_api,

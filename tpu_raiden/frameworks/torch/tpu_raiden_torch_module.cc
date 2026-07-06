@@ -255,6 +255,33 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("block_ids"))
       .def(
+          "register_active_plan",
+          [](KVCacheManager& self, uint64_t uuid,
+             nb::bytes request_bytes, bool is_sender) {
+            tpu_raiden::rpc::StartTransferRequest request;
+            if (!request.ParseFromArray(request_bytes.c_str(), request_bytes.size())) {
+              throw std::runtime_error("Failed to parse StartTransferRequest protobuf");
+            }
+            absl::Status status = self.RegisterActivePlan(uuid, request, is_sender);
+            if (!status.ok()) {
+              throw std::runtime_error("RegisterActivePlan failed: " + std::string(status.message()));
+            }
+          },
+          nb::arg("uuid"), nb::arg("request_bytes"), nb::arg("is_sender"))
+      .def(
+          "push_kv_cache_resharded",
+          [](KVCacheManager& self, nb::bytes request_bytes) {
+            tpu_raiden::rpc::StartTransferRequest request;
+            if (!request.ParseFromArray(request_bytes.c_str(), request_bytes.size())) {
+              throw std::runtime_error("Failed to parse StartTransferRequest protobuf");
+            }
+            absl::Status status = self.PushKVCacheResharded(request);
+            if (!status.ok()) {
+              throw std::runtime_error("PushKVCacheResharded failed: " + std::string(status.message()));
+            }
+          },
+          nb::arg("request_bytes"))
+      .def(
           "start_read",
           [](KVCacheManager& self, const std::string& req_id, uint64_t uuid,
              nb::object remote_endpoint,

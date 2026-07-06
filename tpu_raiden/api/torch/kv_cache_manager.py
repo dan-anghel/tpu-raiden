@@ -260,3 +260,14 @@ class KVCacheManager:
   def is_listener_active(self) -> bool:
     """Returns whether the native C++ KVCacheListener is actively running."""
     return self._impl.is_listener_active
+
+  def register_active_plan(
+      self, uuid: int, request_bytes: bytes, is_sender: bool
+  ) -> None:
+    """Registers an active resharded transfer plan with the native C++ engine."""
+    self._impl.register_active_plan(uuid, request_bytes, is_sender)
+
+  def push_kv_cache_resharded(self, request_bytes: bytes) -> None:
+    """Executes a resharded push transfer based on a centralized schedule."""
+    self._impl.push_kv_cache_resharded(request_bytes)
+

@@ -146,7 +146,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   // Executes a distributed resharding push transfer based on precise
   // centralized Controller schedules.
-  absl::Status PushKVCacheResharded(
+  virtual absl::Status PushKVCacheResharded(
       const tpu_raiden::rpc::StartTransferRequest& request);
 
   // Blocks until all pending asynchronous transfers/copies are complete.

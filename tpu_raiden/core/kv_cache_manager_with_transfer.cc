@@ -1888,4 +1888,124 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
   return absl::OkStatus();
 }
 
+absl::Status KVCacheManagerWithTransfer::PushKVCacheResharded(
+    const tpu_raiden::rpc::StartTransferRequest& request) {
+  LOG(INFO) << "KVCacheManagerWithTransfer::PushKVCacheResharded starting: uuid="
+            << request.uuid() << ", is_sender=true";
+  
+  // 1. Call base class implementation to register the plan in active_plans_
+  TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
+      request.uuid(), request, /*is_sender=*/true));
+
+  // 2. Locate and process the schedule for the local rank
+  auto schedule_it = request.shard_push_schedules().find(node_id_);
+  if (schedule_it == request.shard_push_schedules().end()) {
+    VLOG(1) << "PushKVCacheResharded: No schedule for rank " << node_id_
+            << ". Returning OK.";
+    return absl::OkStatus();
+  }
+  const auto& schedule = schedule_it->second;
+
+  std::set<int64_t> unique_src_block_ids;
+  for (const auto& entry : schedule.entries()) {
+    unique_src_block_ids.insert(entry.src_block_id());
+  }
+
+  std::vector<int64_t> src_block_ids(unique_src_block_ids.begin(),
+                                     unique_src_block_ids.end());
+  if (src_block_ids.empty()) {
+    VLOG(1) << "PushKVCacheResharded: No blocks to push. Returning OK.";
+    return absl::OkStatus();
+  }
+
+  // 3. Acquire a staging slot from the pool
+  int64_t send_slot = -1;
+  std::vector<int64_t> host_block_ids;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
+        free_slots_.empty()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("Insufficient free staging slots or request size too large. Required blocks: ",
+                       src_block_ids.size(), ", max_blocks: ", max_blocks_,
+                       ", free slots: ", free_slots_.size()));
+    }
+    Slot slot = AcquireSlotLocked();
+    send_slot = slot.slot_idx;
+    host_block_ids.reserve(src_block_ids.size());
+    for (size_t k = 0; k < src_block_ids.size(); ++k) {
+      host_block_ids.push_back(slot.block_ids[k]);
+    }
+  }
+
+  // 4. Coalesce contiguous (device, host) block runs and copy D2H
+  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
+  std::vector<raiden::PjRtCopyFuture> d2h_layer_futures;
+  d2h_layer_futures.reserve(num_layers());
+
+  for (size_t l = 0; l < num_layers(); ++l) {
+    auto future_or =
+        D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets, d2h_copy.sizes,
+            /*slot_idx=*/std::nullopt, /*layer_idx=*/l);
+    if (!future_or.ok()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      ReleaseSlotLocked(send_slot);
+      return future_or.status();
+    }
+    d2h_layer_futures.push_back(std::move(future_or.value()));
+  }
+
+  // Block until D2H copies for all layers are complete.
+  for (auto& fut : d2h_layer_futures) {
+    TF_RETURN_IF_ERROR(fut.Await());
+  }
+
+  // 5. Group entries by dst_peer and map global src_block_id to local host_block_id
+  std::map<int64_t, int64_t> src_to_host;
+  for (size_t k = 0; k < src_block_ids.size(); ++k) {
+    src_to_host[src_block_ids[k]] = host_block_ids[k];
+  }
+
+  std::map<std::string, std::pair<std::vector<int>, std::vector<int>>> peer_transfers;
+  for (const auto& entry : schedule.entries()) {
+    int64_t src_bid = entry.src_block_id();
+    int64_t dst_bid = entry.dst_block_id();
+    int64_t host_bid = src_to_host[src_bid];
+    peer_transfers[entry.dst_peer()].first.push_back(static_cast<int>(host_bid));
+    peer_transfers[entry.dst_peer()].second.push_back(static_cast<int>(dst_bid));
+  }
+
+  // 6. Push blocks to each peer.
+  absl::MutexLock lock(&server_init_mu_);
+  for (auto& [peer, transfers] : peer_transfers) {
+    const auto& src_ints = transfers.first;
+    const auto& dst_ints = transfers.second;
+    if (src_ints.empty()) continue;
+
+    if (!server_) {
+      std::lock_guard<std::mutex> lock_slots(mu_);
+      ReleaseSlotLocked(send_slot);
+      return absl::FailedPreconditionError("Transport server is not running");
+    }
+
+    auto push_s = server_->Push(peer, src_ints, dst_ints, /*parallelism=*/1,
+                                transport::MajorOrder::kLayerMajor, request.uuid());
+    if (!push_s.ok()) {
+      std::lock_guard<std::mutex> lock_slots(mu_);
+      ReleaseSlotLocked(send_slot);
+      return push_s.status();
+    }
+  }
+
+  // Release the staging slot after sending is done.
+  {
+    std::lock_guard<std::mutex> lock_slots(mu_);
+    ReleaseSlotLocked(send_slot);
+  }
+
+  LOG(INFO) << "KVCacheManagerWithTransfer::PushKVCacheResharded success: uuid="
+            << request.uuid();
+  return absl::OkStatus();
+}
+
 }  // namespace tpu_raiden
