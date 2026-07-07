@@ -4,6 +4,14 @@
 > **TPU Raiden is currently under active development and is not yet recommended for general use.**
 > If you are interested in adopting this library, please reach out to the owners first to discuss compatibility, or proceed at your own risk.
 
+## Latest Known Good (LKG) Revision
+Due to fast-paced active development, the `main` branch may occasionally contain temporary unstable changes. We publish the latest verified stable commit hash in the [`lkg.version`](lkg.version) file at the root of the repository.
+
+To check out the latest verified stable revision that passes all E2E functional and performance test criteria:
+```bash
+git checkout $(cat lkg.version)
+```
+
 ## Prerequisites
 
 You will need a python environment to run the JAX or torch code. Our code has been verified with python3.12. So the following should set you up properly:
