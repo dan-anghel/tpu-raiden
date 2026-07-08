@@ -103,7 +103,9 @@ KVCacheManagerBase::KVCacheManagerBase(
 
   is_blocked_layout_ = (shape.dimensions().size() == 5);
 
-  physical_size_ = first_buffer->GetOnDeviceSizeInBytes().value();
+  // max_physical_size_ will be set to the max across all layers below.
+  max_physical_size_ = 0;
+
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
   int num_host_blocks = host_blocks_to_allocate.value_or(64);
@@ -123,20 +125,32 @@ KVCacheManagerBase::KVCacheManagerBase(
     }
 
     LayerInfoBase layer_info;
+    LayerDeviceInfo device_info;
+    // Store the per-layer on-device buffer size.  For uniform models
+    // every layer has the same value; for hybrid (HMA) models they
+    // may differ (e.g. mamba conv_state bf16 vs ssm_state f32).
+    device_info.physical_size =
+        layer_buffers[layer_idx][0]->GetOnDeviceSizeInBytes().value();
+    max_physical_size_ =
+        std::max(max_physical_size_, device_info.physical_size);
+    VLOG(1) << "KVCacheManagerBase: layer " << layer_idx << " on_device_shape: "
+            << layer_buffers[layer_idx][0]->on_device_shape().ToString()
+            << " size: " << device_info.physical_size;
     layer_info.shards.reserve(num_shards_);
-    std::vector<raiden::BufferHoldAndAlias> hold_info;
-    hold_info.reserve(num_shards_);
+    device_info.holds.reserve(num_shards_);
 
     for (size_t i = 0; i < num_shards_; ++i) {
       xla::PjRtBuffer* dst_buffer = dst_buffers[i];
       ShardBufferInfoBase shard_info;
 
       shard_info.device_size = dst_buffer->GetOnDeviceSizeInBytes().value();
-      if (shard_info.device_size < physical_size_) {
+      if (shard_info.device_size < device_info.physical_size) {
         throw std::runtime_error(
             "Device buffer shard size smaller than physical size");
       }
 
+      // Allocate host buffer using the max slice size (bytes_per_block)
+      // so the buffer is large enough for any layer.
       size_t alloc_size = num_host_blocks * bytes_per_block();
       if (host_allocator) {
         const xla::PjRtDevice* target_dev = dst_buffer->device();
@@ -187,11 +201,11 @@ KVCacheManagerBase::KVCacheManagerBase(
             std::string("Failed to acquire PJRT hold: ") +
             std::string(status_or_hold.status().message()));
       }
-      hold_info.push_back(std::move(status_or_hold.value()));
+      device_info.holds.push_back(std::move(status_or_hold.value()));
       layer_info.shards.push_back(std::move(shard_info));
     }
     layers_.push_back(std::move(layer_info));
-    buffer_holds_.push_back(std::move(hold_info));
+    buffer_holds_.push_back(std::move(device_info));
   }
 
   constexpr size_t kPoolSize = 4;
@@ -321,8 +335,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
       }
       int node = -1;
       if (layer_idx < buffer_holds_.size() &&
-          shard_idx < buffer_holds_[layer_idx].size()) {
-        auto* buf = buffer_holds_[layer_idx][shard_idx].buffer;
+          shard_idx < buffer_holds_[layer_idx].holds.size()) {
+        auto* buf = buffer_holds_[layer_idx].holds[shard_idx].buffer;
         if (buf && buf->device()) {
           node = GetPjRtDeviceNumaNode(buf->device());
         }
@@ -458,8 +472,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
       }
       int node = -1;
       if (layer_idx < buffer_holds_.size() &&
-          shard_idx < buffer_holds_[layer_idx].size()) {
-        auto* buf = buffer_holds_[layer_idx][shard_idx].buffer;
+          shard_idx < buffer_holds_[layer_idx].holds.size()) {
+        auto* buf = buffer_holds_[layer_idx].holds[shard_idx].buffer;
         if (buf && buf->device()) {
           node = GetPjRtDeviceNumaNode(buf->device());
         }
@@ -701,10 +715,10 @@ absl::Status KVCacheManagerBase::H2dDirect(
         "Number of device buffers must match layer count");
   }
 
-  int64_t block_byte_size = slice_byte_size_;
   int64_t num_chunks = src_offsets.size();
 
   for (size_t l = 0; l < num_layers_; ++l) {
+    int64_t block_byte_size = layer_block_byte_size(l);
     const auto& layer_info = layers_[l];
     const auto& shard_info = layer_info.shards[0];
     const uint8_t* h_base = shard_info.host_ptr;
@@ -744,10 +758,10 @@ absl::Status KVCacheManagerBase::D2hDirect(
         "Number of device buffers must match layer count");
   }
 
-  int64_t block_byte_size = slice_byte_size_;
   int64_t num_chunks = src_offsets.size();
 
   for (size_t l = 0; l < num_layers_; ++l) {
+    int64_t block_byte_size = layer_block_byte_size(l);
     const auto& layer_info = layers_[l];
     const auto& shard_info = layer_info.shards[0];
     uint8_t* h_base = const_cast<uint8_t*>(shard_info.host_ptr);
@@ -788,7 +802,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
   std::vector<raiden::PjRtCopyFuture> shard_futures_to_join;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
-    const auto& layer_holds = buffer_holds_[layer_idx];
+    const auto& layer_holds = buffer_holds_[layer_idx].holds;
     for (size_t i = 0; i < num_shards_; ++i) {
       if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
         continue;
@@ -797,32 +811,38 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
       const auto& shard_hold = layer_holds[i];
 
       std::vector<raiden::H2dCopy> copies;
+      size_t layer_phys_size = buffer_holds_[layer_idx].physical_size > 0
+                                   ? buffer_holds_[layer_idx].physical_size
+                                   : max_physical_size_;
+      int64_t layer_block_size = layer_block_byte_size(layer_idx);
       if (!is_partial) {
         if (shard_info.host_ptr == nullptr) {
           return absl::FailedPreconditionError("Source host pointer is null");
         }
-        if (physical_size_ > shard_info.host_size) {
+        if (layer_phys_size > shard_info.host_size) {
           return absl::OutOfRangeError(
               "Copy range exceeds source host buffer size");
         }
 
         copies.push_back(
-            {shard_info.host_ptr, 0, static_cast<int64_t>(physical_size_)});
+            {shard_info.host_ptr, 0, static_cast<int64_t>(layer_phys_size)});
       } else {
         for (size_t j = 0; j < src_offsets.size(); ++j) {
           int64_t src_major_dim_offset = src_offsets[j];
           int64_t dst_major_dim_offset = dst_offsets[j];
           int64_t major_dim_size = copy_sizes[j];
 
-          int64_t src_offset = src_major_dim_offset * slice_byte_size_;
-          int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
-          int64_t size_to_copy = major_dim_size * slice_byte_size_;
+          int64_t src_offset = src_major_dim_offset * layer_block_size;
+          int64_t dst_offset = dst_major_dim_offset * layer_block_size;
+          int64_t size_to_copy = major_dim_size * layer_block_size;
 
-          if (src_offset + size_to_copy > shard_info.host_size) {
+          if (src_offset + size_to_copy >
+              static_cast<int64_t>(shard_info.host_size)) {
             return absl::InvalidArgumentError(
                 "Copy range exceeds source host buffer size");
           }
-          if (dst_offset + size_to_copy > shard_info.device_size) {
+          if (dst_offset + size_to_copy >
+              static_cast<int64_t>(shard_info.device_size)) {
             return absl::InvalidArgumentError(
                 "Copy range exceeds destination device buffer size");
           }
@@ -880,9 +900,10 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
       shard_idx >= layers_[layer_idx].shards.size()) {
     return absl::OutOfRangeError("HostSpan layer or shard index out of range");
   }
+  int64_t layer_block_size = layer_block_byte_size(layer_idx);
   const int64_t base_major = slot_idx * staging_max_major_per_slot_;
-  const size_t byte_offset = static_cast<size_t>(base_major) * slice_byte_size_;
-  const size_t nbytes = static_cast<size_t>(num_major) * slice_byte_size_;
+  const size_t byte_offset = static_cast<size_t>(base_major) * layer_block_size;
+  const size_t nbytes = static_cast<size_t>(num_major) * layer_block_size;
   const auto& shard_info = layers_[layer_idx].shards[shard_idx];
   if (byte_offset + nbytes > shard_info.host_size) {
     return absl::OutOfRangeError("HostSpan exceeds host staging buffer");
@@ -919,7 +940,8 @@ KVCacheManagerBase::DispatchH2dWork(
   std::vector<raiden::PjRtCopyFuture> local_futures;
   for (const auto& work : works) {
     const auto& layer_info = layers_[work.layer_idx];
-    const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
+    const auto& shard_hold =
+        buffer_holds_[work.layer_idx].holds[work.shard_idx];
     const auto& shard_info = layer_info.shards[work.shard_idx];
 
     const uint8_t* base_host_ptr = nullptr;
@@ -939,30 +961,34 @@ KVCacheManagerBase::DispatchH2dWork(
             << ", base_host_ptr: " << (void*)base_host_ptr
             << ", host_size: " << host_size;
 
+    size_t layer_phys_size = buffer_holds_[work.layer_idx].physical_size > 0
+                                 ? buffer_holds_[work.layer_idx].physical_size
+                                 : max_physical_size_;
+    int64_t layer_block_size = layer_block_byte_size(work.layer_idx);
     std::vector<raiden::H2dCopy> copies;
     if (!is_partial) {
       if (base_host_ptr == nullptr) {
         return absl::FailedPreconditionError("Source host pointer is null");
       }
-      if (physical_size_ > host_size) {
+      if (layer_phys_size > host_size) {
         return absl::InvalidArgumentError("Source host buffer is too small");
       }
       VLOG(1) << "DispatchH2dWork: calling CopyRawHostToDevice (Full). Layer: "
               << work.layer_idx << ", Shard: " << work.shard_idx
-              << ", Size: " << physical_size_
+              << ", Size: " << layer_phys_size
               << ", Thread: " << std::this_thread::get_id();
 
       copies.push_back(
-          {base_host_ptr, 0, static_cast<int64_t>(physical_size_)});
+          {base_host_ptr, 0, static_cast<int64_t>(layer_phys_size)});
     } else {
       for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
         int64_t src_major_dim_offset = src_offsets_major_dim[j];
         int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
         int64_t major_dim_size = copy_sizes_major_dim[j];
 
-        int64_t src_offset = src_major_dim_offset * slice_byte_size_;
-        int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
-        int64_t size_to_copy = major_dim_size * slice_byte_size_;
+        int64_t src_offset = src_major_dim_offset * layer_block_size;
+        int64_t dst_offset = dst_major_dim_offset * layer_block_size;
+        int64_t size_to_copy = major_dim_size * layer_block_size;
 
         if (src_offset + size_to_copy > static_cast<int64_t>(host_size)) {
           return absl::InvalidArgumentError(
@@ -1005,7 +1031,8 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
   std::vector<raiden::PjRtCopyFuture> local_futures;
   for (const auto& work : works) {
     const auto& layer_info = layers_[work.layer_idx];
-    const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
+    const auto& shard_hold =
+        buffer_holds_[work.layer_idx].holds[work.shard_idx];
     const auto& shard_info = layer_info.shards[work.shard_idx];
 
     uint8_t* dst_host_ptr = nullptr;
@@ -1025,28 +1052,33 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
             << ", dst_host_ptr: " << (void*)dst_host_ptr
             << ", host_size: " << host_size;
 
+    size_t layer_phys_size = buffer_holds_[work.layer_idx].physical_size > 0
+                                 ? buffer_holds_[work.layer_idx].physical_size
+                                 : max_physical_size_;
+    int64_t layer_block_size = layer_block_byte_size(work.layer_idx);
     std::vector<raiden::D2hCopy> copies;
     if (!is_partial) {
       if (dst_host_ptr == nullptr) {
         return absl::FailedPreconditionError(
             "Destination host pointer is null");
       }
-      if (physical_size_ > host_size) {
+      if (layer_phys_size > host_size) {
         return absl::OutOfRangeError(
             "Copy range exceeds destination host buffer size");
       }
       VLOG(1) << "DispatchD2hWork: calling CopyRawDeviceToHost (Full). Layer: "
               << work.layer_idx << ", Shard: " << work.shard_idx
-              << ", Size: " << physical_size_
+              << ", Size: " << layer_phys_size
               << ", Thread: " << std::this_thread::get_id();
 
-      copies.push_back({dst_host_ptr, 0, static_cast<int64_t>(physical_size_)});
+      copies.push_back(
+          {dst_host_ptr, 0, static_cast<int64_t>(layer_phys_size)});
     } else {
       copies.reserve(src_offsets.size());
       for (size_t j = 0; j < src_offsets.size(); ++j) {
-        int64_t src_offset = src_offsets[j] * slice_byte_size_;
-        int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
-        int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
+        int64_t src_offset = src_offsets[j] * layer_block_size;
+        int64_t dst_offset = dst_offsets[j] * layer_block_size;
+        int64_t size_to_copy = copy_sizes[j] * layer_block_size;
 
         if (src_offset + size_to_copy > shard_info.device_size) {
           return absl::InvalidArgumentError(
