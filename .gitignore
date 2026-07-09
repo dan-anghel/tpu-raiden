@@ -87,5 +87,10 @@ MODULE.bazel.lock
 /jax/
 /xla/
 
+# Generated Python protobuf modules copied by build.sh
+/tpu_raiden/rpc/raiden_service_pb2.py
+/tpu_raiden/rpc/coordination_pb2.py
+/tpu_raiden/rpc/coordination_pb2_grpc.py
+
 # Python bytecode caches
 **/__pycache__/

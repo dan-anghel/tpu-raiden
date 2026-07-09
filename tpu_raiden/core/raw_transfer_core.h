@@ -439,7 +439,7 @@ struct PjRtEventBundle {
       a.struct_size = PJRT_Event_Destroy_Args_STRUCT_SIZE;
       a.extension_start = nullptr;
       a.event = e;
-      c_api->PJRT_Event_Destroy(&a);
+      CHECK_OK(PjrtErrorToStatusLocal(c_api, c_api->PJRT_Event_Destroy(&a)));
     }
   }
 };

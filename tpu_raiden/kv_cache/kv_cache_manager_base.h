@@ -229,15 +229,34 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
  protected:
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
-  size_t physical_size_ = 0;
+  size_t max_physical_size_ = 0;
   int64_t staging_num_slots_ = 0;
   int64_t staging_max_major_per_slot_ = 0;
   bool is_blocked_layout_ = false;
 
   std::unique_ptr<LogicalBlockManager> host_block_manager_;
 
-  // Separate PJRT active holds matrix to protect subclass scoping E2E!
-  std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
+  // Per-layer device buffer holds bundled with the layer's on-device size.
+  // For uniform models every layer has the same physical_size; for hybrid
+  // (HMA) models sizes may differ (e.g. mamba conv_state bf16 vs ssm f32).
+  struct LayerDeviceInfo {
+    std::vector<raiden::BufferHoldAndAlias> holds;
+    // Total on-device bytes for this layer's buffer.  Set by the
+    // device-backed constructor from PjRtBuffer.  DMA functions use
+    // this for per-layer offset and copy-size calculations.
+    size_t physical_size = 0;
+  };
+  std::vector<LayerDeviceInfo> buffer_holds_;
+
+  // Returns the per-block byte size for a given layer.  Uses the layer's
+  // actual physical_size when available (device-backed path); falls back
+  // to the uniform slice_byte_size_ (CPU-only / test path).
+  int64_t layer_block_byte_size(size_t layer_idx) const {
+    const auto& info = buffer_holds_[layer_idx];
+    return info.physical_size > 0
+               ? static_cast<int64_t>(info.physical_size) / major_dim_size_
+               : slice_byte_size_;
+  }
 
   std::unique_ptr<NumaThreadPool> dma_pool_;
   std::unique_ptr<NumaThreadPool> push_pool_;

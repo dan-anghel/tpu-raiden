@@ -34,7 +34,7 @@ class TestKVCacheManager : public KVCacheManagerBase {
       : KVCacheManagerBase(num_layers, num_shards, slice_byte_size) {
     buffer_holds_.resize(num_layers);
     for (size_t l = 0; l < num_layers; ++l) {
-      buffer_holds_[l].resize(num_shards);
+      buffer_holds_[l].holds.resize(num_shards);
     }
   }
 };
