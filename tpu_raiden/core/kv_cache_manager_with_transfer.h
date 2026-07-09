@@ -411,6 +411,18 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   std::thread control_thread_;
 
  private:
+  struct StagingSlotDetails {
+    int64_t slot_idx;
+    std::vector<int64_t> host_block_ids;
+  };
+
+  absl::StatusOr<StagingSlotDetails> AcquireStagingSlotAndMap(
+      const std::vector<int64_t>& src_block_ids);
+
+  absl::StatusOr<std::vector<raiden::PjRtCopyFuture>> IssueD2hLayerTransfers(
+      const std::vector<int64_t>& src_block_ids,
+      const std::vector<int64_t>& host_block_ids, uint64_t uuid);
+
   std::optional<int> GetLocalTpuNumaNode(xla::PjRtBuffer* buf) const;
 
   StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,

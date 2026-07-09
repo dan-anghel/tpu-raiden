@@ -1417,81 +1417,106 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   }).detach();
 }
 
-void KVCacheManagerWithTransfer::StartPushInternal(
-    uint64_t uuid, const std::vector<std::string>& remote_data_endpoints,
-    const std::vector<int64_t>& src_block_ids,
-    const std::vector<int64_t>& dst_block_ids) {
+absl::StatusOr<KVCacheManagerWithTransfer::StagingSlotDetails>
+KVCacheManagerWithTransfer::AcquireStagingSlotAndMap(
+    const std::vector<int64_t>& src_block_ids) {
   // Stage the producer's device KV into a host slot (slot.block_ids) and send
   // those host blocks to the consumer, keeping host offsets within the staging
   // pool. Writing D2H straight to host[src_block_id] overflows the host buffer
   // once a device block id exceeds num_host_blocks.
-  int64_t send_slot = -1;
-  std::vector<int64_t> host_block_ids;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
-        free_slots_.empty()) {
-      auto it = send_entries_.find(uuid);
-      if (it != send_entries_.end()) {
-        done_sending_.insert(it->second->req_id);
-        ReleaseEntrySlotLocked(it->second);
-        send_entries_.erase(it);
-      }
-      return;
-    }
-    Slot slot = AcquireSlotLocked();
-    send_slot = slot.slot_idx;
-    auto it = send_entries_.find(uuid);
-    if (it != send_entries_.end()) it->second->slot_idx = send_slot;
-    host_block_ids.reserve(src_block_ids.size());
-    for (size_t k = 0; k < src_block_ids.size(); ++k) {
-      host_block_ids.push_back(slot.block_ids[k]);
-    }
+  std::lock_guard<std::mutex> lock(mu_);
+  if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
+      free_slots_.empty()) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("Insufficient free staging slots or request size too "
+                     "large. Required blocks: ",
+                     src_block_ids.size(), ", max_blocks: ", max_blocks_,
+                     ", free slots: ", free_slots_.size()));
   }
+  Slot slot = AcquireSlotLocked();
+  std::vector<int64_t> host_block_ids;
+  host_block_ids.reserve(src_block_ids.size());
+  for (size_t k = 0; k < src_block_ids.size(); ++k) {
+    host_block_ids.push_back(slot.block_ids[k]);
+  }
+  return StagingSlotDetails{slot.slot_idx, std::move(host_block_ids)};
+}
 
+absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>
+KVCacheManagerWithTransfer::IssueD2hLayerTransfers(
+    const std::vector<int64_t>& src_block_ids,
+    const std::vector<int64_t>& host_block_ids, uint64_t uuid) {
   // Coalesce contiguous (device,host) block runs into a few large copies. With
   // per-block segments (sizes=1) a contiguous KV range becomes n device copies
   // that flood the command queue with small ops and serialize against prefill
   // GEMMs on the shared TensorCore; coalescing collapses a contiguous range to
   // one copy, matching the pre-Hybrid-Push pull path.
+  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
+  std::vector<raiden::PjRtCopyFuture> d2h_layer_futures;
+  d2h_layer_futures.reserve(num_layers());
+
+  for (size_t l = 0; l < num_layers(); ++l) {
+    LOG(INFO) << "D2H start layer " << l << ": uuid=" << uuid
+              << ", numa=" << assigned_numa_node().value_or(-1);
+    auto future_or =
+        D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets, d2h_copy.sizes,
+            /*slot_idx=*/std::nullopt, /*layer_idx=*/l);
+    if (!future_or.ok()) {
+      return future_or.status();
+    }
+    d2h_layer_futures.push_back(std::move(future_or.value()));
+  }
+  return d2h_layer_futures;
+}
+
+void KVCacheManagerWithTransfer::StartPushInternal(
+    uint64_t uuid, const std::vector<std::string>& remote_data_endpoints,
+    const std::vector<int64_t>& src_block_ids,
+    const std::vector<int64_t>& dst_block_ids) {
+  auto slot_details_or = AcquireStagingSlotAndMap(src_block_ids);
+  if (!slot_details_or.ok()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      done_sending_.insert(it->second->req_id);
+      ReleaseEntrySlotLocked(it->second);
+      send_entries_.erase(it);
+    }
+    return;
+  }
+  int64_t send_slot = slot_details_or->slot_idx;
+  const std::vector<int64_t>& host_block_ids = slot_details_or->host_block_ids;
+
   std::shared_ptr<SendEntry> entry;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
     if (it != send_entries_.end()) {
       entry = it->second;
+      entry->slot_idx = send_slot;
     }
   }
 
   if (!entry) {
     LOG(ERROR) << "SendEntry not found for UUID: " << uuid;
+    std::lock_guard<std::mutex> lock(mu_);
+    ReleaseSlotLocked(send_slot);
     return;
   }
 
-  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
-  entry->d2h_layer_futures.reserve(num_layers());
-
-  // 1. Issue D2H copies layer-by-layer!
-  for (size_t l = 0; l < num_layers(); ++l) {
-    LOG(INFO) << "StartPushInternal (D2H start) layer " << l
-              << ": uuid=" << uuid
-              << ", numa=" << assigned_numa_node().value_or(-1);
-    auto future_or =
-        D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets, d2h_copy.sizes,
-            /*slot_idx=*/std::nullopt, /*layer_idx=*/l);
-    if (!future_or.ok()) {
-      std::lock_guard<std::mutex> lock(mu_);
-      auto it = send_entries_.find(uuid);
-      if (it != send_entries_.end()) {
-        done_sending_.insert(it->second->req_id);
-        ReleaseEntrySlotLocked(it->second);
-        send_entries_.erase(it);
-      }
-      ThrowStatus("Failed to issue D2H in StartPushInternal layer loop",
-                  future_or.status());
+  auto futures_or = IssueD2hLayerTransfers(src_block_ids, host_block_ids, uuid);
+  if (!futures_or.ok()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      done_sending_.insert(it->second->req_id);
+      ReleaseEntrySlotLocked(it->second);
+      send_entries_.erase(it);
     }
-    entry->d2h_layer_futures.push_back(std::move(future_or.value()));
+    ThrowStatus("Failed to issue D2H in StartPushInternal layer loop",
+                futures_or.status());
   }
+  entry->d2h_layer_futures = std::move(futures_or.value());
 
   entry->remote_data_endpoints = remote_data_endpoints;
   entry->src_ints.assign(host_block_ids.begin(), host_block_ids.end());
@@ -1890,9 +1915,10 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
 
 absl::Status KVCacheManagerWithTransfer::PushKVCacheResharded(
     const tpu_raiden::rpc::StartTransferRequest& request) {
-  LOG(INFO) << "KVCacheManagerWithTransfer::PushKVCacheResharded starting: uuid="
-            << request.uuid() << ", is_sender=true";
-  
+  LOG(INFO)
+      << "KVCacheManagerWithTransfer::PushKVCacheResharded starting: uuid="
+      << request.uuid() << ", is_sender=true";
+
   // 1. Call base class implementation to register the plan in active_plans_
   TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
       request.uuid(), request, /*is_sender=*/true));
@@ -1919,67 +1945,60 @@ absl::Status KVCacheManagerWithTransfer::PushKVCacheResharded(
   }
 
   // 3. Acquire a staging slot from the pool
-  int64_t send_slot = -1;
-  std::vector<int64_t> host_block_ids;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
-        free_slots_.empty()) {
-      return absl::FailedPreconditionError(
-          absl::StrCat("Insufficient free staging slots or request size too large. Required blocks: ",
-                       src_block_ids.size(), ", max_blocks: ", max_blocks_,
-                       ", free slots: ", free_slots_.size()));
-    }
-    Slot slot = AcquireSlotLocked();
-    send_slot = slot.slot_idx;
-    host_block_ids.reserve(src_block_ids.size());
-    for (size_t k = 0; k < src_block_ids.size(); ++k) {
-      host_block_ids.push_back(slot.block_ids[k]);
-    }
+  auto slot_details_or = AcquireStagingSlotAndMap(src_block_ids);
+  if (!slot_details_or.ok()) {
+    return slot_details_or.status();
   }
+  int64_t send_slot = slot_details_or->slot_idx;
+  const std::vector<int64_t>& host_block_ids = slot_details_or->host_block_ids;
 
   // 4. Coalesce contiguous (device, host) block runs and copy D2H
-  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
-  std::vector<raiden::PjRtCopyFuture> d2h_layer_futures;
-  d2h_layer_futures.reserve(num_layers());
-
-  for (size_t l = 0; l < num_layers(); ++l) {
-    auto future_or =
-        D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets, d2h_copy.sizes,
-            /*slot_idx=*/std::nullopt, /*layer_idx=*/l);
-    if (!future_or.ok()) {
-      std::lock_guard<std::mutex> lock(mu_);
-      ReleaseSlotLocked(send_slot);
-      return future_or.status();
-    }
-    d2h_layer_futures.push_back(std::move(future_or.value()));
+  auto futures_or =
+      IssueD2hLayerTransfers(src_block_ids, host_block_ids, request.uuid());
+  if (!futures_or.ok()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ReleaseSlotLocked(send_slot);
+    return futures_or.status();
   }
+  auto d2h_layer_futures = std::move(futures_or.value());
 
   // Block until D2H copies for all layers are complete.
   for (auto& fut : d2h_layer_futures) {
-    TF_RETURN_IF_ERROR(fut.Await());
+    absl::Status status = fut.Await();
+    if (!status.ok()) {
+      std::lock_guard<std::mutex> lock_slots(mu_);
+      ReleaseSlotLocked(send_slot);
+      return status;
+    }
   }
 
-  // 5. Group entries by dst_peer and map global src_block_id to local host_block_id
+  // 5. Group entries by dst_peer and map global src_block_id to local
+  // host_block_id, filtering duplicate transfers
   std::map<int64_t, int64_t> src_to_host;
   for (size_t k = 0; k < src_block_ids.size(); ++k) {
     src_to_host[src_block_ids[k]] = host_block_ids[k];
   }
 
-  std::map<std::string, std::pair<std::vector<int>, std::vector<int>>> peer_transfers;
+  std::map<std::string, std::set<std::pair<int, int>>> peer_transfers_set;
   for (const auto& entry : schedule.entries()) {
     int64_t src_bid = entry.src_block_id();
     int64_t dst_bid = entry.dst_block_id();
     int64_t host_bid = src_to_host[src_bid];
-    peer_transfers[entry.dst_peer()].first.push_back(static_cast<int>(host_bid));
-    peer_transfers[entry.dst_peer()].second.push_back(static_cast<int>(dst_bid));
+    peer_transfers_set[entry.dst_peer()].insert(
+        {static_cast<int>(host_bid), static_cast<int>(dst_bid)});
   }
 
-  // 6. Push blocks to each peer.
+  // 6. Push de-duplicated blocks to each peer.
   absl::MutexLock lock(&server_init_mu_);
-  for (auto& [peer, transfers] : peer_transfers) {
-    const auto& src_ints = transfers.first;
-    const auto& dst_ints = transfers.second;
+  for (auto& [peer, transfers] : peer_transfers_set) {
+    std::vector<int> src_ints;
+    std::vector<int> dst_ints;
+    src_ints.reserve(transfers.size());
+    dst_ints.reserve(transfers.size());
+    for (const auto& [host_bid, dst_bid] : transfers) {
+      src_ints.push_back(host_bid);
+      dst_ints.push_back(dst_bid);
+    }
     if (src_ints.empty()) continue;
 
     if (!server_) {
@@ -1988,8 +2007,9 @@ absl::Status KVCacheManagerWithTransfer::PushKVCacheResharded(
       return absl::FailedPreconditionError("Transport server is not running");
     }
 
-    auto push_s = server_->Push(peer, src_ints, dst_ints, /*parallelism=*/1,
-                                transport::MajorOrder::kLayerMajor, request.uuid());
+    auto push_s =
+        server_->Push(peer, src_ints, dst_ints, /*parallelism=*/1,
+                      transport::MajorOrder::kLayerMajor, request.uuid());
     if (!push_s.ok()) {
       std::lock_guard<std::mutex> lock_slots(mu_);
       ReleaseSlotLocked(send_slot);
