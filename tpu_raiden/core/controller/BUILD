@@ -50,15 +50,68 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "raiden_controller",
+    srcs = ["raiden_controller.cc"],
+    hdrs = ["raiden_controller.h"],
+    copts = ["-fexceptions"],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":worker_service_client",
+        "//tpu_raiden/kv_cache:logical_block_manager",
+        "//tpu_raiden/proto:worker_service_cc_proto",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "test_util",
+    testonly = True,
+    hdrs = ["test_util.h"],
+    visibility = ["//:internal"],
+    deps = [
+        ":worker_service_client",
+        ":worker_service_impl",
+        "@com_github_grpc_grpc//:grpc++",
+    ],
+)
+
 cc_test(
     name = "worker_service_test",
     srcs = ["worker_service_test.cc"],
     deps = [
+        ":test_util",
         ":worker_service_client",
         ":worker_service_impl",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
-        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "raiden_controller_test",
+    srcs = ["raiden_controller_test.cc"],
+    copts = ["-fexceptions"],
+    features = ["-use_header_modules"],
+    deps = [
+        ":raiden_controller",
+        ":test_util",
+        "//tpu_raiden/proto:worker_service_cc_proto",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
