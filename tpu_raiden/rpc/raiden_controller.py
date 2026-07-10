@@ -1199,180 +1199,192 @@ class RaidenController:
             logging.info("Using local registration for destination metadata")
             dst_metadata = self._get_local_metadata(dst_units)
 
-          # 2. Compute slices for all source and destination units centrally
-          computed_slices = {}
-
-          # Source slices (always local to sender controller)
-          for unit in src_units:
-            with self._lock:
-              global_shape = self._registered_global_shapes.get(unit)
-              mesh_shape = self._registered_mesh_shapes.get(unit)
-              layout = self._registered_layouts.get(unit)
-            if global_shape and mesh_shape and layout:
-              phys_shape, phys_mesh = to_physical(
-                  global_shape, mesh_shape, layout
-              )
-              slices = resharding_planner.compute_nd_shard_slices(
-                  phys_shape, phys_mesh
-              )
-              computed_slices[unit] = slices
-              logging.info("Computed source slices for %s: %s", unit, slices)
-
-          # Destination slices
-          data_address_to_unit = {}
-          for meta in dst_metadata:
-            unit = RaidenId(
-                meta.unit.job_name,
-                meta.unit.job_replica_id,
-                meta.unit.data_name,
-            )
-            for shard in meta.shards:
-              data_address_to_unit[shard] = unit
-            if meta.global_shape and meta.mesh_shape and meta.layout:
-              phys_shape, phys_mesh = to_physical(
-                  list(meta.global_shape),
-                  list(meta.mesh_shape),
-                  list(meta.layout),
-              )
-              slices = resharding_planner.compute_nd_shard_slices(
-                  phys_shape, phys_mesh
-              )
-              computed_slices[unit] = slices
-              logging.info(
-                  "Computed destination slices for %s: %s", unit, slices
-              )
-
-          # 3. Generate plan (Intersection)
+          # 2. Compute slices or use pre-computed schedules centrally
           computed_schedules = {}
-          for src_unit in src_units:
-            src_slices = computed_slices.get(src_unit)
-            if not src_slices:
-              continue
+          data_address_to_unit = {}
+          if shard_push_schedules:
+            logging.info("Using pre-computed shard_push_schedules")
+            computed_schedules = shard_push_schedules
+            for meta in dst_metadata:
+              unit = RaidenId(
+                  meta.unit.job_name,
+                  meta.unit.job_replica_id,
+                  meta.unit.data_name,
+              )
+              for shard in meta.shards:
+                data_address_to_unit[shard] = unit
+          else:
+            computed_slices = {}
 
-            # Get itemsize
-            with self._lock:
-              itemsize = self._registered_itemsizes.get(src_unit)
-            if not itemsize:
-              itemsize = 4  # default fallback
-
-            src_shards = self._resolve_shards(src_unit)
-            unit_schedules = {}
-
-            if len(src_shards) == 1:
-              try:
-                src_indices = [(0, int(src_unit.job_replica_id))]
-              except ValueError:
-                src_indices = [(0, 0)]
-            else:
-              src_indices = [(i, i) for i in range(len(src_slices))]
-
-            for local_src_idx, global_src_idx in src_indices:
-              if global_src_idx >= len(src_slices):
-                logging.warning(
-                    "global_src_idx %d out of range of src_slices (%d)",
-                    global_src_idx,
-                    len(src_slices),
+            # Source slices (always local to sender controller)
+            for unit in src_units:
+              with self._lock:
+                global_shape = self._registered_global_shapes.get(unit)
+                mesh_shape = self._registered_mesh_shapes.get(unit)
+                layout = self._registered_layouts.get(unit)
+              if global_shape and mesh_shape and layout:
+                phys_shape, phys_mesh = to_physical(
+                    global_shape, mesh_shape, layout
                 )
+                slices = resharding_planner.compute_nd_shard_slices(
+                    phys_shape, phys_mesh
+                )
+                computed_slices[unit] = slices
+                logging.info("Computed source slices for %s: %s", unit, slices)
+
+            # Destination slices
+            for meta in dst_metadata:
+              unit = RaidenId(
+                  meta.unit.job_name,
+                  meta.unit.job_replica_id,
+                  meta.unit.data_name,
+              )
+              for shard in meta.shards:
+                data_address_to_unit[shard] = unit
+              if meta.global_shape and meta.mesh_shape and meta.layout:
+                phys_shape, phys_mesh = to_physical(
+                    list(meta.global_shape),
+                    list(meta.mesh_shape),
+                    list(meta.layout),
+                )
+                slices = resharding_planner.compute_nd_shard_slices(
+                    phys_shape, phys_mesh
+                )
+                computed_slices[unit] = slices
+                logging.info(
+                    "Computed destination slices for %s: %s", unit, slices
+                )
+
+            # 3. Generate plan (Intersection)
+            for src_unit in src_units:
+              src_slices = computed_slices.get(src_unit)
+              if not src_slices:
                 continue
 
-              src_slice_proto = src_slices[global_src_idx]
-              src_slice = _proto_to_nd_slice(src_slice_proto)
-              shard_entries = []
+              # Get itemsize
+              with self._lock:
+                itemsize = self._registered_itemsizes.get(src_unit)
+              if not itemsize:
+                itemsize = 4  # default fallback
 
-              for dst_unit in dst_units:
-                d_slices = computed_slices.get(dst_unit)
-                if not d_slices:
+              src_shards = self._resolve_shards(src_unit)
+              unit_schedules = {}
+
+              if len(src_shards) == 1:
+                try:
+                  src_indices = [(0, int(src_unit.job_replica_id))]
+                except ValueError:
+                  src_indices = [(0, 0)]
+              else:
+                src_indices = [(i, i) for i in range(len(src_slices))]
+
+              for local_src_idx, global_src_idx in src_indices:
+                if global_src_idx >= len(src_slices):
+                  logging.warning(
+                      "global_src_idx %d out of range of src_slices (%d)",
+                      global_src_idx,
+                      len(src_slices),
+                  )
                   continue
 
-                dst_shards = []
-                for meta in dst_metadata:
-                  meta_unit = RaidenId(
-                      meta.unit.job_name,
-                      meta.unit.job_replica_id,
-                      meta.unit.data_name,
-                  )
-                  if meta_unit == dst_unit:
-                    dst_shards = list(meta.shards)
-                    break
-                if not dst_shards:
-                  dst_shards = ["127.0.0.1:8000"]  # fallback
+                src_slice_proto = src_slices[global_src_idx]
+                src_slice = _proto_to_nd_slice(src_slice_proto)
+                shard_entries = []
 
-                if len(dst_shards) == 1:
-                  try:
-                    dst_indices = [(0, int(dst_unit.job_replica_id))]
-                  except ValueError:
-                    dst_indices = [(0, 0)]
-                else:
-                  dst_indices = [(j, j) for j in range(len(d_slices))]
-
-                for local_dst_idx, global_dst_idx in dst_indices:
-                  if global_dst_idx >= len(d_slices):
-                    logging.warning(
-                        "global_dst_idx %d out of range of d_slices (%d)",
-                        global_dst_idx,
-                        len(d_slices),
-                    )
+                for dst_unit in dst_units:
+                  d_slices = computed_slices.get(dst_unit)
+                  if not d_slices:
                     continue
 
-                  dst_slice_proto = d_slices[global_dst_idx]
-                  dst_slice = _proto_to_nd_slice(dst_slice_proto)
-
-                  dst_peer = (
-                      dst_shards[local_dst_idx]
-                      if local_dst_idx < len(dst_shards)
-                      else dst_shards[0]
-                  )
-
-                  intersection = intersect_nd_slices(src_slice, dst_slice)
-                  if intersection:
-                    chunks = generate_strided_copy_chunks(
-                        src_slice, dst_slice, intersection, itemsize
+                  dst_shards = []
+                  for meta in dst_metadata:
+                    meta_unit = RaidenId(
+                        meta.unit.job_name,
+                        meta.unit.job_replica_id,
+                        meta.unit.data_name,
                     )
-                    for (
-                        src_offset,
-                        dst_offset,
-                        size,
-                        src_stride,
-                        dst_stride,
-                        count,
-                    ) in chunks:
-                      src_block_bytes = (
-                          math.prod([e - s for s, e in src_slice[1:]])
-                          * itemsize
-                          if len(src_slice) > 1
-                          else itemsize
-                      )
-                      dst_block_bytes = (
-                          math.prod([e - s for s, e in dst_slice[1:]])
-                          * itemsize
-                          if len(dst_slice) > 1
-                          else itemsize
-                      )
-                      src_block_id = src_offset // src_block_bytes
-                      dst_block_id = dst_offset // dst_block_bytes
+                    if meta_unit == dst_unit:
+                      dst_shards = list(meta.shards)
+                      break
+                  if not dst_shards:
+                    dst_shards = ["127.0.0.1:8000"]  # fallback
 
-                      # Make offsets block-relative
-                      src_block_offset = src_offset % src_block_bytes
-                      dst_block_offset = dst_offset % dst_block_bytes
+                  if len(dst_shards) == 1:
+                    try:
+                      dst_indices = [(0, int(dst_unit.job_replica_id))]
+                    except ValueError:
+                      dst_indices = [(0, 0)]
+                  else:
+                    dst_indices = [(j, j) for j in range(len(d_slices))]
 
-                      shard_entries.append((
-                          dst_peer,
-                          local_dst_idx,
-                          dst_block_offset,
-                          src_block_offset,
+                  for local_dst_idx, global_dst_idx in dst_indices:
+                    if global_dst_idx >= len(d_slices):
+                      logging.warning(
+                          "global_dst_idx %d out of range of d_slices (%d)",
+                          global_dst_idx,
+                          len(d_slices),
+                      )
+                      continue
+
+                    dst_slice_proto = d_slices[global_dst_idx]
+                    dst_slice = _proto_to_nd_slice(dst_slice_proto)
+
+                    dst_peer = (
+                        dst_shards[local_dst_idx]
+                        if local_dst_idx < len(dst_shards)
+                        else dst_shards[0]
+                    )
+
+                    intersection = intersect_nd_slices(src_slice, dst_slice)
+                    if intersection:
+                      chunks = generate_strided_copy_chunks(
+                          src_slice, dst_slice, intersection, itemsize
+                      )
+                      for (
+                          src_offset,
+                          dst_offset,
                           size,
-                          src_block_id,
-                          dst_block_id,
                           src_stride,
                           dst_stride,
                           count,
-                      ))
+                      ) in chunks:
+                        src_block_bytes = (
+                            math.prod([e - s for s, e in src_slice[1:]])
+                            * itemsize
+                            if len(src_slice) > 1
+                            else itemsize
+                        )
+                        dst_block_bytes = (
+                            math.prod([e - s for s, e in dst_slice[1:]])
+                            * itemsize
+                            if len(dst_slice) > 1
+                            else itemsize
+                        )
+                        src_block_id = src_offset // src_block_bytes
+                        dst_block_id = dst_offset // dst_block_bytes
 
-              if shard_entries:
-                unit_schedules[local_src_idx] = shard_entries
+                        # Make offsets block-relative
+                        src_block_offset = src_offset % src_block_bytes
+                        dst_block_offset = dst_offset % dst_block_bytes
 
-            if unit_schedules:
-              computed_schedules[src_unit] = unit_schedules
+                        shard_entries.append((
+                            dst_peer,
+                            local_dst_idx,
+                            dst_block_offset,
+                            src_block_offset,
+                            size,
+                            src_block_id,
+                            dst_block_id,
+                            src_stride,
+                            dst_stride,
+                            count,
+                        ))
+
+                if shard_entries:
+                  unit_schedules[local_src_idx] = shard_entries
+
+              if unit_schedules:
+                computed_schedules[src_unit] = unit_schedules
 
           # Build rpc_addresses for local source workers
           rpc_addresses = self.worker_rpc_client.get_worker_endpoints()

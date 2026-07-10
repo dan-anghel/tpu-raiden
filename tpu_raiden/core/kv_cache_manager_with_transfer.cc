@@ -65,6 +65,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -379,8 +380,18 @@ static CopyPlan BuildLoadCopyPlan(
   plan.h2d_host_block_ids.reserve(local_order.size());
   for (size_t i = 0; i < local_order.size(); ++i) {
     const size_t original_idx = local_order[i];
-    plan.h2d_local_block_ids.push_back(local_block_ids[original_idx]);
-    plan.h2d_host_block_ids.push_back(local_host_block_ids[original_idx]);
+    int64_t local_bid = local_block_ids[original_idx];
+    int64_t host_bid = local_host_block_ids[original_idx];
+    if (plan.h2d_local_block_ids.empty() ||
+        plan.h2d_local_block_ids.back() != local_bid) {
+      plan.h2d_local_block_ids.push_back(local_bid);
+      plan.h2d_host_block_ids.push_back(host_bid);
+    } else {
+      if (plan.h2d_host_block_ids.back() != host_bid) {
+        throw std::invalid_argument(
+            "Duplicate local block IDs must map to the same host block ID");
+      }
+    }
   }
 
   plan.h2d_copy =
@@ -633,19 +644,31 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
     recv_entry.req_id = req_id;
 
     int64_t total_blocks = 0;
+    absl::flat_hash_set<int> unique_dst_blocks;
     for (const auto& [src_replica_idx, schedule] :
          request.shard_push_schedules()) {
-      std::set<int> unique_blocks_from_this_source;
+      absl::flat_hash_set<std::pair<int, int>> unique_transfers_from_this_source;
       for (const auto& push_entry : schedule.entries()) {
         recv_entry.host_to_chip[push_entry.dst_block_id()] =
             push_entry.dst_block_id();
-        unique_blocks_from_this_source.insert(push_entry.dst_block_id());
+        unique_transfers_from_this_source.insert(
+            {push_entry.src_block_id(), push_entry.dst_block_id()});
+        unique_dst_blocks.insert(push_entry.dst_block_id());
       }
-      total_blocks += unique_blocks_from_this_source.size();
+      total_blocks += unique_transfers_from_this_source.size();
     }
     recv_entry.total_blocks = total_blocks;
     recv_entry.num_completed_blocks = 0;
     recv_entry.deadline = DeadlineFromNow();
+
+    // Populate h2d_copy spec for unique destination blocks
+    std::vector<int64_t> h2d_host_block_ids(unique_dst_blocks.begin(),
+                                            unique_dst_blocks.end());
+    std::vector<int64_t> h2d_local_block_ids =
+        h2d_host_block_ids;  // 1-to-1 mapping
+    recv_entry.h2d_copy =
+        BuildCoalescedCopySpec(h2d_host_block_ids, h2d_local_block_ids);
+
     if (total_blocks > 0) {
       active_recv_entries_[uuid] = std::move(recv_entry);
       LOG(INFO) << "RegisterActivePlan (Receiver): Populated "
@@ -765,7 +788,9 @@ void KVCacheManagerWithTransfer::StartRead(
     host_block_ids = *local_host_block_ids;
   } else if (!local_block_ids.empty()) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (static_cast<int64_t>(local_block_ids.size()) > max_blocks_ ||
+    absl::flat_hash_set<int64_t> unique_local_bids(local_block_ids.begin(),
+                                                   local_block_ids.end());
+    if (static_cast<int64_t>(unique_local_bids.size()) > max_blocks_ ||
         free_slots_.empty()) {
       // Request larger than a slot, or staging pool exhausted: surface as a
       // recv failure (the connector can recompute) rather than throwing.
@@ -774,9 +799,19 @@ void KVCacheManagerWithTransfer::StartRead(
     }
     Slot slot = AcquireSlotLocked();
     recv_slot = slot.slot_idx;
+    absl::flat_hash_map<int64_t, int64_t> local_to_host;
+    size_t host_block_idx = 0;
     host_block_ids.reserve(local_block_ids.size());
     for (size_t k = 0; k < local_block_ids.size(); ++k) {
-      host_block_ids.push_back(slot.block_ids[k]);
+      int64_t local_bid = local_block_ids[k];
+      auto it = local_to_host.find(local_bid);
+      if (it == local_to_host.end()) {
+        int64_t host_bid = slot.block_ids[host_block_idx++];
+        local_to_host[local_bid] = host_bid;
+        host_block_ids.push_back(host_bid);
+      } else {
+        host_block_ids.push_back(it->second);
+      }
     }
   }
   CopyPlan load_plan =

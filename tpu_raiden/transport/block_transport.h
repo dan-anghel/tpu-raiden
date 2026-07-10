@@ -69,10 +69,13 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
   // for a specific transaction (identified by uuid).
   // Optionally accepts the sender_node_id to distinguish senders in many-to-one
   // transfers.
+  // If `src_block_id` is provided (not -1), it is used to resolve correct chunk
+  // offsets when multiple source blocks merge into a single destination block
+  // (heterogeneous block sizes).
   virtual std::vector<BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
-      absl::string_view peer = "") {
+      absl::string_view peer = "", int64_t src_block_id = -1) {
     // Default implementation: blocks are contiguous and of uniform size.
     std::vector<BlockChunk> result;
     size_t accumulated_bytes = 0;

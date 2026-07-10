@@ -219,10 +219,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
         "RegisterRecv not implemented in base class");
   }
 
+  // Resolves the host memory pointers (BlockChunks) for the given block_ids.
+  // If `src_block_id` is provided (not -1), it is used to filter the active plan
+  // to resolve the correct chunk offset, which is necessary when multiple
+  // source blocks merge into a single destination block (heterogeneous block sizes).
   std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
-      absl::string_view peer = "") override;
+      absl::string_view peer = "", int64_t src_block_id = -1) override;
 
   bool IsDramDestination(uint64_t uuid) const;
 

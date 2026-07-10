@@ -264,6 +264,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
   ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
   std::vector<int> allocated_ids;
 
+  std::vector<int> src_block_ids;
   if (header.op == 1) {
     ASSIGN_OR_RETURN(allocated_ids, block_delegate_->AllocateBlocks(
                                         header.count_or_size, header.uuid));
@@ -272,6 +273,9 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
   } else {
     allocated_ids.resize(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
+                              header.count_or_size * sizeof(int)));
+    src_block_ids.resize(header.count_or_size, 0);
+    RETURN_IF_ERROR(ReadExact(client_fd, src_block_ids.data(),
                               header.count_or_size * sizeof(int)));
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
@@ -295,9 +299,15 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
             ReadExact(client_fd, &sender_size, sizeof(sender_size)));
 
         const int64_t block_id_val = dst_id;
+        int64_t src_bid = -1;
+        if (!src_block_ids.empty()) {
+          ABSL_DCHECK_LT(k, src_block_ids.size());
+          src_bid = src_block_ids[k];
+        }
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
             l, sh, absl::MakeConstSpan(&block_id_val, 1), sender_size,
-            header.uuid, static_cast<int64_t>(header.remote_id));
+            header.uuid, static_cast<int64_t>(header.remote_id),
+            /*peer=*/"", src_bid);
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", dst_id,
@@ -760,6 +770,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   if (header.op == 6) {
     ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
     s = WriteExact(fd, &dst_block_ids[block_offset], block_count * sizeof(int));
+    if (!s.ok()) {
+      statuses[stream_idx] = s;
+      return;
+    }
+    s = WriteExact(fd, &src_block_ids[block_offset], block_count * sizeof(int));
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;

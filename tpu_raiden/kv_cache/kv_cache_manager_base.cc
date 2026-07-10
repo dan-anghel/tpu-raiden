@@ -1267,7 +1267,8 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
                                    absl::Span<const int64_t> block_ids,
                                    size_t total_bytes, uint64_t uuid,
                                    int64_t sender_node_id,
-                                   absl::string_view peer) {
+                                   absl::string_view peer,
+                                   int64_t src_block_id) {
   RegisteredPlan plan;
   bool has_plan = false;
   {
@@ -1337,10 +1338,16 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
       if (sender_node_id != -1) {
         found_src_shard = static_cast<int>(sender_node_id);
       } else {
+        // If src_block_id is provided, we use it to disambiguate which source
+        // block we are receiving. This is crucial for heterogeneous block sizes
+        // (merging) where multiple source blocks target the same dst_block_id.
+        // If src_block_id is -1, we fall back to matching only on dst_block_id.
         for (const auto& [src_shard, src_schedule] : schedules) {
           for (const auto& entry : src_schedule.entries()) {
             if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
-                static_cast<size_t>(entry.dst_block_id()) == block_id) {
+                static_cast<size_t>(entry.dst_block_id()) == block_id &&
+                (src_block_id == -1 ||
+                 static_cast<size_t>(entry.src_block_id()) == src_block_id)) {
               found_src_shard = src_shard;
               break;
             }
@@ -1355,7 +1362,9 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
           const auto& schedule = schedule_found_it->second;
           for (const auto& entry : schedule.entries()) {
             if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
-                static_cast<size_t>(entry.dst_block_id()) == block_id) {
+                static_cast<size_t>(entry.dst_block_id()) == block_id &&
+                (src_block_id == -1 ||
+                 static_cast<size_t>(entry.src_block_id()) == src_block_id)) {
               if (!peer.empty() && entry.dst_peer() != peer) {
                 continue;
               }
