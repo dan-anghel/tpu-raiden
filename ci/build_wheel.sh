@@ -94,7 +94,17 @@ ln -sf /usr/bin/clang++-18 /usr/bin/clang++
 clang --version | head -1
 
 if [[ "${WITH_TORCH}" == "1" ]]; then
-  pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+  TORCH_VERSION=""
+  if [[ -f /torch_tpu/pyproject.toml ]]; then
+    TORCH_VERSION=$(sed -n -E 's/.*["'\''`]torch[[:space:]]*([>=<~=]+[0-9.a-zA-Z+-]+)["'\''`].*/\1/p' /torch_tpu/pyproject.toml 2>/dev/null | head -1 || true)
+  fi
+  if [[ -z "${TORCH_VERSION}" ]]; then
+    echo "WARNING: Could not parse torch version from /torch_tpu/pyproject.toml (or file missing). Installing latest." >&2
+    pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+  else
+    echo "Installing torch version: torch${TORCH_VERSION}"
+    pip install -q "torch${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+  fi
   TORCH_SOURCE="$(python3 -c 'import torch,pathlib;print(pathlib.Path(torch.__file__).resolve().parent.parent)')"
   export TORCH_SOURCE
   export TORCH_TPU_MODULE_PATH=/torch_tpu
