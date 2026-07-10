@@ -51,3 +51,22 @@ py_grpc_library(
     visibility = ["//visibility:public"],
     deps = [":worker_service_py_pb2"],
 )
+
+proto_library(
+    name = "controller_service_proto",
+    srcs = ["controller_service.proto"],
+)
+
+cc_proto_library(
+    name = "controller_service_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":controller_service_proto"],
+)
+
+cc_grpc_library(
+    name = "controller_service_cc_grpc",
+    srcs = [":controller_service_proto"],
+    generate_mocks = True,
+    visibility = ["//visibility:public"],
+    deps = [":controller_service_cc_proto"],
+)
