@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -53,12 +52,39 @@ struct RaidenId {
   }
 };
 
+enum class BlockStatus {
+  INIT,
+  REMOTE,
+  HOST,
+  HBM,
+};
+
+struct RaidenBlockID {
+  RaidenId raiden_id;
+  int host_block_id = -1;
+  BlockStatus status = BlockStatus::INIT;
+
+  RaidenBlockID() = default;
+  /* implicit */ RaidenBlockID(RaidenId id, int host_id = -1,
+                               BlockStatus stat = BlockStatus::INIT)
+      : raiden_id(std::move(id)), host_block_id(host_id), status(stat) {}
+
+  bool operator==(const RaidenBlockID& other) const {
+    return raiden_id == other.raiden_id &&
+           host_block_id == other.host_block_id && status == other.status;
+  }
+};
+
+using BlockSliceList =
+    std::vector<std::pair<std::string, std::vector<RaidenBlockID>>>;
+
 // KV Store that manages the indices and routing of prefix cache across serving
 // nodes and microservice slices.
 class KVCacheStore {
  public:
   explicit KVCacheStore(size_t capacity,
-                        std::string global_registry_address = "");
+                        std::string global_registry_address = "",
+                        RaidenId raiden_id = {});
 
   ~KVCacheStore();
 
@@ -68,27 +94,47 @@ class KVCacheStore {
   // Authoritative KVCacheStore API implementations
 
   // Checks the LRU directory for cached block hashes. Returns a list of all
-  // matched replica pairs (block hash and vector of RaidenIds) encountered
+  // matched replica pairs (block hash and vector of RaidenBlockIDs) encountered
   // in sequence prior to the first miss.
   // If enable_global is true, it will query the global registry for any
   // misses after the local lookup.
-  absl::StatusOr<std::vector<std::pair<std::string, std::vector<RaidenId>>>>
-  Lookup(const std::vector<std::string>& block_hashes,
-         bool enable_global = false);
+  absl::StatusOr<BlockSliceList> Lookup(
+      const std::vector<std::string>& block_hashes, bool enable_global = false);
 
   // Caches sharded buffers into host-RAM/HBM backing store.
   // Returns:
   // - bool: whether all blocks were successfully inserted (i.e. none already
   // existed)
-  // - std::vector<std::pair<std::string, std::vector<RaidenId>>>: list of
-  // entries evicted from the LRU cache during insertion
-  std::pair<bool, std::vector<std::pair<std::string, std::vector<RaidenId>>>>
-  Insert(const std::vector<std::string>& block_hashes,
-         const std::vector<std::vector<RaidenId>>& slices, bool on_host);
+  // - BlockSliceList: list of entries evicted from the LRU cache during
+  // insertion
+  std::pair<bool, BlockSliceList> Insert(
+      const std::vector<std::string>& block_hashes,
+      const std::vector<std::vector<RaidenBlockID>>& slices, bool on_host);
+
+  // Pins all existing block hashes, and inserts and pins new block hashes if
+  // there is sufficient available space in the LRU cache.
+  // Returns:
+  // - bool: whether the entire InsertAndPin operation succeeded (i.e. all
+  //         existing keys were pinned, all new keys inserted and pinned)
+  // - BlockSliceList: list of entries evicted during insertion
+  std::pair<bool, BlockSliceList> InsertAndPin(
+      const std::vector<std::string>& block_hashes,
+      const std::vector<std::vector<RaidenBlockID>>& slices, bool on_host);
+
+  // Reverts an InsertAndPin operation by unpinning all block_hashes in the
+  // LRU cache, deleting any block_hash in REMOTE status whose pin count is 0,
+  // and putting back evicted entries in reverse order for each deleted remote
+  // block.
+  // Returns:
+  // - size_t: number of remote blocks deleted
+  // - BlockSliceList: remaining evicted entries that were not restored
+  std::pair<size_t, BlockSliceList> ReleaseAndDelete(
+      const std::vector<std::string>& block_hashes,
+      BlockSliceList pending_evict_entries = {});
 
   // Deletes cached sharded buffers from host-RAM/HBM backing store entirely.
   void Delete(const std::vector<std::string>& block_hashes,
-              const std::vector<std::vector<RaidenId>>& slices);
+              const std::vector<std::vector<RaidenBlockID>>& slices);
 
   // Pins cached block hashes in memory, protecting them against LRU eviction
   // while in active use. Returns true if all keys exist and were successfully
@@ -103,11 +149,14 @@ class KVCacheStore {
 
   size_t capacity() const;
 
+  const RaidenId& raiden_id() const { return raiden_id_; }
+
  private:
   mutable absl::Mutex mutex_;
-  mutable LRUCache<std::string, std::vector<RaidenId>> lru_cache_
+  mutable LRUCache<std::string, std::vector<RaidenBlockID>> lru_cache_
       ABSL_GUARDED_BY(mutex_);
   std::unique_ptr<global_registry::GlobalRegistryClient> registry_client_;
+  RaidenId raiden_id_;
 };
 
 }  // namespace kv_cache

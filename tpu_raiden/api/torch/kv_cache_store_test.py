@@ -175,7 +175,9 @@ class KVCacheStoreTest(absltest.TestCase):
     controller._impl = mock_impl
 
     # Case 2: Both local and global have the same hit, but we return local.
-    local_id = kv_cache_store._impl.RaidenId("local_job", "0", "kv_cache", 1)
+    local_id = kv_cache_store._impl.RaidenBlockID(
+        kv_cache_store._impl.RaidenId("local_job", "0", "kv_cache", 1)
+    )
     mock_impl.lookup.return_value = [(b"shared_hash", [local_id])]
 
     res = controller.lookup([b"shared_hash"], enable_global=True)
@@ -186,11 +188,11 @@ class KVCacheStoreTest(absltest.TestCase):
     mock_impl.lookup.assert_called_with([b"shared_hash"], True)
 
     # Case 3: No local hit, only global hits.
-    remote_id1 = kv_cache_store._impl.RaidenId(
-        "10.0.0.1:1234", "0", "kv_cache", 42
+    remote_id1 = kv_cache_store._impl.RaidenBlockID(
+        kv_cache_store._impl.RaidenId("10.0.0.1:1234", "0", "kv_cache", 42)
     )
-    remote_id2 = kv_cache_store._impl.RaidenId(
-        "10.0.0.2:1234", "0", "kv_cache", 43
+    remote_id2 = kv_cache_store._impl.RaidenBlockID(
+        kv_cache_store._impl.RaidenId("10.0.0.2:1234", "0", "kv_cache", 43)
     )
     mock_impl.lookup.return_value = [
         (b"global_1", [remote_id1]),
@@ -215,6 +217,59 @@ class KVCacheStoreTest(absltest.TestCase):
     # Should not fail, just return empty because the registry is down
     res = controller.lookup(hashes, enable_global=True)
     self.assertEmpty(res)
+
+  def test_insert_and_pin_release_and_delete(self):
+    controller = kv_cache_store.KVCacheStore(capacity=2)
+
+    local_hashes = [b"local_1", b"local_2"]
+    local_slices = [
+        [
+            kv_cache_store.RaidenBlockID(
+                kv_cache_store.RaidenId("local_job", "0", "kv_cache", 0),
+                -1,
+                kv_cache_store.BlockStatus.HOST,
+            )
+        ],
+        [
+            kv_cache_store.RaidenBlockID(
+                kv_cache_store.RaidenId("local_job", "0", "kv_cache", 1),
+                -1,
+                kv_cache_store.BlockStatus.HOST,
+            )
+        ],
+    ]
+    self.assertTrue(controller.insert(local_hashes, local_slices, True)[0])
+
+    remote_hashes = [b"remote_1", b"remote_2"]
+    remote_slices = [
+        [
+            kv_cache_store.RaidenBlockID(
+                kv_cache_store.RaidenId("remote_job", "0", "kv_cache", 0),
+                -1,
+                kv_cache_store.BlockStatus.REMOTE,
+            )
+        ],
+        [
+            kv_cache_store.RaidenBlockID(
+                kv_cache_store.RaidenId("remote_job", "0", "kv_cache", 1),
+                -1,
+                kv_cache_store.BlockStatus.REMOTE,
+            )
+        ],
+    ]
+    success, evicted = controller.insert_and_pin(
+        remote_hashes, remote_slices, True
+    )
+    self.assertTrue(success)
+    self.assertLen(evicted, 2)
+    self.assertEmpty(controller.lookup([b"local_1"]))
+
+    del_count, rem_evicted = controller.release_and_delete(
+        remote_hashes, evicted
+    )
+    self.assertEqual(del_count, 2)
+    self.assertEmpty(rem_evicted)
+    self.assertLen(controller.lookup([b"local_1", b"local_2"]), 2)
 
 
 if __name__ == "__main__":

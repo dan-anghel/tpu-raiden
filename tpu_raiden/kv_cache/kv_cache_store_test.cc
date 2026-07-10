@@ -29,6 +29,7 @@
 #include "grpcpp/server_builder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
+#include "tpu_raiden/kv_cache/lru_cache.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -39,7 +40,7 @@ TEST(KVCacheStoreTest, BasicTests) {
   EXPECT_EQ(controller.capacity(), 50);
 
   std::vector<std::string> hashes = {"4001", "4002"};
-  std::vector<std::vector<RaidenId>> slices = {
+  std::vector<std::vector<RaidenBlockID>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
@@ -73,7 +74,7 @@ TEST(KVCacheStoreTest, PinAndRelease) {
   KVCacheStore controller(2);
 
   std::vector<std::string> hashes = {"101", "102"};
-  std::vector<std::vector<RaidenId>> slices = {
+  std::vector<std::vector<RaidenBlockID>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
@@ -87,7 +88,7 @@ TEST(KVCacheStoreTest, PinAndRelease) {
   // Inserting a third element should fail to evict because both existing items
   // are pinned
   std::vector<std::string> hash_3 = {"103"};
-  std::vector<std::vector<RaidenId>> slice_3 = {
+  std::vector<std::vector<RaidenBlockID>> slice_3 = {
       {RaidenId{"inference_server", "2", "kv_cache", 0}}};
   controller.Insert(hash_3, slice_3, true);
 
@@ -97,7 +98,7 @@ TEST(KVCacheStoreTest, PinAndRelease) {
 
   // Now inserting a fourth element (104) should successfully evict 101
   std::vector<std::string> hash_4 = {"104"};
-  std::vector<std::vector<RaidenId>> slice_4 = {
+  std::vector<std::vector<RaidenBlockID>> slice_4 = {
       {RaidenId{"inference_server", "3", "kv_cache", 0}}};
   controller.Insert(hash_4, slice_4, true);
 
@@ -110,7 +111,7 @@ TEST(KVCacheStoreTest, PartialPinRollback) {
   KVCacheStore controller(2);
 
   std::vector<std::string> hashes = {"201", "202"};
-  std::vector<std::vector<RaidenId>> slices = {
+  std::vector<std::vector<RaidenBlockID>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
@@ -128,7 +129,7 @@ TEST(KVCacheStoreTest, EvictionTracking) {
   KVCacheStore controller(2);
 
   std::vector<std::string> hashes_1_2 = {"101", "102"};
-  std::vector<std::vector<RaidenId>> slices_1_2 = {
+  std::vector<std::vector<RaidenBlockID>> slices_1_2 = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 1}}};
 
@@ -139,7 +140,7 @@ TEST(KVCacheStoreTest, EvictionTracking) {
 
   // 2. Insert 103. Since capacity is 2, this must evict the LRU block (101).
   std::vector<std::string> hash_3 = {"103"};
-  std::vector<std::vector<RaidenId>> slice_3 = {
+  std::vector<std::vector<RaidenBlockID>> slice_3 = {
       {RaidenId{"inference_server", "2", "kv_cache", 2}}};
 
   auto res_3 = controller.Insert(hash_3, slice_3, true);
@@ -147,8 +148,8 @@ TEST(KVCacheStoreTest, EvictionTracking) {
   ASSERT_EQ(res_3.second.size(), 1);
   EXPECT_EQ(res_3.second[0].first, "101");
   ASSERT_EQ(res_3.second[0].second.size(), 1);
-  EXPECT_EQ(res_3.second[0].second[0].job_name, "inference_server");
-  EXPECT_EQ(res_3.second[0].second[0].data_replica_idx, 0);
+  EXPECT_EQ(res_3.second[0].second[0].raiden_id.job_name, "inference_server");
+  EXPECT_EQ(res_3.second[0].second[0].raiden_id.data_replica_idx, 0);
 
   // 3. Verify that lookup for 101 now misses, but 102 and 103 are present.
   EXPECT_EQ(controller.Lookup({"101"})->size(), 0);
@@ -198,7 +199,7 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
 
   // Insert blocks locally
   std::vector<std::string> local_hashes = {"local_only_hash", "shared_hash"};
-  std::vector<std::vector<RaidenId>> local_slices = {
+  std::vector<std::vector<RaidenBlockID>> local_slices = {
       {RaidenId{"local_job", "0", "kv_cache", 0}},
       {RaidenId{"local_job", "0", "kv_cache", 1}}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
@@ -209,8 +210,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 1);
     EXPECT_EQ((*lookup_res)[0].first, "local_only_hash");
-    EXPECT_EQ((*lookup_res)[0].second[0].job_name, "local_job");
-    EXPECT_EQ((*lookup_res)[0].second[0].data_replica_idx, 0);
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.data_replica_idx, 0);
   }
 
   // Case 2: Both local and global has the same hit, but we return local hit
@@ -221,8 +222,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 1);
     EXPECT_EQ((*lookup_res)[0].first, "shared_hash");
     // Should return local info, not remote info from registry
-    EXPECT_EQ((*lookup_res)[0].second[0].job_name, "local_job");
-    EXPECT_EQ((*lookup_res)[0].second[0].data_replica_idx, 1);
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.data_replica_idx, 1);
   }
 
   // Case 3: No local hit, only global hits
@@ -233,12 +234,12 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 2);
 
     EXPECT_EQ((*lookup_res)[0].first, "global_hash_1");
-    EXPECT_EQ((*lookup_res)[0].second[0].job_name, host1);
-    EXPECT_EQ((*lookup_res)[0].second[0].data_replica_idx, block1);
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, host1);
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.data_replica_idx, block1);
 
     EXPECT_EQ((*lookup_res)[1].first, "global_hash_2");
-    EXPECT_EQ((*lookup_res)[1].second[0].job_name, host2);
-    EXPECT_EQ((*lookup_res)[1].second[0].data_replica_idx, block2);
+    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.job_name, host2);
+    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.data_replica_idx, block2);
   }
 
   // 4. Lookup with enable_global = false
@@ -263,15 +264,15 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 3);
 
     EXPECT_EQ((*lookup_res)[0].first, "local_only_hash");
-    EXPECT_EQ((*lookup_res)[0].second[0].job_name, "local_job");
+    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
 
     EXPECT_EQ((*lookup_res)[1].first, "global_hash_1");
-    EXPECT_EQ((*lookup_res)[1].second[0].job_name, host1);
-    EXPECT_EQ((*lookup_res)[1].second[0].data_replica_idx, block1);
+    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.job_name, host1);
+    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.data_replica_idx, block1);
 
     EXPECT_EQ((*lookup_res)[2].first, "global_hash_2");
-    EXPECT_EQ((*lookup_res)[2].second[0].job_name, host2);
-    EXPECT_EQ((*lookup_res)[2].second[0].data_replica_idx, block2);
+    EXPECT_EQ((*lookup_res)[2].second[0].raiden_id.job_name, host2);
+    EXPECT_EQ((*lookup_res)[2].second[0].raiden_id.data_replica_idx, block2);
   }
 
   // 6. Lookup with enable_global = true, but registry has a miss
@@ -295,7 +296,7 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
 
   // Insert one block locally
   std::vector<std::string> local_hashes = {"local_hash"};
-  std::vector<std::vector<RaidenId>> local_slices = {
+  std::vector<std::vector<RaidenBlockID>> local_slices = {
       {RaidenId{"local_job", "0", "kv_cache", 0}}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
@@ -307,14 +308,14 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 1);
   EXPECT_EQ((*lookup_res)[0].first, "local_hash");
-  EXPECT_EQ((*lookup_res)[0].second[0].job_name, "local_job");
+  EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
 }
 
 TEST(KVCacheStoreTest, LookupCapLimit) {
   KVCacheStore store(2);
 
   std::vector<std::string> hashes = {"101", "102"};
-  std::vector<std::vector<RaidenId>> slices = {
+  std::vector<std::vector<RaidenBlockID>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 1}}};
 
@@ -411,7 +412,7 @@ TEST(KVCacheStoreTest, LookupCapLimitMixed) {
 
   // Insert 1 block locally
   std::vector<std::string> local_hashes = {"local_hash_1"};
-  std::vector<std::vector<RaidenId>> local_slices = {
+  std::vector<std::vector<RaidenBlockID>> local_slices = {
       {RaidenId{"local_job", "0", "kv_cache", 0}}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
@@ -432,7 +433,7 @@ TEST(KVCacheStoreTest, LookupAvailableSpaceLimit) {
   KVCacheStore store(3);
 
   std::vector<std::string> hashes = {"101", "102", "103"};
-  std::vector<std::vector<RaidenId>> slices = {
+  std::vector<std::vector<RaidenBlockID>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 1}},
       {RaidenId{"inference_server", "2", "kv_cache", 2}}};
@@ -450,6 +451,129 @@ TEST(KVCacheStoreTest, LookupAvailableSpaceLimit) {
   EXPECT_EQ(lookup_res->size(), 2);
   EXPECT_EQ((*lookup_res)[0].first, "101");
   EXPECT_EQ((*lookup_res)[1].first, "102");
+}
+
+TEST(KVCacheStoreTest, InsertAndPin) {
+  KVCacheStore store(2);
+
+  // Insert local block
+  std::vector<std::string> local_hashes = {"local_1"};
+  std::vector<std::vector<RaidenBlockID>> local_slices = {
+      {RaidenId{"local_job", "0", "kv_cache", 0}}};
+  ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
+
+  // Execute InsertAndPin
+  std::vector<std::vector<RaidenBlockID>> slices = {
+      {RaidenId{"local_job", "0", "kv_cache", 0}},
+      {RaidenId{"remote_job", "0", "kv_cache", 42}}};
+  auto res = store.InsertAndPin({"local_1", "remote_1"}, slices, true);
+  EXPECT_TRUE(res.first);
+  EXPECT_TRUE(res.second.empty());
+  EXPECT_EQ(store.GetPinCount("local_1"), 1);
+  EXPECT_EQ(store.GetPinCount("remote_1"), 1);
+
+  // Since capacity is 2 and both local_1 and remote_1 are pinned, available
+  // space is 0. Attempting to InsertAndPin remote_2 should fail due to lack
+  // of space.
+  auto res_fail = store.InsertAndPin({"remote_2"}, {}, true);
+  EXPECT_FALSE(res_fail.first);
+}
+
+TEST(KVCacheStoreTest, LruCachePutBack) {
+  LRUCache<std::string, int> cache(3);
+  cache.Put("A", 1);
+  cache.Put("B", 2);
+  // MRU to LRU is: B, A.
+
+  // PutBack("C", 3) should add C to the back (LRU position).
+  cache.PutBack("C", 3);
+  // Now MRU to LRU should be: B, A, C.
+  // Let's verify by checking Evict(): first evicted item should be C!
+  auto evicted1 = cache.Evict();
+  ASSERT_TRUE(evicted1.has_value());
+  EXPECT_EQ(evicted1->first, "C");
+
+  auto evicted2 = cache.Evict();
+  ASSERT_TRUE(evicted2.has_value());
+  EXPECT_EQ(evicted2->first, "A");
+
+  auto evicted3 = cache.Evict();
+  ASSERT_TRUE(evicted3.has_value());
+  EXPECT_EQ(evicted3->first, "B");
+}
+
+TEST(KVCacheStoreTest, ReleaseAndDelete) {
+  KVCacheStore store(2);
+
+  // Insert two local blocks (not remote)
+  std::vector<std::string> local_hashes = {"local_1", "local_2"};
+  std::vector<std::vector<RaidenBlockID>> local_slices = {
+      {RaidenBlockID(RaidenId{"local_job", "0", "kv_cache", 0}, -1,
+                     BlockStatus::HOST)},
+      {RaidenBlockID(RaidenId{"local_job", "0", "kv_cache", 1}, -1,
+                     BlockStatus::HOST)}};
+  ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
+
+  // Now InsertAndPin two remote blocks, which will evict local_1 and local_2.
+  std::vector<std::string> remote_hashes = {"remote_1", "remote_2"};
+  std::vector<std::vector<RaidenBlockID>> remote_slices = {
+      {RaidenBlockID(RaidenId{"remote_job", "0", "kv_cache", 0}, -1,
+                     BlockStatus::REMOTE)},
+      {RaidenBlockID(RaidenId{"remote_job", "0", "kv_cache", 1}, -1,
+                     BlockStatus::REMOTE)}};
+  auto res = store.InsertAndPin(remote_hashes, remote_slices, true);
+  ASSERT_TRUE(res.first);
+  ASSERT_EQ(res.second.size(), 2);
+  EXPECT_EQ(store.GetPinCount("remote_1"), 1);
+  EXPECT_EQ(store.GetPinCount("remote_2"), 1);
+  EXPECT_EQ(store.Lookup({"local_1"})->size(), 0);
+  EXPECT_EQ(store.Lookup({"local_2"})->size(), 0);
+
+  // Now call ReleaseAndDelete to revert InsertAndPin!
+  auto release_res = store.ReleaseAndDelete(remote_hashes, res.second);
+  EXPECT_EQ(release_res.first, 2);
+  EXPECT_TRUE(release_res.second.empty());
+
+  // remote_1 and remote_2 should be unpinned and deleted (since REMOTE)
+  EXPECT_EQ(store.GetPinCount("remote_1"), 0);
+  EXPECT_EQ(store.GetPinCount("remote_2"), 0);
+  EXPECT_EQ(store.Lookup({"remote_1"})->size(), 0);
+  EXPECT_EQ(store.Lookup({"remote_2"})->size(), 0);
+
+  // local_1 and local_2 should be restored to the cache!
+  auto lookup_res = store.Lookup({"local_1", "local_2"});
+  ASSERT_TRUE(lookup_res.ok());
+  EXPECT_EQ(lookup_res->size(), 2);
+
+  // Test non-remote block in ReleaseAndDelete: should unpin without deleting
+  store.InsertAndPin({"local_1"}, {local_slices[0]}, true);
+  EXPECT_EQ(store.GetPinCount("local_1"), 1);
+  auto res_non_remote = store.ReleaseAndDelete({"local_1"});
+  EXPECT_EQ(res_non_remote.first, 0);
+  EXPECT_TRUE(res_non_remote.second.empty());
+  EXPECT_EQ(store.GetPinCount("local_1"), 0);
+  EXPECT_EQ(store.Lookup({"local_1"})->size(), 1);
+
+  // Test remote block pinned twice: after one ReleaseAndDelete, pin count is 1
+  // so it should NOT be deleted!
+  store.InsertAndPin({"remote_1"}, {remote_slices[0]}, true);
+  store.Pin({"remote_1"});  // pin count is now 2
+  EXPECT_EQ(store.GetPinCount("remote_1"), 2);
+  auto res_pinned = store.ReleaseAndDelete({"remote_1"});
+  EXPECT_EQ(res_pinned.first, 0);  // 0 deleted because pin count was 2 -> 1
+  EXPECT_EQ(store.GetPinCount("remote_1"), 1);
+  EXPECT_EQ(store.Lookup({"remote_1"})->size(), 1);
+  store.Release({"remote_1"});
+  store.Delete({"remote_1"}, {remote_slices[0]});
+
+  // Test partial restore: 1 deleted remote block with 2 evicted entries
+  BlockSliceList mock_evicted = {{"evict_1", {local_slices[0]}},
+                                 {"evict_2", {local_slices[1]}}};
+  store.InsertAndPin({"remote_2"}, {remote_slices[1]}, true);
+  auto res_partial = store.ReleaseAndDelete({"remote_2"}, mock_evicted);
+  EXPECT_EQ(res_partial.first, 1);
+  ASSERT_EQ(res_partial.second.size(), 1);
+  EXPECT_EQ(res_partial.second[0].first, "evict_1");  // evict_2 was restored!
 }
 
 }  // namespace

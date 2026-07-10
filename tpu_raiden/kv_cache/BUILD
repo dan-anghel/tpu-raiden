@@ -195,7 +195,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":kv_cache_store",
-        "//tpu_raiden/core:raw_transfer_core",
+        ":lru_cache",
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
         "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
         "@com_github_grpc_grpc//:grpc++",

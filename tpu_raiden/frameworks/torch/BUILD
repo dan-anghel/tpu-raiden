@@ -183,6 +183,7 @@ nanobind_extension(
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@nanobind",
         "@torch_tpu//shims/torch:aten_headers",

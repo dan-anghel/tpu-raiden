@@ -28,6 +28,7 @@ py_library(
     srcs = ["kv_cache_store.py"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tpu_raiden/api:common",
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
     ],
 )

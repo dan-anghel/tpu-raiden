@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
@@ -29,6 +30,7 @@
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
 #include <nanobind/stl/string_view.h>  // IWYU pragma: keep
 #include <nanobind/stl/vector.h>  // IWYU pragma: keep
+#include "xla/pjrt/status_casters.h"
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
@@ -36,7 +38,6 @@
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
-#include "xla/pjrt/status_casters.h"
 
 namespace nb = nanobind;
 
@@ -59,9 +60,10 @@ std::vector<std::string> ToStdStringVector(
 class KVCacheStoreWrapper {
  public:
   explicit KVCacheStoreWrapper(size_t lru_capacity,
-                               std::string global_registry_address = "") {
-    controller_ =
-        std::make_unique<KVCacheStore>(lru_capacity, global_registry_address);
+                               std::string global_registry_address = "",
+                               RaidenId raiden_id = {}) {
+    controller_ = std::make_unique<KVCacheStore>(
+        lru_capacity, global_registry_address, std::move(raiden_id));
   }
   KVCacheStore* operator->() { return controller_.get(); }
   KVCacheStore& operator*() { return *controller_; }
@@ -402,17 +404,41 @@ NB_MODULE(_tpu_raiden_jax, m) {
   // =========================================================================
   nb::class_<tpu_raiden::kv_cache::RaidenId>(m, "RaidenId")
       .def(nb::init<std::string, std::string, std::string, int>(),
-           nb::arg("job_name"), nb::arg("job_replica_id") = "",
-           nb::arg("data_name"), nb::arg("data_replica_idx") = 0)
+           nb::arg("job_name") = "", nb::arg("job_replica_id") = "",
+           nb::arg("data_name") = "", nb::arg("data_replica_idx") = 0)
       .def_rw("job_name", &tpu_raiden::kv_cache::RaidenId::job_name)
       .def_rw("job_replica_id", &tpu_raiden::kv_cache::RaidenId::job_replica_id)
       .def_rw("data_name", &tpu_raiden::kv_cache::RaidenId::data_name)
       .def_rw("data_replica_idx",
               &tpu_raiden::kv_cache::RaidenId::data_replica_idx);
 
+  nb::enum_<tpu_raiden::kv_cache::BlockStatus>(m, "BlockStatus")
+      .value("INIT", tpu_raiden::kv_cache::BlockStatus::INIT)
+      .value("REMOTE", tpu_raiden::kv_cache::BlockStatus::REMOTE)
+      .value("HOST", tpu_raiden::kv_cache::BlockStatus::HOST)
+      .value("HBM", tpu_raiden::kv_cache::BlockStatus::HBM);
+
+  nb::class_<tpu_raiden::kv_cache::RaidenBlockID>(m, "RaidenBlockID")
+      .def(nb::init<tpu_raiden::kv_cache::RaidenId, int,
+                    tpu_raiden::kv_cache::BlockStatus>(),
+           nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId(),
+           nb::arg("host_block_id") = -1,
+           nb::arg("status") = tpu_raiden::kv_cache::BlockStatus::INIT)
+      .def_rw("raiden_id", &tpu_raiden::kv_cache::RaidenBlockID::raiden_id)
+      .def_rw("host_block_id",
+              &tpu_raiden::kv_cache::RaidenBlockID::host_block_id)
+      .def_rw("status", &tpu_raiden::kv_cache::RaidenBlockID::status);
+
   nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
-      .def(nb::init<size_t, std::string>(), nb::arg("capacity"),
-           nb::arg("global_registry_address") = "")
+      .def(nb::init<size_t, std::string, tpu_raiden::kv_cache::RaidenId>(),
+           nb::arg("capacity"), nb::arg("global_registry_address") = "",
+           nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId())
+      .def_prop_ro(
+          "raiden_id",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+            return (*self).raiden_id();
+          },
+          "Returns the RaidenId associated with this store.")
       .def(
           "lookup",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
@@ -420,11 +446,11 @@ NB_MODULE(_tpu_raiden_jax, m) {
             auto hashes = ToStdStringVector(block_hashes);
             auto res = self->Lookup(hashes, enable_global);
             if (!res.ok()) {
-              throw std::runtime_error("KVCacheStore lookup failed: " +
-                                       std::string(res.status().message()));
+              throw std::runtime_error(absl::StrCat(
+                  "KVCacheStore lookup failed: ", res.status().message()));
             }
-            std::vector<std::pair<nb::bytes,
-                                  std::vector<tpu_raiden::kv_cache::RaidenId>>>
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
                 py_res;
             py_res.reserve(res.value().size());
             for (const auto& pair : res.value()) {
@@ -441,13 +467,13 @@ NB_MODULE(_tpu_raiden_jax, m) {
           "insert",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes,
-             const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
-                 slices,
+             const std::vector<
+                 std::vector<tpu_raiden::kv_cache::RaidenBlockID>>& slices,
              bool on_host) {
             auto hashes = ToStdStringVector(block_hashes);
             auto res = self->Insert(hashes, slices, on_host);
-            std::vector<std::pair<nb::bytes,
-                                  std::vector<tpu_raiden::kv_cache::RaidenId>>>
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
                 py_evicted;
             py_evicted.reserve(res.second.size());
             for (const auto& pair : res.second) {
@@ -459,11 +485,64 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(
+          "insert_and_pin",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes,
+             const std::vector<
+                 std::vector<tpu_raiden::kv_cache::RaidenBlockID>>& slices,
+             bool on_host) {
+            auto hashes = ToStdStringVector(block_hashes);
+            auto res = self->InsertAndPin(hashes, slices, on_host);
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
+                py_evicted;
+            py_evicted.reserve(res.second.size());
+            for (const auto& pair : res.second) {
+              py_evicted.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return std::make_pair(res.first, py_evicted);
+          },
+          nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
+      .def(
+          "release_and_delete",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes,
+             const std::vector<std::pair<
+                 nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>&
+                 pending_evict_entries) {
+            auto hashes = ToStdStringVector(block_hashes);
+            std::vector<std::pair<
+                std::string, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
+                evicted;
+            evicted.reserve(pending_evict_entries.size());
+            for (const auto& pair : pending_evict_entries) {
+              evicted.push_back(std::make_pair(
+                  std::string(pair.first.c_str(), pair.first.size()),
+                  pair.second));
+            }
+            auto res = self->ReleaseAndDelete(hashes, evicted);
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
+                py_rem_evicted;
+            py_rem_evicted.reserve(res.second.size());
+            for (const auto& pair : res.second) {
+              py_rem_evicted.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return std::make_pair(res.first, py_rem_evicted);
+          },
+          nb::arg("block_hashes"),
+          nb::arg("pending_evict_entries") = std::vector<std::pair<
+              nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>())
+      .def(
           "delete",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes,
-             const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
-                 slices) {
+             const std::vector<
+                 std::vector<tpu_raiden::kv_cache::RaidenBlockID>>& slices) {
             auto hashes = ToStdStringVector(block_hashes);
             self->Delete(hashes, slices);
           },
