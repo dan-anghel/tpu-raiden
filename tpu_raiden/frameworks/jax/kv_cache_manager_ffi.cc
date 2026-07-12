@@ -34,6 +34,7 @@ namespace tpu_raiden {
 namespace kv_cache {
 
 KVCacheManagerWithTransfer* g_kv_cache_managers[32] = {nullptr};
+stream_executor::StreamExecutor* g_executors[32] = {nullptr};
 std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
 
 int64_t g_block_byte_size = 0;
@@ -42,8 +43,8 @@ int64_t g_local_blocks_per_shard = 0;
 // FFI Init custom call implementation (Host CPU Executed)
 xla::ffi::Error TriggerRaidenInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
-    int64_t slice_byte_size, int32_t local_port,
-    int32_t parallelism, int32_t host_blocks_to_allocate, int32_t num_layers,
+    int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
+    int32_t host_blocks_to_allocate, int32_t num_layers,
     xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   (void)x;
   (void)out;
@@ -105,6 +106,7 @@ xla::ffi::Error TriggerRaidenInitImpl(
                                  std::string(executor_or.status().message()));
     }
     auto executor = executor_or.value();
+    g_executors[shard_idx] = executor;  // Cache executor
 
     auto stream_or = executor->CreateStream();
     if (!stream_or.ok()) {
@@ -120,9 +122,6 @@ xla::ffi::Error TriggerRaidenInitImpl(
         << "[TPU Worker FFI] KVCacheManager successfully allocated for Shard: "
         << shard_idx << "! block_byte_size=" << g_block_byte_size
         << ", local_blocks_per_shard=" << g_local_blocks_per_shard;
-  } else {
-    g_block_byte_size = slice_byte_size;
-    g_local_blocks_per_shard = host_blocks_to_allocate / parallelism;
   }
   return xla::ffi::Error::Success();
 }
@@ -151,15 +150,19 @@ xla::ffi::Error TriggerRaidenH2dImpl(
         xla::ffi::ErrorCode::kInvalidArgument,
         "shard_idx out of bounds [0, 32): " + std::to_string(shard_idx));
   }
-  if (g_kv_cache_managers[shard_idx] == nullptr ||
-      g_streams[shard_idx] == nullptr) {
+  if (g_kv_cache_managers[shard_idx] == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kFailedPrecondition,
-                           "Raiden FFI KVCacheManager or StreamExecutor Stream "
+                           "Raiden FFI KVCacheManager "
                            "has not been initialized for Shard: " +
                                std::to_string(shard_idx));
   }
   int64_t dev_id = static_cast<int64_t>(shard_idx);
-  stream_executor::Stream* stream = g_streams[shard_idx].get();
+  ::xla::se::Stream* stream = g_streams[shard_idx].get();
+  if (stream == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kFailedPrecondition,
+                           "Stream has not been initialized for Shard: " +
+                               std::to_string(shard_idx));
+  }
 
   int64_t num_chunks = src_offsets.element_count();
   const int32_t* h_src_offsets =
@@ -172,7 +175,10 @@ xla::ffi::Error TriggerRaidenH2dImpl(
   const uint8_t* h_base = g_kv_cache_managers[shard_idx]->GetHostPointer(
       static_cast<size_t>(layer_idx), 0);
 
-  uint8_t* d_base = reinterpret_cast<uint8_t*>(cache_slice_buf.untyped_data());
+  LOG(WARNING) << "[TPU Worker FFI] H2D pointers: cache_slice_buf="
+               << cache_slice_buf.untyped_data()
+               << ", out=" << out->untyped_data();
+  uint8_t* d_base = reinterpret_cast<uint8_t*>(out->untyped_data());
 
   VLOG(1) << "[TPU Worker FFI] >>> EXECUTING HOST-TO-DEVICE (H2D) PCIE "
              "DMA TRANSFER <<<";
@@ -245,15 +251,34 @@ xla::ffi::Error TriggerRaidenD2hImpl(
         xla::ffi::ErrorCode::kInvalidArgument,
         "shard_idx out of bounds [0, 32): " + std::to_string(shard_idx));
   }
-  if (g_kv_cache_managers[shard_idx] == nullptr ||
-      g_streams[shard_idx] == nullptr) {
+  if (g_kv_cache_managers[shard_idx] == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kFailedPrecondition,
-                           "Raiden FFI KVCacheManager or StreamExecutor Stream "
+                           "Raiden FFI KVCacheManager "
                            "has not been initialized for Shard: " +
                                std::to_string(shard_idx));
   }
   int64_t dev_id = static_cast<int64_t>(shard_idx);
-  stream_executor::Stream* stream = g_streams[shard_idx].get();
+  ::xla::se::Stream* stream = g_streams[shard_idx].get();
+  if (stream == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kFailedPrecondition,
+                           "Stream has not been initialized for Shard: " +
+                               std::to_string(shard_idx));
+  }
+  auto executor = g_executors[shard_idx];
+  if (executor == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kFailedPrecondition,
+                           "Executor has not been initialized for Shard: " +
+                               std::to_string(shard_idx));
+  }
+
+  // Synchronize all physical TPU device activity to guarantee that JAX stream
+  // execution has completed writing target data to cache_slice_buf before host
+  // DMA reading.
+  bool sync_ok = executor->SynchronizeAllActivity();
+  if (!sync_ok) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
+                           "Executor SynchronizeAllActivity failed!");
+  }
 
   int64_t num_chunks = src_offsets.element_count();
   const int32_t* h_src_offsets =

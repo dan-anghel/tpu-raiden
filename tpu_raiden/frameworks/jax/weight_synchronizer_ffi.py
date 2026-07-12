@@ -251,7 +251,7 @@ def h2d(device_array, shard_idx, mesh) -> jax.Array:
   @compute_on.compute_on("device_host")
   def _local_h2d(anchor, s_idx):
     return jax.ffi.ffi_call(
-        "h2d",
+        "ws_h2d",
         jax.ShapeDtypeStruct(anchor.shape, anchor.dtype),
         has_side_effect=True,
     )(anchor, s_idx)
