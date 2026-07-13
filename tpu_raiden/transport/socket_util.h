@@ -20,6 +20,8 @@
 #include <cstddef>
 
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 
 namespace tpu_raiden::transport {
@@ -29,6 +31,9 @@ absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov);
 
 absl::Status ReadExact(int fd, void* buffer, size_t length);
 absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov);
+
+absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
+                                  absl::string_view local_ip = "");
 
 }  // namespace tpu_raiden::transport
 

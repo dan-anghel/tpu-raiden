@@ -90,8 +90,6 @@ class RawBufferTransport {
   const std::string& bound_ip() const { return bound_ip_; }
 
  protected:
-  absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
-                                    absl::string_view local_ip = "");
   virtual absl::StatusOr<int> AcquireConnection(
       absl::string_view peer, absl::string_view local_ip = "");
   virtual void ReleaseConnection(absl::string_view peer, int fd,
