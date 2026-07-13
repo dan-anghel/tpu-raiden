@@ -70,14 +70,14 @@ struct MockTransferManager {
 class WorkerServiceTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    test_server_ = CreateTestServer();
+    test_server_ = CreateTestWorkerServer();
     unit_.set_job_name("test_job");
     unit_.set_job_replica_id("0");
     unit_.set_data_name("test_data");
   }
 
   rpc::RaidenIdProto unit_;
-  std::unique_ptr<TestServer> test_server_;
+  std::unique_ptr<TestWorkerServer> test_server_;
 };
 
 TEST_F(WorkerServiceTest, CreateAndDeleteBuffersSuccess) {

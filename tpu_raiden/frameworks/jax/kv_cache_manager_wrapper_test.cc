@@ -23,11 +23,18 @@
 
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
 #include "xla/tsl/platform/test.h"
-#include "tpu_raiden/core/controller/raiden_controller.h"
+// clang-format off
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
+#include "tpu_raiden/core/controller/controller_service.h"
+#include "tpu_raiden/core/controller/test_util.h"
+#include "tpu_raiden/core/controller/raiden_controller.h"
+// clang-format on
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
@@ -313,13 +320,13 @@ TEST(KVCacheManagerWrapperTest, GrpcServerOptionalAndOffByDefault) {
   std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs2;
   subs2.push_back(std::make_unique<MockSubManager>());
   KVCacheManager mgr_explicit_off(std::move(subs2), /*grpc_port=*/0,
-                                  /*enable_worker_service=*/false);
+                                  /*controller_address=*/std::nullopt);
   EXPECT_EQ(mgr_explicit_off.GetGrpcPort(), 0);
 
   std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs3;
   subs3.push_back(std::make_unique<MockSubManager>());
   KVCacheManager mgr_started(std::move(subs3), /*grpc_port=*/0,
-                             /*enable_worker_service=*/true);
+                             /*controller_address=*/"localhost:12345");
   EXPECT_GT(mgr_started.GetGrpcPort(), 0);
 }
 
@@ -331,7 +338,7 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   subs.push_back(std::move(sub0));
 
   KVCacheManager mgr(std::move(subs), /*grpc_port=*/0,
-                     /*enable_worker_service=*/true);
+                     /*controller_address=*/"localhost:12345");
   int port = mgr.GetGrpcPort();
   ASSERT_GT(port, 0);
 
@@ -371,6 +378,27 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   EXPECT_EQ(ptr0->last_h2d_src_offsets, src_offsets);
   EXPECT_EQ(ptr0->last_h2d_dst_offsets, dst_offsets);
   EXPECT_EQ(ptr0->last_h2d_copy_sizes, copy_sizes);
+}
+
+TEST(KVCacheManagerWrapperTest, WorkerSelfRegistrationWithControllerSuccess) {
+  auto test_server = core::controller::CreateTestControllerServer();
+  ASSERT_NE(test_server, nullptr);
+
+  std::string controller_address = test_server->server_address;
+
+  auto sub0 = std::make_unique<MockSubManager>();
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+
+  KVCacheManager mgr(std::move(subs), /*grpc_port=*/0, controller_address,
+                     "test_worker_node");
+
+  auto workers = test_server->service->GetRegisteredWorkers();
+  ASSERT_EQ(workers.size(), 1);
+  EXPECT_EQ(workers[0].worker_id, "test_worker_node");
+  EXPECT_NE(
+      workers[0].raiden_worker_endpoint.find(std::to_string(mgr.GetGrpcPort())),
+      std::string::npos);
 }
 
 }  // namespace

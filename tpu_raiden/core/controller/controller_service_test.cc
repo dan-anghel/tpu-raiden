@@ -29,6 +29,7 @@
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 #include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/controller/test_util.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -37,41 +38,18 @@ namespace {
 
 class RaidenControllerTest : public ::testing::Test {
  protected:
-  void SetUp() override {
-    grpc::ServerBuilder builder;
-    int port = 0;
-    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(),
-                             &port);
-    builder.RegisterService(&service_);
-    server_ = builder.BuildAndStart();
-    ASSERT_NE(server_, nullptr);
-    ASSERT_GT(port, 0);
+  void SetUp() override { test_server_ = CreateTestControllerServer(); }
 
-    server_address_ = "127.0.0.1:" + std::to_string(port);
-    auto channel = grpc::CreateChannel(server_address_,
-                                       grpc::InsecureChannelCredentials());
-    client_ = std::make_unique<RaidenControllerClient>(channel);
-  }
-
-  void TearDown() override {
-    if (server_) {
-      server_->Shutdown();
-    }
-  }
-
-  std::string server_address_;
-  RaidenControllerServiceImpl service_;
-  std::unique_ptr<grpc::Server> server_;
-  std::unique_ptr<RaidenControllerClient> client_;
+  std::unique_ptr<TestControllerServer> test_server_;
 };
 
 TEST_F(RaidenControllerTest, RegisterWorkerSuccessfully) {
   std::string transfer_addr = "10.0.0.1:8000";
-  absl::Status status =
-      client_->RegisterWorker("worker_0", "10.0.0.1:9000", transfer_addr);
+  absl::Status status = test_server_->client->RegisterWorker(
+      "worker_0", "10.0.0.1:9000", transfer_addr);
   EXPECT_OK(status);
 
-  auto workers = service_.GetRegisteredWorkers();
+  auto workers = test_server_->service->GetRegisteredWorkers();
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "worker_0");
   EXPECT_EQ(workers[0].raiden_worker_endpoint, "10.0.0.1:9000");
@@ -80,11 +58,11 @@ TEST_F(RaidenControllerTest, RegisterWorkerSuccessfully) {
 
 TEST_F(RaidenControllerTest, RegisterWorkerAliasSnakeCase) {
   std::string transfer_addr = "10.0.0.2:8000";
-  absl::Status status =
-      client_->register_worker("worker_1", "10.0.0.2:9000", transfer_addr);
+  absl::Status status = test_server_->client->register_worker(
+      "worker_1", "10.0.0.2:9000", transfer_addr);
   EXPECT_OK(status);
 
-  auto worker_or = service_.GetWorker("worker_1");
+  auto worker_or = test_server_->service->GetWorker("worker_1");
   ASSERT_OK(worker_or);
   EXPECT_EQ(worker_or->worker_id, "worker_1");
   EXPECT_EQ(worker_or->raiden_worker_endpoint, "10.0.0.2:9000");
@@ -92,24 +70,26 @@ TEST_F(RaidenControllerTest, RegisterWorkerAliasSnakeCase) {
 }
 
 TEST_F(RaidenControllerTest, ConstructWithEndpointString) {
-  RaidenControllerClient client(server_address_);
+  RaidenControllerClient client(test_server_->server_address);
   absl::Status status = client.RegisterWorker("worker_endpoint_ctor",
                                               "10.0.0.1:9000", "10.0.0.1:8000");
   EXPECT_OK(status);
 
-  auto workers = service_.GetRegisteredWorkers();
+  auto workers = test_server_->service->GetRegisteredWorkers();
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "worker_endpoint_ctor");
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerEmptyIdFails) {
-  absl::Status status = client_->RegisterWorker("", "10.0.0.1:9000", {});
+  absl::Status status =
+      test_server_->client->RegisterWorker("", "10.0.0.1:9000", {});
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerNoAddressesFails) {
-  absl::Status status = client_->RegisterWorker("worker_no_addr", "", {});
+  absl::Status status =
+      test_server_->client->RegisterWorker("worker_no_addr", "", {});
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
 }

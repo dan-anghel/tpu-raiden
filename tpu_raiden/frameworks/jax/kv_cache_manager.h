@@ -227,7 +227,9 @@ class KVCacheManager {
                  std::optional<int> local_port = std::nullopt,
                  std::optional<int> host_blocks_to_allocate = std::nullopt,
                  bool unsafe_skip_buffer_lock = false, int parallelism = 1,
-                 int grpc_port = 0, bool enable_worker_service = false);
+                 int grpc_port = 0,
+                 std::optional<std::string> controller_address = std::nullopt,
+                 std::optional<std::string> worker_id = std::nullopt);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
@@ -235,7 +237,9 @@ class KVCacheManager {
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock, int parallelism,
-                 int grpc_port = 0, bool enable_worker_service = false);
+                 int grpc_port = 0,
+                 std::optional<std::string> controller_address = std::nullopt,
+                 std::optional<std::string> worker_id = std::nullopt);
 #endif
 
   // FFI metadata constructor (cache-only by default)
@@ -243,12 +247,15 @@ class KVCacheManager {
                  std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  int parallelism = 1, int grpc_port = 0,
-                 bool enable_worker_service = false);
+                 std::optional<std::string> controller_address = std::nullopt,
+                 std::optional<std::string> worker_id = std::nullopt);
 
   // Test-only constructor for sub-manager mock injection
   explicit KVCacheManager(
       std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
-      int grpc_port = 0, bool enable_worker_service = false);
+      int grpc_port = 0,
+      std::optional<std::string> controller_address = std::nullopt,
+      std::optional<std::string> worker_id = std::nullopt);
 
   ~KVCacheManager();
 
@@ -392,7 +399,10 @@ class KVCacheManager {
   }
 
  private:
-  void StartGrpcServer(int grpc_port, bool enable_worker_service);
+  void StartGrpcServer(
+      int grpc_port,
+      std::optional<std::string> controller_address = std::nullopt,
+      std::optional<std::string> worker_id = std::nullopt);
 
   std::unique_ptr<NumaAwareKVCacheManager> numa_manager_;
 };

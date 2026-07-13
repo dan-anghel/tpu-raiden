@@ -132,9 +132,12 @@ cc_library(
     hdrs = ["test_util.h"],
     visibility = ["//:internal"],
     deps = [
+        ":controller_client",
+        ":controller_service",
         ":worker_service_client",
         ":worker_service_impl",
         "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -178,6 +181,7 @@ cc_test(
     deps = [
         ":controller_client",
         ":controller_service",
+        ":test_util",
         "//tpu_raiden/proto:controller_service_cc_grpc",
         "//tpu_raiden/proto:controller_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",

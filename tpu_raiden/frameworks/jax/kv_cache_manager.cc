@@ -39,6 +39,7 @@
 #include "absl/types/span.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
+#include "tpu_raiden/core/controller/controller_client.h"
 #include "tpu_raiden/core/controller/worker_service_server.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
@@ -59,12 +60,12 @@ namespace kv_cache {
 namespace jax {
 
 namespace {
-tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
+::tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
     xla::PjRtClient* client) {
   return [client](size_t size_bytes, const xla::PjRtDevice* device)
-             -> absl::StatusOr<tpu_raiden::HostBufferAllocation> {
+             -> absl::StatusOr<::tpu_raiden::HostBufferAllocation> {
     if (size_bytes == 0) {
-      tpu_raiden::HostBufferAllocation alloc;
+      ::tpu_raiden::HostBufferAllocation alloc;
       alloc.ptr = nullptr;
       alloc.size = 0;
       return alloc;
@@ -83,9 +84,9 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
     // Touch memory to force physical page allocation (NUMA first-touch)
     std::thread touch_thread([ptr, aligned_size, device]() {
       if (device != nullptr) {
-        int node = tpu_raiden::GetPjRtDeviceNumaNode(device);
+        int node = ::tpu_raiden::GetPjRtDeviceNumaNode(device);
         if (node >= 0) {
-          int rc = tpu_raiden::PinCurrentThreadToNumaNode(node);
+          int rc = ::tpu_raiden::PinCurrentThreadToNumaNode(node);
           LOG(INFO) << "touch_thread: Pinned to NUMA node " << node
                     << ", status=" << rc
                     << ", thread_id=" << std::this_thread::get_id();
@@ -125,7 +126,7 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
       }
     }
 
-    tpu_raiden::HostBufferAllocation alloc;
+    ::tpu_raiden::HostBufferAllocation alloc;
     alloc.ptr = static_cast<uint8_t*>(ptr);
     alloc.size = size_bytes;
     alloc.owner = std::shared_ptr<void>(
@@ -144,7 +145,7 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
 #ifndef WITHOUT_PYTHON
 namespace {
 UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
-  auto layer_buffers = tpu_raiden::jax::UnpackJaxArrays(device_arrays);
+  auto layer_buffers = ::tpu_raiden::jax::UnpackJaxArrays(device_arrays);
   return {std::move(layer_buffers), std::move(device_arrays)};
 }
 }  // namespace
@@ -318,10 +319,10 @@ void NumaAwareKVCacheManager::InitSubManagers(
           client = sub_buffers[0][0]->device()->client();
         }
       }
-      tpu_raiden::HostBufferAllocator host_alloc;
+      ::tpu_raiden::HostBufferAllocator host_alloc;
       const char* shm_key_env = std::getenv("RAIDEN_SHM_KEY");
       if (shm_key_env != nullptr && std::strlen(shm_key_env) > 0) {
-        host_alloc = tpu_raiden::CreateHostMemoryAllocator(
+        host_alloc = ::tpu_raiden::CreateHostMemoryAllocator(
             client, max_blocks,
             (sub_buffers.empty() || sub_buffers[0].empty() ||
              sub_buffers[0][0] == nullptr)
@@ -806,22 +807,26 @@ KVCacheManager::KVCacheManager(nb::list device_arrays,
                                std::optional<int> local_port,
                                std::optional<int> host_blocks_to_allocate,
                                bool unsafe_skip_buffer_lock, int parallelism,
-                               int grpc_port, bool enable_worker_service)
+                               int grpc_port,
+                               std::optional<std::string> controller_address,
+                               std::optional<std::string> worker_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(device_arrays), local_port, host_blocks_to_allocate,
           unsafe_skip_buffer_lock, parallelism)) {
-  StartGrpcServer(grpc_port, enable_worker_service);
+  StartGrpcServer(grpc_port, controller_address, worker_id);
 }
 
 KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
                                bool unsafe_skip_buffer_lock, int parallelism,
-                               int grpc_port, bool enable_worker_service)
+                               int grpc_port,
+                               std::optional<std::string> controller_address,
+                               std::optional<std::string> worker_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(kv_caches), node_id, local_control_port, max_blocks,
           num_slots, timeout_s, unsafe_skip_buffer_lock, parallelism)) {
-  StartGrpcServer(grpc_port, enable_worker_service);
+  StartGrpcServer(grpc_port, controller_address, worker_id);
 }
 #endif
 
@@ -830,26 +835,29 @@ KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
                                std::optional<int> local_port,
                                std::optional<int> host_blocks_to_allocate,
                                int parallelism, int grpc_port,
-                               bool enable_worker_service)
+                               std::optional<std::string> controller_address,
+                               std::optional<std::string> worker_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate, parallelism)) {
-  StartGrpcServer(grpc_port, enable_worker_service);
+  StartGrpcServer(grpc_port, controller_address, worker_id);
 }
 
 KVCacheManager::KVCacheManager(
     std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
-    int grpc_port, bool enable_worker_service)
+    int grpc_port, std::optional<std::string> controller_address,
+    std::optional<std::string> worker_id)
     : numa_manager_(
           std::make_unique<NumaAwareKVCacheManager>(std::move(sub_managers))) {
-  StartGrpcServer(grpc_port, enable_worker_service);
+  StartGrpcServer(grpc_port, controller_address, worker_id);
 }
 
 KVCacheManager::~KVCacheManager() = default;
 
-void KVCacheManager::StartGrpcServer(int grpc_port,
-                                     bool enable_worker_service) {
-  if (!enable_worker_service) {
+void KVCacheManager::StartGrpcServer(
+    int grpc_port, std::optional<std::string> controller_address,
+    std::optional<std::string> worker_id) {
+  if (!controller_address.has_value() || controller_address->empty()) {
     return;
   }
   absl::Status status =
@@ -859,6 +867,36 @@ void KVCacheManager::StartGrpcServer(int grpc_port,
   if (!status.ok()) {
     throw std::runtime_error(absl::StrCat(
         "Failed to start gRPC server in KVCacheManager: ", status.message()));
+  }
+
+  if (controller_address.has_value() && !controller_address->empty()) {
+    int bound_port = GetGrpcPort();
+    std::string w_id = worker_id.value_or("worker_0");
+
+    std::string worker_ip = "127.0.0.1";
+    auto ips = GetLocalHostIpAddresses();
+    if (!ips.empty()) {
+      worker_ip = ips[0];
+    }
+    std::string worker_endpoint = absl::StrCat(worker_ip, ":", bound_port);
+
+    std::string transfer_endpoint = "";
+    auto local_eps = numa_manager_->get_local_endpoints();
+    if (!local_eps.empty()) {
+      transfer_endpoint = local_eps[0].endpoint;
+    }
+
+    core::controller::RaidenControllerClient client(*controller_address);
+    status = client.RegisterWorker(w_id, worker_endpoint, transfer_endpoint);
+    if (!status.ok()) {
+      LOG(ERROR) << "Failed to register worker with controller: "
+                 << status.message();
+    } else {
+      LOG(INFO) << "Successfully registered worker " << w_id
+                << " (worker_endpoint=" << worker_endpoint
+                << ", transfer_endpoint=" << transfer_endpoint
+                << ") with controller at " << *controller_address;
+    }
   }
 }
 

@@ -51,7 +51,8 @@ class KVCacheManager:
       parallelism: int = 4,
       node_id: int = 0,
       grpc_port: int = 0,
-      enable_worker_service: bool = False,
+      controller_address: Optional[str] = None,
+      worker_id: Optional[str] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -68,8 +69,9 @@ class KVCacheManager:
       parallelism: Number of parallel network copies per layer.
       node_id: Unique identifier for this host/node in the distributed mesh.
       grpc_port: Optional port for WorkerService gRPC server.
-      enable_worker_service: Whether to start WorkerService gRPC server and
-        enable host buffer allocations (default False).
+      controller_address: Optional address of central RaidenController. If
+        provided, the WorkerService gRPC server is enabled.
+      worker_id: Optional identifier for this worker.
     """
     if host_blocks_to_allocate is not None:
       self._impl = _impl.KVCacheManager(
@@ -79,7 +81,8 @@ class KVCacheManager:
           unsafe_skip_buffer_lock,
           parallelism,
           grpc_port,
-          enable_worker_service,
+          controller_address,
+          worker_id,
       )
     else:
       if max_blocks is None or num_slots is None:
@@ -97,7 +100,8 @@ class KVCacheManager:
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           parallelism=parallelism,
           grpc_port=grpc_port,
-          enable_worker_service=enable_worker_service,
+          controller_address=controller_address,
+          worker_id=worker_id,
       )
 
   def get_grpc_port(self) -> int:
