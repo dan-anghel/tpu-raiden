@@ -51,15 +51,7 @@ class WeightSynchronizer:
         bind_ip,
     )
 
-  def pull_weights(self, source: str) -> None:
-    """Inference server pulling current weights from the source peer (network pull + H2D).
 
-    Here we assume all the arrays we can pull are from a single source. Namely
-    this API doesn't support resharding (yet).
-    Args:
-      source: "host:port" coordinate of the source peer.
-    """
-    self._impl.PullWeights(source)
 
   def d2h(self) -> None:
     """Triggers asynchronous Device-to-Host (D2H) copy of current weights to Host buffer."""
@@ -69,33 +61,7 @@ class WeightSynchronizer:
     """Triggers asynchronous Host-to-Device (H2D) copy of staged host buffer back to Device memory E2E."""
     self._impl.H2d()
 
-  def pull_weights_chunk(
-      self,
-      source: str,
-      src_shard_idx: int,
-      src_offset_bytes: int,
-      dst_shard_idx: int,
-      dst_offset_bytes: int,
-      size_bytes: int,
-  ) -> None:
-    """Inference server pulling a specific byte range directly from a source worker peer.
 
-    Args:
-      source: "host:port" coordinate of the source peer.
-      src_shard_idx: Target source device shard index to read.
-      src_offset_bytes: Offset in bytes inside source shard staging buffer.
-      dst_shard_idx: Local destination device shard index to write.
-      dst_offset_bytes: Offset in bytes inside local destination staging buffer.
-      size_bytes: Number of bytes to transfer.
-    """
-    self._impl.PullWeightsChunk(
-        source,
-        src_shard_idx,
-        src_offset_bytes,
-        dst_shard_idx,
-        dst_offset_bytes,
-        size_bytes,
-    )
 
   def h2d_chunk(
       self,

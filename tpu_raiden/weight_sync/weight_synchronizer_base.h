@@ -87,10 +87,6 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
   absl::Status PushWeightsResharded(
       const tpu_raiden::rpc::StartTransferRequest& request);
 
-  // Inference server pulls current weights from the source peer E2E (network
-  // pull + H2D)
-  absl::Status PullWeights(absl::string_view source);
-
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
 

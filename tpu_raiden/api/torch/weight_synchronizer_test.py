@@ -41,7 +41,7 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
       ("fp32", torch.float32),
       ("int32", torch.int32),
   )
-  def test_e2e_3node_distributed_weight_push_and_pull(self, dtype):
+  def test_e2e_3node_distributed_weight_push(self, dtype):
     shape = (self.block_size, 128, 8)  # 16384 bytes capacity per layer shard
 
     # 1. Allocate source (Trainer) weights on Device TPU
@@ -107,43 +107,6 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
     for l in range(self.num_layers):
       for sh in range(self.num_shards):
         expected_val = float(l + 10.0)
-        np.testing.assert_allclose(
-            dst1_tensors[l][sh].cpu().numpy(), expected_val, atol=1e-5
-        )
-        np.testing.assert_allclose(
-            dst2_tensors[l][sh].cpu().numpy(), expected_val, atol=1e-5
-        )
-
-    # ==========================================================================
-    # Scenario B: Test the Pull API E2E (2 Destinations pull from 1 Source!)
-    # ==========================================================================
-    # Trainer updates source weights with brand new values
-    for l in range(self.num_layers):
-      for sh in range(self.num_shards):
-        val = float(l + 20.0)  # Layer 0=20.0, Layer 1=21.0
-        src_tensors[l][sh].fill_(val)
-
-    # Force execution of fill_ on source tensors to ensure TPU memory is updated
-    for l in range(self.num_layers):
-      for sh in range(self.num_shards):
-        _ = src_tensors[l][sh].cpu()
-
-    # Recreate ws_source to capture new buffers!
-    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1, bind_ip="127.0.0.1")
-    self.assertIsNotNone(ws_source.local_port)
-    peer_source = f"localhost:{ws_source.local_port}"
-
-    # Self-push to populate host buffer!
-    ws_source.push_weights([peer_source])
-
-    # Dest1 and Dest2 independently pull weights from the trainer source!
-    ws_dest1.pull_weights(peer_source)
-    ws_dest2.pull_weights(peer_source)
-
-    # Assert both destinations have successfully pulled the trainer's new weights E2E!
-    for l in range(self.num_layers):
-      for sh in range(self.num_shards):
-        expected_val = float(l + 20.0)
         np.testing.assert_allclose(
             dst1_tensors[l][sh].cpu().numpy(), expected_val, atol=1e-5
         )

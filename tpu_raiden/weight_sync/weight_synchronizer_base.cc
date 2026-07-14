@@ -572,23 +572,6 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
   return absl::OkStatus();
 }
 
-absl::Status WeightSynchronizerBase::PullWeights(absl::string_view source) {
-  if (source.empty()) {
-    return absl::InvalidArgumentError(
-        "Source peer address cannot be empty for weight pull");
-  }
-
-  // 1. Run high-speed parallel sockets H2H read to pull weights from source!
-  std::vector<int> weights_block_id = {0};
-  TF_RETURN_IF_ERROR(H2hReadDirect(source, weights_block_id).status());
-
-  // 2. Automatically copy the received staging weights onto local Device TPU
-  // HBM!
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
-  TF_RETURN_IF_ERROR(h2d_future.Await());
-
-  return absl::OkStatus();
-}
 
 void WeightSynchronizerBase::SetExternalHostBuffer(
     const std::vector<raiden::BufferHoldAndAlias>& buffer_holds) {

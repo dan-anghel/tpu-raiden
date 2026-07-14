@@ -77,10 +77,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
                          src_block_ids);
   }
 
-  absl::Status PullWeightsChunk(absl::string_view source, size_t src_shard_idx,
-                                size_t src_offset_bytes, size_t dst_shard_idx,
-                                size_t dst_offset_bytes, size_t size_bytes);
-
   absl::Status PushWeightsChunk(absl::string_view peer, size_t dst_shard_idx,
                                 size_t dst_offset_bytes,
                                 const uint8_t* data_ptr, size_t size_bytes);

@@ -109,70 +109,7 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
     for arr in dst2_arrs:
       np.testing.assert_array_equal(np.asarray(arr), 5.0)
 
-  def test_pull_synchronization(self):
-    src_arrs = [
-        jax.device_put(
-            jnp.ones(self.shape, dtype=self.dtype) * 10.0, self.sharding
-        )
-    ]
-    dst1_arrs = [
-        jax.device_put(jnp.zeros(self.shape, dtype=self.dtype), self.sharding)
-    ]
-    dst2_arrs = [
-        jax.device_put(jnp.zeros(self.shape, dtype=self.dtype), self.sharding)
-    ]
 
-    for arr in src_arrs:
-      arr.block_until_ready()
-    for arr in dst1_arrs:
-      arr.block_until_ready()
-    for arr in dst2_arrs:
-      arr.block_until_ready()
-
-    ws_source = WeightSynchronizer(
-        jax_arrays=src_arrs,
-        local_port=0,
-        unsafe_skip_buffer_lock=True,
-        listener_port=0,
-        bind_ip="127.0.0.1",
-    )
-    ws_dest1 = WeightSynchronizer(
-        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True,
-        bind_ip="127.0.0.1",
-    )
-    ws_dest2 = WeightSynchronizer(
-        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True,
-        bind_ip="127.0.0.1",
-    )
-
-    # Self-push to populate ws_source's host buffer with current device weights
-    req = raiden_service_pb2.ControlRequest(
-        command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
-        peers=[f"127.0.0.1:{ws_source.local_port}"],
-        start_transfer_request=raiden_service_pb2.StartTransferRequest(
-            is_sender=True
-        ),
-    )
-    payload = req.SerializeToString()
-
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, 0)
-    sock.connect(("::1", ws_source.listener_port))
-    sock.sendall(len(payload).to_bytes(4, "big") + payload)
-
-    resp_len = int.from_bytes(sock.recv(4), "big")
-    resp_bytes = sock.recv(resp_len)
-    resp = raiden_service_pb2.ControlResponse()
-    resp.ParseFromString(resp_bytes)
-    assert resp.success
-    sock.close()
-
-    ws_dest1.pull_weights(f"127.0.0.1:{ws_source.local_port}")
-    ws_dest2.pull_weights(f"127.0.0.1:{ws_source.local_port}")
-
-    for arr in dst1_arrs:
-      np.testing.assert_array_equal(np.asarray(arr), 10.0)
-    for arr in dst2_arrs:
-      np.testing.assert_array_equal(np.asarray(arr), 10.0)
 
 
 if __name__ == "__main__":

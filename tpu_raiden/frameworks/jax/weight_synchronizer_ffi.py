@@ -148,71 +148,7 @@ def init_weight_synchronizer_and_d2h(
   )(device_array, shard_idx)
 
 
-def execute_resharding(
-    device_array: jax.Array,
-    shard_idx: jax.Array,
-    src_ips: jax.Array,
-    src_ports: jax.Array,
-    src_offsets: jax.Array,
-    dst_offsets: jax.Array,
-    sizes: jax.Array,
-    dst_device_ids: jax.Array,
-    mesh: jax.sharding.Mesh,
-) -> jax.Array:
-  """Executes resharding plan via FFI.
 
-  Args:
-    device_array: The destination sharded array to be updated.
-    shard_idx: The shard index array (contains local device ID).
-    src_ips: Replicated array of source IPs (uint32).
-    src_ports: Replicated array of source ports (int32).
-    src_offsets: Replicated array of source offsets (int32).
-    dst_offsets: Replicated array of destination offsets (int32).
-    sizes: Replicated array of sizes (int32).
-    dst_device_ids: Replicated array of destination global device IDs (int32).
-    mesh: The JAX Mesh.
-  """
-  print("Python execute_resharding called!")
-
-  @compute_on.compute_on("device_host")
-  def _local_execute(
-      anchor, s_idx, s_ips, s_ports, s_offs, d_offs, szs, d_dev_ids
-  ):
-    return jax.ffi.ffi_call(
-        "execute_resharding",
-        jax.ShapeDtypeStruct(anchor.shape, anchor.dtype),
-        has_side_effect=True,
-        input_output_aliases={0: 0},
-    )(anchor, s_idx, s_ips, s_ports, s_offs, d_offs, szs, d_dev_ids)
-
-  meta_spec = jax.sharding.PartitionSpec()
-  cache_spec = device_array.sharding.spec
-  index_spec = jax.sharding.PartitionSpec(*mesh.axis_names)
-
-  return jax.shard_map(
-      _local_execute,
-      mesh=mesh,
-      in_specs=(
-          cache_spec,
-          index_spec,
-          meta_spec,
-          meta_spec,
-          meta_spec,
-          meta_spec,
-          meta_spec,
-          meta_spec,
-      ),
-      out_specs=cache_spec,
-  )(
-      device_array,
-      shard_idx,
-      src_ips,
-      src_ports,
-      src_offsets,
-      dst_offsets,
-      sizes,
-      dst_device_ids,
-  )
 
 
 def prepare_extended_info(

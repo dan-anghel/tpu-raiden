@@ -61,10 +61,6 @@ WeightSynchronizer::WeightSynchronizer(UnpackedWeights&& weights,
 
 WeightSynchronizer::~WeightSynchronizer() = default;
 
-// Forwarding methods implementations
-absl::Status WeightSynchronizer::PullWeights(absl::string_view source) {
-  return impl_->PullWeights(source);
-}
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::D2h() {
   return impl_->D2h();
 }
@@ -77,12 +73,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::H2dChunk(
   return impl_->H2dChunk(shard_idx, host_offset_bytes, device_offset_bytes,
                          size_bytes);
 }
-absl::Status WeightSynchronizer::PullWeightsChunk(
-    absl::string_view source, size_t src_shard_idx, size_t src_offset_bytes,
-    size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
-  return impl_->PullWeightsChunk(source, src_shard_idx, src_offset_bytes,
-                                 dst_shard_idx, dst_offset_bytes, size_bytes);
-}
+
 const uint8_t* WeightSynchronizer::GetHostBufferPtr(size_t layer_idx,
                                                     size_t shard_idx) const {
   return impl_->GetHostBufferPtr(layer_idx, shard_idx);

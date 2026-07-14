@@ -403,17 +403,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
             }
           },
           nb::arg("peers"), nb::call_guard<nb::gil_scoped_release>())
-      .def(
-          "PullWeights",
-          [](WeightSynchronizer& self, absl::string_view source) {
-            absl::Status s = self.PullWeights(source);
-            if (!s.ok()) {
-              throw std::runtime_error(
-                  "WeightSynchronizer PullWeights failed: " +
-                  std::string(s.message()));
-            }
-          },
-          nb::arg("source"), nb::call_guard<nb::gil_scoped_release>())
+
       .def(
           "D2h",
           [](WeightSynchronizer& self) {

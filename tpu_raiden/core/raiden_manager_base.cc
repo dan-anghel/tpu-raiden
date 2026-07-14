@@ -284,19 +284,6 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
   return server_->Pull(peers, src_block_ids, {}, {}, parallelism_);
 }
 
-absl::Status RaidenManagerBase::PullWeightsChunk(
-    absl::string_view source, size_t src_shard_idx, size_t src_offset_bytes,
-    size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
-  InitTransportServer();
-  absl::MutexLock lock(server_init_mu_);
-  if (!server_) {
-    return absl::FailedPreconditionError("Transport server is not running");
-  }
-  return server_->PullBuffer(source, /*buffer_id=*/0, src_shard_idx,
-                             src_offset_bytes, dst_shard_idx, dst_offset_bytes,
-                             size_bytes);
-}
-
 absl::Status RaidenManagerBase::PushWeightsChunk(absl::string_view peer,
                                                  size_t dst_shard_idx,
                                                  size_t dst_offset_bytes,
