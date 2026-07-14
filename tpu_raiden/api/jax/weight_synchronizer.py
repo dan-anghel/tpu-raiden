@@ -63,24 +63,7 @@ class WeightSynchronizer:
 
 
 
-  def h2d_chunk(
-      self,
-      shard_idx: int,
-      host_offset_bytes: int,
-      device_offset_bytes: int,
-      size_bytes: int,
-  ) -> None:
-    """Triggers asynchronous Host-to-Device (H2D) chunk copy directly to Device HBM.
 
-    Args:
-      shard_idx: Target shard index.
-      host_offset_bytes: Source offset in Host staging buffer.
-      device_offset_bytes: Destination offset in Device memory.
-      size_bytes: Number of bytes to copy.
-    """
-    self._impl.H2dChunk(
-        shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
-    )
 
   def get_host_buffer(self, layer_idx: int = 0, shard_idx: int = 0) -> any:
     """Returns a zero-copy Host-side CPU NumPy ndarray view of the C++ staging buffer.

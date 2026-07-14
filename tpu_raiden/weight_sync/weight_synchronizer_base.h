@@ -99,9 +99,6 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
 
   absl::StatusOr<raiden::PjRtCopyFuture> H2d();
   absl::StatusOr<raiden::PjRtCopyFuture> D2h();
-  absl::StatusOr<raiden::PjRtCopyFuture> H2dChunk(
-      size_t shard_idx, size_t host_offset_bytes, size_t device_offset_bytes,
-      size_t size_bytes);
 
  protected:
   std::unique_ptr<WeightSynchronizerListener> listener_;

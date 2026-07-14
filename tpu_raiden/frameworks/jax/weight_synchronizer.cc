@@ -67,12 +67,6 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::D2h() {
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::H2d() {
   return impl_->H2d();
 }
-absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizer::H2dChunk(
-    size_t shard_idx, size_t host_offset_bytes, size_t device_offset_bytes,
-    size_t size_bytes) {
-  return impl_->H2dChunk(shard_idx, host_offset_bytes, device_offset_bytes,
-                         size_bytes);
-}
 
 const uint8_t* WeightSynchronizer::GetHostBufferPtr(size_t layer_idx,
                                                     size_t shard_idx) const {

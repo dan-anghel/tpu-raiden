@@ -64,10 +64,6 @@ class WeightSynchronizer {
 
   absl::StatusOr<raiden::PjRtCopyFuture> D2h();
   absl::StatusOr<raiden::PjRtCopyFuture> H2d();
-  absl::StatusOr<raiden::PjRtCopyFuture> H2dChunk(size_t shard_idx,
-                                                  size_t host_offset_bytes,
-                                                  size_t device_offset_bytes,
-                                                  size_t size_bytes);
 
   const uint8_t* GetHostBufferPtr(size_t layer_idx, size_t shard_idx) const;
   std::optional<int> local_port() const;

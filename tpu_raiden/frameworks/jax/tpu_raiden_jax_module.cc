@@ -330,29 +330,6 @@ NB_MODULE(_tpu_raiden_jax, m) {
           nb::call_guard<nb::gil_scoped_release>())
 
       .def(
-          "H2dChunk",
-          [](WeightSynchronizer& self, size_t shard_idx,
-             size_t host_offset_bytes, size_t device_offset_bytes,
-             size_t size_bytes) {
-            auto status_or_future = self.H2dChunk(
-                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
-            );
-            if (!status_or_future.ok()) {
-              throw std::runtime_error(
-                  "Weight sync H2DChunk failed: " +
-                  std::string(status_or_future.status().message()));
-            }
-            absl::Status status = status_or_future.value().Await();
-            if (!status.ok()) {
-              throw std::runtime_error("Weight sync H2DChunk copy failed: " +
-                                       std::string(status.message()));
-            }
-          },
-          nb::arg("shard_idx"), nb::arg("host_offset_bytes"),
-          nb::arg("device_offset_bytes"), nb::arg("size_bytes"),
-          nb::call_guard<nb::gil_scoped_release>())
-
-      .def(
           "get_host_buffer",
           [](WeightSynchronizer& self, size_t layer_idx, size_t shard_idx) {
             const uint8_t* ptr = self.GetHostBufferPtr(layer_idx, shard_idx);
