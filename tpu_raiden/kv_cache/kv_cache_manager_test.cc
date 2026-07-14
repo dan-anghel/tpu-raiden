@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
@@ -219,6 +223,72 @@ TEST(KVCacheManagerTest, RegisterPoolsFailsAfterActivePlanRegistered) {
   EXPECT_THAT(status.message(), testing::HasSubstr("active plans"));
 }
 
+TEST(KVCacheManagerTest, RegionAwareChunkValidationAcceptsStridedLiveChunks) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/2);
+  ASSERT_TRUE(
+      manager.RegisterPools({StridedPool("kind_a", 0, 0, 128, 2)}).ok());
+  manager.SetBlockChunkRegionValidation(
+      transport::BlockChunkRegionValidationMode::kFail);
+  EXPECT_EQ(manager.block_chunk_region_validation_mode(),
+            transport::BlockChunkRegionValidationMode::kFail);
+
+  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  std::vector<transport::BlockChunk> chunks = {
+      {.ptr = base, .size = 32},
+      {.ptr = base + 64, .size = 32},
+      {.ptr = base + 128 + 64, .size = 32},
+  };
+
+  absl::Status status = manager.ValidateBlockChunksInRegions(
+      /*pool_idx=*/0, /*shard_idx=*/0, chunks);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(KVCacheManagerTest, RegionAwareChunkValidationRejectsPaddingChunks) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/4);
+  ASSERT_TRUE(manager
+                  .RegisterPools({
+                      StridedPool("kind_a", 0, 0, 128, 2),
+                      StridedPool("kind_b", 0, 256, 128, 2),
+                  })
+                  .ok());
+  manager.SetBlockChunkRegionValidation(
+      transport::BlockChunkRegionValidationMode::kFail);
+
+  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  std::vector<transport::BlockChunk> tail_padding = {
+      {.ptr = base + 96, .size = 16},
+  };
+  absl::Status status = manager.ValidateBlockChunksInRegions(
+      /*pool_idx=*/0, /*shard_idx=*/0, tail_padding);
+  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(status.message(), testing::HasSubstr("non-live bytes"));
+
+  std::vector<transport::BlockChunk> crosses_stride_gap = {
+      {.ptr = base, .size = 96},
+  };
+  status = manager.ValidateBlockChunksInRegions(
+      /*pool_idx=*/0, /*shard_idx=*/0, crosses_stride_gap);
+  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(status.message(), testing::HasSubstr("non-live bytes"));
+
+  std::vector<transport::BlockChunk> offset_pool_live = {
+      {.ptr = base + 256 + 64, .size = 32},
+  };
+  status = manager.ValidateBlockChunksInRegions(
+      /*pool_idx=*/1, /*shard_idx=*/0, offset_pool_live);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  std::vector<transport::BlockChunk> before_pool = {
+      {.ptr = base + 128, .size = 32},
+  };
+  status = manager.ValidateBlockChunksInRegions(
+      /*pool_idx=*/1, /*shard_idx=*/0, before_pool);
+  EXPECT_EQ(status.code(), absl::StatusCode::kOutOfRange);
+}
+
 TEST(KVCacheManagerTest, PoolIndicesWithTag) {
   TestKVCacheManager manager(/*num_layers=*/2, /*num_shards=*/1,
                              /*slice_byte_size=*/128, /*host_blocks=*/2);
@@ -235,6 +305,223 @@ TEST(KVCacheManagerTest, PoolIndicesWithTag) {
   EXPECT_THAT(manager.PoolIndicesWithTag("kind_a"), testing::ElementsAre(0, 2));
   EXPECT_THAT(manager.PoolIndicesWithTag("kind_b"), testing::ElementsAre(1));
   EXPECT_THAT(manager.PoolIndicesWithTag("missing"), testing::IsEmpty());
+}
+
+TEST(KVCacheManagerTest, RegisterActivePlanChecksPoolDtypeTags) {
+  TestKVCacheManager manager(/*num_layers=*/2, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/2);
+  PoolSpec pool_b = DensePool("kind_b", 1, 0, 128, 2);
+  pool_b.dtype_tag = "dtype_b";
+  ASSERT_TRUE(manager
+                  .RegisterPools({
+                      DensePool("kind_a", 0, 0, 128, 2),
+                      pool_b,
+                      StridedPool("kind_a", 1, 0, 128, 2),
+                  })
+                  .ok());
+
+  tpu_raiden::rpc::StartTransferRequest request;
+  request.set_uuid(777);
+  request.add_pool_dtype_tags("dtype_a");
+  request.add_pool_dtype_tags("dtype_b");
+  absl::Status status =
+      manager.RegisterActivePlan(777, request, /*is_sender=*/true);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("pool_dtype_tags count"));
+
+  request.add_pool_dtype_tags("dtype_a");
+  request.set_pool_dtype_tags(1, "dtype_wrong");
+  status = manager.RegisterActivePlan(777, request, /*is_sender=*/true);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("dtype tag mismatch"));
+
+  request.set_pool_dtype_tags(1, "dtype_b");
+  status = manager.RegisterActivePlan(777, request, /*is_sender=*/true);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+  EXPECT_TRUE(manager.UnregisterActivePlan(777).ok());
+}
+
+TEST(KVCacheManagerTest, ExplicitPoolAddressingUsesPoolBaseAndStride) {
+  TestKVCacheManager manager(/*num_layers=*/2, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/4);
+  ASSERT_TRUE(manager
+                  .RegisterPools({
+                      DensePool("kind_a", /*storage_index=*/1,
+                                /*base_offset=*/128, /*stride=*/64,
+                                /*num_blocks=*/4),
+                  })
+                  .ok());
+
+  uint8_t* storage_base =
+      manager.GetHostPointer(/*layer_idx=*/1, /*shard_idx=*/0);
+  ASSERT_NE(storage_base, nullptr);
+  EXPECT_EQ(manager.GetBlockHostPointer(/*pool_idx=*/0, /*shard_idx=*/0,
+                                        /*block_id=*/2),
+            storage_base + 128 + 2 * 64);
+
+  std::vector<int64_t> block_ids = {0, 2, 3};
+  std::vector<transport::BlockChunk> chunks = manager.GetBlockChunks(
+      /*pool_idx=*/0, /*shard_idx=*/0, block_ids, /*total_bytes=*/150,
+      /*uuid=*/0);
+  ASSERT_EQ(chunks.size(), 3);
+  EXPECT_EQ(chunks[0].ptr, storage_base + 128);
+  EXPECT_EQ(chunks[0].size, 64);
+  EXPECT_EQ(chunks[1].ptr, storage_base + 128 + 2 * 64);
+  EXPECT_EQ(chunks[1].size, 64);
+  EXPECT_EQ(chunks[2].ptr, storage_base + 128 + 3 * 64);
+  EXPECT_EQ(chunks[2].size, 22);
+}
+
+TEST(KVCacheManagerTest,
+     ExplicitPoolTransportUsesBackingStorageBaseAndPoolStride) {
+  TestKVCacheManager sender(/*num_layers=*/2, /*num_shards=*/1,
+                            /*slice_byte_size=*/64, /*host_blocks=*/8);
+  TestKVCacheManager receiver(/*num_layers=*/2, /*num_shards=*/1,
+                              /*slice_byte_size=*/64, /*host_blocks=*/8);
+  const std::vector<PoolSpec> pools = {
+      DensePool("kind_a", /*storage_index=*/1, /*base_offset=*/64,
+                /*stride=*/128, /*num_blocks=*/2),
+  };
+  ASSERT_TRUE(sender.RegisterPools(pools).ok());
+  ASSERT_TRUE(receiver.RegisterPools(pools).ok());
+
+  auto src_ref = sender.GetPoolBlockRef(/*pool_idx=*/0, /*shard_idx=*/0,
+                                        /*block_id=*/0);
+  auto dst_ref = receiver.GetPoolBlockRef(/*pool_idx=*/0, /*shard_idx=*/0,
+                                          /*block_id=*/1);
+  ASSERT_TRUE(src_ref.ok()) << src_ref.status().ToString();
+  ASSERT_TRUE(dst_ref.ok()) << dst_ref.status().ToString();
+  std::vector<uint8_t> pattern(128);
+  for (size_t i = 0; i < pattern.size(); ++i) {
+    pattern[i] = static_cast<uint8_t>((i * 17 + 3) % 251);
+  }
+  std::memcpy(src_ref->ptr, pattern.data(), pattern.size());
+
+  const std::optional<int> receiver_port = receiver.local_port();
+  ASSERT_TRUE(receiver_port.has_value());
+  auto pushed = sender.H2hWriteDirect(
+      absl::StrCat(receiver.local_ip(), ":", *receiver_port),
+      /*src_block_ids=*/{0}, /*dst_block_ids=*/{1}, /*uuid=*/0,
+      /*layer_idx=*/0);
+  ASSERT_TRUE(pushed.ok()) << pushed.status().ToString();
+  EXPECT_EQ(std::memcmp(dst_ref->ptr, pattern.data(), pattern.size()), 0);
+
+  const uint8_t* receiver_storage0 =
+      receiver.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  ASSERT_NE(receiver_storage0, nullptr);
+  EXPECT_TRUE(std::all_of(receiver_storage0, receiver_storage0 + 8 * 64,
+                          [](uint8_t value) { return value == 0; }));
+
+  // Block 2 is outside the pool but still falls inside storage 1. It must not
+  // expose or overwrite the neighboring storage bytes.
+  uint8_t* sender_storage1 =
+      sender.GetHostPointer(/*layer_idx=*/1, /*shard_idx=*/0);
+  uint8_t* receiver_storage1 =
+      receiver.GetHostPointer(/*layer_idx=*/1, /*shard_idx=*/0);
+  ASSERT_NE(sender_storage1, nullptr);
+  ASSERT_NE(receiver_storage1, nullptr);
+  std::memset(sender_storage1 + 64 + 2 * 128, 0xD4, 128);
+  auto rejected = sender.H2hWriteDirect(
+      absl::StrCat(receiver.local_ip(), ":", *receiver_port),
+      /*src_block_ids=*/{2}, /*dst_block_ids=*/{2}, /*uuid=*/0,
+      /*layer_idx=*/0);
+  ASSERT_FALSE(rejected.ok());
+  EXPECT_TRUE(std::all_of(receiver_storage1 + 64 + 2 * 128,
+                          receiver_storage1 + 64 + 3 * 128,
+                          [](uint8_t value) { return value == 0; }));
+}
+
+TEST(KVCacheManagerTest, ExplicitPoolTransportEnumeratesAllPools) {
+  TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/64, /*host_blocks=*/8);
+  TestKVCacheManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                              /*slice_byte_size=*/64, /*host_blocks=*/8);
+  const std::vector<PoolSpec> pools = {
+      DensePool("kind_a", /*storage_index=*/0, /*base_offset=*/0,
+                /*stride=*/64, /*num_blocks=*/2),
+      DensePool("kind_b", /*storage_index=*/0, /*base_offset=*/256,
+                /*stride=*/64, /*num_blocks=*/2),
+  };
+  ASSERT_TRUE(sender.RegisterPools(pools).ok());
+  ASSERT_TRUE(receiver.RegisterPools(pools).ok());
+  ASSERT_EQ(sender.num_block_arrays(), 2);
+  ASSERT_EQ(receiver.num_block_arrays(), 2);
+
+  auto sender_a = sender.GetPoolBlockRef(0, 0, 0);
+  auto sender_b = sender.GetPoolBlockRef(1, 0, 0);
+  auto receiver_a = receiver.GetPoolBlockRef(0, 0, 1);
+  auto receiver_b = receiver.GetPoolBlockRef(1, 0, 1);
+  ASSERT_TRUE(sender_a.ok() && sender_b.ok() && receiver_a.ok() &&
+              receiver_b.ok());
+  std::memset(sender_a->ptr, 0xA1, 64);
+  std::memset(sender_b->ptr, 0xB2, 64);
+
+  const std::optional<int> receiver_port = receiver.local_port();
+  ASSERT_TRUE(receiver_port.has_value());
+  auto pushed = sender.H2hWriteDirect(
+      absl::StrCat(receiver.local_ip(), ":", *receiver_port),
+      /*src_block_ids=*/{0}, /*dst_block_ids=*/{1}, /*uuid=*/0,
+      /*layer_idx=*/-1);
+  ASSERT_TRUE(pushed.ok()) << pushed.status().ToString();
+  EXPECT_TRUE(std::all_of(receiver_a->ptr, receiver_a->ptr + 64,
+                          [](uint8_t value) { return value == 0xA1; }));
+  EXPECT_TRUE(std::all_of(receiver_b->ptr, receiver_b->ptr + 64,
+                          [](uint8_t value) { return value == 0xB2; }));
+
+  auto receiver_a0 = receiver.GetPoolBlockRef(0, 0, 0);
+  auto receiver_b0 = receiver.GetPoolBlockRef(1, 0, 0);
+  ASSERT_TRUE(receiver_a0.ok() && receiver_b0.ok());
+  std::memset(receiver_a0->ptr, 0, 64);
+  std::memset(receiver_b0->ptr, 0, 64);
+  const std::optional<int> sender_port = sender.local_port();
+  ASSERT_TRUE(sender_port.has_value());
+  auto pulled =
+      receiver.H2hReadDirect(absl::StrCat(sender.local_ip(), ":", *sender_port),
+                             /*src_block_ids=*/{0});
+  ASSERT_TRUE(pulled.ok()) << pulled.status().ToString();
+  ASSERT_EQ(*pulled, std::vector<int>({0}));
+  EXPECT_TRUE(std::all_of(receiver_a0->ptr, receiver_a0->ptr + 64,
+                          [](uint8_t value) { return value == 0xA1; }));
+  EXPECT_TRUE(std::all_of(receiver_b0->ptr, receiver_b0->ptr + 64,
+                          [](uint8_t value) { return value == 0xB2; }));
+
+  std::vector<uint8_t> external_a(2 * 64, 0);
+  std::vector<uint8_t> external_b(2 * 64, 0);
+  std::vector<uint8_t*> explicit_pool_bases = {external_a.data(),
+                                               external_b.data()};
+  auto explicit_pull = receiver.H2hReadExplicit(
+      absl::StrCat(sender.local_ip(), ":", *sender_port),
+      /*src_block_ids=*/{0}, /*local_block_ids=*/{1}, explicit_pool_bases,
+      /*parallelism=*/1, transport::MajorOrder::kLayerMajor,
+      /*on_block_received=*/nullptr);
+  ASSERT_TRUE(explicit_pull.ok()) << explicit_pull.status().ToString();
+  ASSERT_TRUE(explicit_pull->Await().ok());
+  EXPECT_TRUE(std::all_of(external_a.begin(), external_a.begin() + 64,
+                          [](uint8_t value) { return value == 0; }));
+  EXPECT_TRUE(std::all_of(external_a.begin() + 64, external_a.end(),
+                          [](uint8_t value) { return value == 0xA1; }));
+  EXPECT_TRUE(std::all_of(external_b.begin(), external_b.begin() + 64,
+                          [](uint8_t value) { return value == 0; }));
+  EXPECT_TRUE(std::all_of(external_b.begin() + 64, external_b.end(),
+                          [](uint8_t value) { return value == 0xB2; }));
+}
+
+TEST(KVCacheManagerTest, PoolBlockCopiesRejectHostOnlyManager) {
+  KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/64,
+                             /*local_port=*/std::nullopt,
+                             /*host_blocks_to_allocate=*/2);
+  ASSERT_TRUE(manager.RegisterPools({DensePool("kind_a", 0, 0, 64, 2)}).ok());
+
+  auto d2h = manager.D2hPoolBlocks(/*pool_idx=*/0, /*block_ids=*/{0});
+  ASSERT_FALSE(d2h.ok());
+  EXPECT_EQ(d2h.status().code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(d2h.status().message(), testing::HasSubstr("host-only"));
+
+  auto h2d = manager.H2dPoolBlocks(/*pool_idx=*/0, /*block_ids=*/{0});
+  ASSERT_FALSE(h2d.ok());
+  EXPECT_EQ(h2d.status().code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(h2d.status().message(), testing::HasSubstr("host-only"));
 }
 
 // Without RegisterPools the manager exposes one implicit Opaque pool per
@@ -259,6 +546,11 @@ TEST(KVCacheManagerTest, ImplicitPoolsMirrorStorages) {
   EXPECT_EQ(ref->ptr, manager.GetHostPointer(/*layer_idx=*/1,
                                              /*shard_idx=*/0) +
                           128);
+
+  // Region validation stays inert without explicit pools.
+  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  std::vector<transport::BlockChunk> chunks = {{.ptr = base, .size = 128}};
+  EXPECT_TRUE(manager.ValidateBlockChunksInRegions(0, 0, chunks).ok());
 }
 
 TEST(KVCacheManagerTest, UnregisterActivePlanAllowsUuidReuse) {

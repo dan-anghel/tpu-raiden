@@ -55,12 +55,53 @@ struct BlockChunk {
   size_t size;
 };
 
+enum class BlockChunkRegionValidationMode {
+  kDisabled = 0,
+  kWarn = 1,
+  kFail = 2,
+};
+
 // Delegate interface for BlockTransport inheriting raw memory primitives.
 class BlockTransportDelegate : public RawBufferTransportDelegate {
  public:
   ~BlockTransportDelegate() override = default;
 
   virtual bool use_block_chunks(uint64_t uuid) const { return false; }
+
+  // The transport address space is historically one block array per manager
+  // layer. Explicit pool tables widen that address space to one block array
+  // per pool without changing the wire's integer index.
+  virtual size_t num_block_arrays() const { return num_layers(); }
+
+  // Geometry and host bounds for one wire-addressable block array. Legacy
+  // delegates inherit the uniform layer behavior; pool-aware delegates may
+  // map an array to an interior range of a different backing storage.
+  virtual size_t block_bytes(size_t block_array_idx) const {
+    return bytes_per_block();
+  }
+  virtual uint8_t* GetBlockArrayHostPointer(size_t block_array_idx,
+                                            size_t shard_idx) {
+    return GetHostPointer(block_array_idx, shard_idx);
+  }
+  virtual size_t GetBlockArrayHostSize(size_t block_array_idx,
+                                       size_t shard_idx) {
+    return GetHostSize(block_array_idx, shard_idx);
+  }
+
+  // Optional second-pass validation for chunked transfers. The transport always
+  // validates chunks against the addressed block array first. Delegates with
+  // per-layer interior-layout knowledge can additionally reject or warn on
+  // chunks that target padding or otherwise non-live bytes.
+  virtual BlockChunkRegionValidationMode block_chunk_region_validation_mode()
+      const {
+    return BlockChunkRegionValidationMode::kDisabled;
+  }
+
+  virtual absl::Status ValidateBlockChunksInRegions(
+      size_t layer_idx, size_t shard_idx,
+      const std::vector<BlockChunk>& chunks) {
+    return absl::OkStatus();
+  }
 
   // Returns the active node ID (rank) of the worker.
   virtual int64_t node_id() const { return -1; }
@@ -82,7 +123,7 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
     for (int64_t block_id : block_ids) {
       if (accumulated_bytes >= total_bytes) break;
       size_t size =
-          std::min(bytes_per_block(), total_bytes - accumulated_bytes);
+          std::min(block_bytes(layer_idx), total_bytes - accumulated_bytes);
       result.push_back(
           {GetBlockHostPointer(layer_idx, shard_idx, block_id), size});
       accumulated_bytes += size;
@@ -120,7 +161,11 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
 
   virtual uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
                                        int block_id) {
-    return GetHostPointer(layer_idx, shard_idx) + block_id * bytes_per_block();
+    uint8_t* base = GetBlockArrayHostPointer(layer_idx, shard_idx);
+    if (base == nullptr || block_id < 0) {
+      return nullptr;
+    }
+    return base + static_cast<size_t>(block_id) * block_bytes(layer_idx);
   }
 
   virtual size_t bytes_per_block() const { return slice_byte_size(); }
@@ -160,6 +205,8 @@ class BlockTransport : public RawBufferTransport {
             std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
   // Synchronous Scatter-Gather Pull (op = 2)
+  // When explicit_dst_ptrs is supplied it contains one base pointer per
+  // (block array, shard), in block-array-major order.
   absl::StatusOr<std::vector<int>> Pull(
       const std::vector<std::string>& peers,
       const std::vector<int>& src_block_ids,

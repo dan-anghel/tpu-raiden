@@ -122,6 +122,10 @@ message StartTransferRequest {
   bool use_block_chunks = 7;
   int64 expected_block_count = 8;
   string req_id = 9;
+  // Sender's per-pool dtype tags in canonical pool order. When non-empty and
+  // the receiving manager has explicitly registered pools, the tags must match
+  // the local pools' dtype tags at plan registration.
+  repeated string pool_dtype_tags = 10;
 }
 
 message GetMetadataResponse {

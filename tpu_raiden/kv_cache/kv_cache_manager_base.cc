@@ -965,6 +965,56 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
 
 size_t KVCacheManagerBase::bytes_per_block() const { return slice_byte_size_; }
 
+size_t KVCacheManagerBase::num_block_arrays() const {
+  return explicit_pools_ ? pools_.size() : num_layers_;
+}
+
+size_t KVCacheManagerBase::block_bytes(size_t block_array_idx) const {
+  if (!explicit_pools_) {
+    return bytes_per_block();
+  }
+  if (block_array_idx >= pools_.size() ||
+      pools_[block_array_idx].block_stride_bytes <= 0) {
+    return 0;
+  }
+  return static_cast<size_t>(pools_[block_array_idx].block_stride_bytes);
+}
+
+uint8_t* KVCacheManagerBase::GetBlockArrayHostPointer(size_t block_array_idx,
+                                                      size_t shard_idx) {
+  if (!explicit_pools_) {
+    return GetHostPointer(block_array_idx, shard_idx);
+  }
+  if (block_array_idx >= pools_.size()) {
+    return nullptr;
+  }
+  const PoolSpec& pool = pools_[block_array_idx];
+  uint8_t* storage_base = GetHostPointer(pool.storage_index, shard_idx);
+  if (storage_base == nullptr) {
+    return nullptr;
+  }
+  return storage_base + pool.base_offset_bytes;
+}
+
+size_t KVCacheManagerBase::GetBlockArrayHostSize(size_t block_array_idx,
+                                                 size_t shard_idx) {
+  if (!explicit_pools_) {
+    return GetHostSize(block_array_idx, shard_idx);
+  }
+  if (block_array_idx >= pools_.size()) {
+    return 0;
+  }
+  const PoolSpec& pool = pools_[block_array_idx];
+  const size_t storage_size = GetHostSize(pool.storage_index, shard_idx);
+  const size_t base_offset = static_cast<size_t>(pool.base_offset_bytes);
+  const size_t array_bytes =
+      static_cast<size_t>(pool.num_blocks * pool.block_stride_bytes);
+  if (base_offset > storage_size || array_bytes > storage_size - base_offset) {
+    return 0;
+  }
+  return array_bytes;
+}
+
 int64_t KVCacheManagerBase::LayerBlockByteSize(size_t layer_idx) const {
   if (layer_idx >= num_layers_) {
     return -1;
@@ -1206,6 +1256,151 @@ std::vector<size_t> KVCacheManagerBase::PoolIndicesWithTag(
     }
   }
   return result;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::CopyPoolBlocks(
+    size_t pool_idx, absl::Span<const int64_t> block_ids,
+    std::optional<size_t> shard_idx, bool device_to_host) {
+  EnsureImplicitPools();
+  if (pool_idx >= pools_.size()) {
+    return absl::OutOfRangeError(absl::StrCat(
+        "pool index ", pool_idx, " out of range: ", pools_.size(), " pools"));
+  }
+  const PoolSpec& pool = pools_[pool_idx];
+  if (pool.storage_index >= buffer_holds_.size() ||
+      pool.storage_index >= layers_.size()) {
+    return absl::FailedPreconditionError(
+        "pool storage has no device buffers (host-only manager)");
+  }
+  if (shard_idx.has_value() && *shard_idx >= num_shards_) {
+    return absl::OutOfRangeError("shard index out of range");
+  }
+  ASSIGN_OR_RETURN(std::vector<PoolBlockCopyExtent> extents,
+                   ComputePoolBlockCopyExtents(pool, block_ids));
+
+  std::vector<raiden::PjRtCopyFuture> shard_futures;
+  for (size_t sh = 0; sh < num_shards_; ++sh) {
+    if (shard_idx.has_value() && sh != *shard_idx) {
+      continue;
+    }
+    const auto& shard_hold = buffer_holds_[pool.storage_index].holds[sh];
+    const auto& shard_info = layers_[pool.storage_index].shards[sh];
+    if (shard_info.host_ptr == nullptr) {
+      return absl::FailedPreconditionError("host pointer is null");
+    }
+    for (const PoolBlockCopyExtent& extent : extents) {
+      const int64_t end = extent.offset_bytes + extent.size_bytes;
+      if (end > static_cast<int64_t>(shard_info.host_size)) {
+        return absl::OutOfRangeError(
+            "pool block copy exceeds host buffer size");
+      }
+      if (end > shard_info.device_size) {
+        return absl::OutOfRangeError(
+            "pool block copy exceeds device buffer size");
+      }
+    }
+    if (device_to_host) {
+      std::vector<raiden::D2hCopy> copies;
+      copies.reserve(extents.size());
+      uint8_t* host_base = const_cast<uint8_t*>(shard_info.host_ptr);
+      for (const PoolBlockCopyExtent& extent : extents) {
+        copies.push_back({host_base + extent.offset_bytes, extent.offset_bytes,
+                          extent.size_bytes});
+      }
+      TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
+                          raiden::IssueD2hShard(shard_hold, copies));
+      shard_futures.push_back(std::move(cf));
+    } else {
+      std::vector<raiden::H2dCopy> copies;
+      copies.reserve(extents.size());
+      for (const PoolBlockCopyExtent& extent : extents) {
+        copies.push_back({shard_info.host_ptr + extent.offset_bytes,
+                          extent.offset_bytes, extent.size_bytes});
+      }
+      TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
+                          raiden::IssueH2dShard(shard_hold, copies));
+      shard_futures.push_back(std::move(cf));
+    }
+  }
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(shard_futures));
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hPoolBlocks(
+    size_t pool_idx, absl::Span<const int64_t> block_ids,
+    std::optional<size_t> shard_idx) {
+  return CopyPoolBlocks(pool_idx, block_ids, shard_idx,
+                        /*device_to_host=*/true);
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dPoolBlocks(
+    size_t pool_idx, absl::Span<const int64_t> block_ids,
+    std::optional<size_t> shard_idx) {
+  return CopyPoolBlocks(pool_idx, block_ids, shard_idx,
+                        /*device_to_host=*/false);
+}
+
+void KVCacheManagerBase::SetBlockChunkRegionValidation(
+    tpu_raiden::transport::BlockChunkRegionValidationMode mode) {
+  block_chunk_region_validation_mode_ = mode;
+}
+
+tpu_raiden::transport::BlockChunkRegionValidationMode
+KVCacheManagerBase::block_chunk_region_validation_mode() const {
+  return block_chunk_region_validation_mode_;
+}
+
+absl::Status KVCacheManagerBase::ValidateBlockChunksInRegions(
+    size_t pool_idx, size_t shard_idx,
+    const std::vector<tpu_raiden::transport::BlockChunk>& chunks) {
+  if (!explicit_pools_) {
+    return absl::OkStatus();
+  }
+  if (pool_idx >= pools_.size() || shard_idx >= num_shards_) {
+    return absl::OutOfRangeError("pool or shard index out of range");
+  }
+  const PoolSpec& pool = pools_[pool_idx];
+  uint8_t* base = GetHostPointer(pool.storage_index, shard_idx);
+  const size_t host_size = GetHostSize(pool.storage_index, shard_idx);
+  if (base == nullptr) {
+    return absl::FailedPreconditionError("host pointer is null");
+  }
+  const size_t block_stride = static_cast<size_t>(pool.block_stride_bytes);
+  if (block_stride == 0) {
+    return absl::FailedPreconditionError(
+        "pool block_stride_bytes must be positive");
+  }
+  const uintptr_t pool_base_addr = reinterpret_cast<uintptr_t>(base) +
+                                   static_cast<size_t>(pool.base_offset_bytes);
+  const size_t pool_bytes = static_cast<size_t>(pool.num_blocks) * block_stride;
+  if (static_cast<size_t>(pool.base_offset_bytes) + pool_bytes > host_size) {
+    return absl::OutOfRangeError("pool exceeds host buffer");
+  }
+  for (const auto& chunk : chunks) {
+    if (chunk.size == 0) continue;
+    const uintptr_t chunk_addr = reinterpret_cast<uintptr_t>(chunk.ptr);
+    if (chunk_addr < pool_base_addr ||
+        chunk_addr - pool_base_addr > pool_bytes ||
+        chunk.size > pool_bytes - (chunk_addr - pool_base_addr)) {
+      return absl::OutOfRangeError("chunk is outside pool block array");
+    }
+    size_t relative_offset = chunk_addr - pool_base_addr;
+    size_t remaining = chunk.size;
+    while (remaining > 0) {
+      const size_t block_offset = relative_offset % block_stride;
+      const size_t bytes_in_block =
+          std::min(remaining, block_stride - block_offset);
+      if (!RegionsCoverRange(pool.regions, block_offset,
+                             block_offset + bytes_in_block)) {
+        return absl::FailedPreconditionError(absl::StrCat(
+            "chunk crosses non-live bytes for pool ", pool_idx, " (", pool.tag,
+            "), shard ", shard_idx, ", block_offset ", block_offset, ", size ",
+            bytes_in_block));
+      }
+      relative_offset += bytes_in_block;
+      remaining -= bytes_in_block;
+    }
+  }
+  return absl::OkStatus();
 }
 
 bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {
@@ -1501,6 +1696,23 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
 absl::Status KVCacheManagerBase::RegisterActivePlan(
     uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
     bool is_sender) {
+  // When the sender declares per-pool dtype tags, they must match the local
+  // pool table (both peers must agree on canonical pool order and dtypes).
+  if (request.pool_dtype_tags_size() > 0 && explicit_pools_) {
+    if (static_cast<size_t>(request.pool_dtype_tags_size()) != pools_.size()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "plan pool_dtype_tags count ", request.pool_dtype_tags_size(),
+          " does not match local pool count ", pools_.size()));
+    }
+    for (size_t pool_idx = 0; pool_idx < pools_.size(); ++pool_idx) {
+      if (request.pool_dtype_tags(pool_idx) != pools_[pool_idx].dtype_tag) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "plan dtype tag mismatch for pool ", pool_idx, " (",
+            pools_[pool_idx].tag, "): plan=", request.pool_dtype_tags(pool_idx),
+            " local=", pools_[pool_idx].dtype_tag));
+      }
+    }
+  }
   absl::MutexLock l(plans_mu_);
   if (auto [it, inserted] =
           active_plans_.try_emplace(uuid, RegisteredPlan{request, is_sender});
@@ -1554,13 +1766,37 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
     }
   }
 
+  // Resolve addressing geometry. With explicit pools the wire index is a pool
+  // index: blocks stride at the pool's own stride from the pool's base offset
+  // inside its storage. Otherwise the legacy uniform layer addressing applies.
+  size_t block_size_bytes = bytes_per_block();
+  uint8_t* base_host_ptr = nullptr;
+  if (explicit_pools_) {
+    if (layer_idx >= pools_.size()) {
+      return {};
+    }
+    const PoolSpec& pool = pools_[layer_idx];
+    for (int64_t block_id : block_ids) {
+      if (block_id < 0 || block_id >= pool.num_blocks) {
+        return {};
+      }
+    }
+    block_size_bytes = static_cast<size_t>(pool.block_stride_bytes);
+    uint8_t* storage_base = GetHostPointer(pool.storage_index, shard_idx);
+    if (storage_base == nullptr) {
+      return {};
+    }
+    base_host_ptr = storage_base + pool.base_offset_bytes;
+  } else {
+    base_host_ptr = GetHostPointer(layer_idx, shard_idx);
+  }
+
   if (!has_plan || uuid == 0) {
     std::vector<tpu_raiden::transport::BlockChunk> chunks;
     size_t accumulated_bytes = 0;
     for (int64_t block_id : block_ids) {
       if (accumulated_bytes >= total_bytes) break;
-      size_t size =
-          std::min(bytes_per_block(), total_bytes - accumulated_bytes);
+      size_t size = std::min(block_size_bytes, total_bytes - accumulated_bytes);
       chunks.push_back(
           {GetBlockHostPointer(layer_idx, shard_idx, block_id), size});
       accumulated_bytes += size;
@@ -1575,8 +1811,6 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
   bool is_sender = plan.is_sender;
 
   std::vector<tpu_raiden::transport::BlockChunk> chunks;
-  size_t block_size_bytes = bytes_per_block();
-  uint8_t* base_host_ptr = GetHostPointer(layer_idx, shard_idx);
   size_t accumulated_bytes = 0;
 
   for (int64_t block_id : block_ids) {
@@ -1675,6 +1909,26 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
     return chunks;
   }
   return {};
+}
+
+uint8_t* KVCacheManagerBase::GetBlockHostPointer(size_t layer_idx,
+                                                 size_t shard_idx,
+                                                 int block_id) {
+  if (explicit_pools_) {
+    if (layer_idx >= pools_.size() || block_id < 0 ||
+        block_id >= pools_[layer_idx].num_blocks) {
+      return nullptr;
+    }
+    const PoolSpec& pool = pools_[layer_idx];
+    uint8_t* storage_base = GetHostPointer(pool.storage_index, shard_idx);
+    if (storage_base == nullptr) {
+      return nullptr;
+    }
+    return storage_base + pool.base_offset_bytes +
+           static_cast<int64_t>(block_id) * pool.block_stride_bytes;
+  }
+  return BlockTransportDelegate::GetBlockHostPointer(layer_idx, shard_idx,
+                                                     block_id);
 }
 
 }  // namespace kv_cache
