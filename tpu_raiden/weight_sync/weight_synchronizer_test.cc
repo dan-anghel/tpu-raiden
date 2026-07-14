@@ -42,7 +42,7 @@ class WeightSynchronizerTest : public ::testing::Test {
   size_t slice_byte_size_;
 };
 
-TEST_F(WeightSynchronizerTest, PushAndPullWeightsCorrectnessE2e) {
+TEST_F(WeightSynchronizerTest, PushWeightsCorrectnessE2e) {
   // 1. Instantiate three independent CPU-only synchronizers locally E2E!
   // ws_source represents the active RL Trainer
   auto ws_source = std::make_unique<WeightSynchronizerBase>(
@@ -100,25 +100,6 @@ TEST_F(WeightSynchronizerTest, PushAndPullWeightsCorrectnessE2e) {
   ASSERT_TRUE(push_status.ok()) << push_status.message();
 
   // Assert successful E2E network sockets streaming and exact byte parity!
-  for (size_t i = 0; i < slice_byte_size_; ++i) {
-    EXPECT_EQ(dest1_host_ptr[i], 0xAB) << "Mismatch at byte " << i;
-    EXPECT_EQ(dest2_host_ptr[i], 0xAB) << "Mismatch at byte " << i;
-  }
-
-  // ==========================================================================
-  // Test Scenario 2: Pull weights from Trainer ws_source E2E!
-  // ==========================================================================
-  // Reset destinations back to zeros baseline
-  std::memset(dest1_host_ptr, 0x00, slice_byte_size_);
-  std::memset(dest2_host_ptr, 0x00, slice_byte_size_);
-
-  // ws_dest1 and ws_dest2 pull current weights from the trainer source peer!
-  absl::Status pull_status1 = ws_dest1->PullWeights(source_peer);
-  absl::Status pull_status2 = ws_dest2->PullWeights(source_peer);
-  ASSERT_TRUE(pull_status1.ok()) << pull_status1.message();
-  ASSERT_TRUE(pull_status2.ok()) << pull_status2.message();
-
-  // Assert successful pulls E2E and exact byte parity!
   for (size_t i = 0; i < slice_byte_size_; ++i) {
     EXPECT_EQ(dest1_host_ptr[i], 0xAB) << "Mismatch at byte " << i;
     EXPECT_EQ(dest2_host_ptr[i], 0xAB) << "Mismatch at byte " << i;

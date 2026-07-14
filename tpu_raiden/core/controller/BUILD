@@ -127,6 +127,21 @@ cc_library(
 )
 
 cc_library(
+    name = "controller_server",
+    srcs = ["controller_server.cc"],
+    hdrs = ["controller_server.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":controller_service",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_library(
     name = "test_util",
     testonly = True,
     hdrs = ["test_util.h"],
@@ -198,6 +213,19 @@ cc_test(
         ":worker_service_server",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "controller_server_test",
+    srcs = ["controller_server_test.cc"],
+    deps = [
+        ":controller_client",
+        ":controller_server",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_googletest//:gtest",

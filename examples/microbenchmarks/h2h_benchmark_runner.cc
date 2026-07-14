@@ -69,6 +69,7 @@
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 
+
 ABSL_FLAG(std::string, role, "", "Role: sender or receiver");
 ABSL_FLAG(std::string, control_ip, "127.0.0.1", "Local control IP");
 ABSL_FLAG(std::string, control_interface, "",
@@ -83,6 +84,7 @@ ABSL_FLAG(int64_t, block_size, 1024 * 1024, "Block size in bytes");
 ABSL_FLAG(int32_t, parallelism, 1, "Parallelism");
 ABSL_FLAG(int32_t, numa_node, -1, "NUMA node to pin to");
 ABSL_FLAG(int32_t, num_blocks, 64, "Number of blocks to allocate and transfer");
+ABSL_FLAG(int32_t, iterations, 50, "Number of timed benchmark iterations");
 
 namespace {
 
@@ -218,10 +220,9 @@ bool in_same_subnet(const std::string& ip1, const std::string& ip2) {
   return prefix1 == prefix2;
 }
 
-constexpr int kNumIterations = 50;
 constexpr int kNumWarmup = 3;
 
-bool send_all(int sock, const std::string& data) {
+bool send_all(int sock, absl::string_view data) {
   size_t total_sent = 0;
   while (total_sent < data.size()) {
     ssize_t sent =
@@ -358,6 +359,7 @@ int main(int argc, char* argv[]) {
   int parallelism = absl::GetFlag(FLAGS_parallelism);
   int numa_node = absl::GetFlag(FLAGS_numa_node);
   int num_blocks = absl::GetFlag(FLAGS_num_blocks);
+  int kNumIterations = absl::GetFlag(FLAGS_iterations);
 
   if (role != "sender" && role != "receiver") {
     std::cerr << "Error: --role must be either 'sender' or 'receiver'"
@@ -892,6 +894,14 @@ int main(int argc, char* argv[]) {
     std::cout << absl::StrFormat("Mean:  %8.3f ms\n", mean_ms);
     std::cout << absl::StrFormat("Throughput: %8.3f GB/s (collective)\n",
                                  throughput_gbs);
+
+    // Emit every raw per-iteration latency (already in ms) so the Python
+    // analysis driver (h2h_cpp_gate.py) can capture the full distribution, not
+    // just the p50/p90/p99 summary above. One "H2H_ITER_MS <ms>" line per iter.
+    for (double val : collective_latencies_ms) {
+      std::cout << absl::StrFormat("H2H_ITER_MS %.6f\n", val);
+    }
+    std::cout << std::flush;
 
     std::cout << "Closing control connection..." << std::endl;
     close(control_fd);

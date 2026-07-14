@@ -312,128 +312,7 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
   return xla::ffi::Error::Success();
 }
 
-// FFI execution handler for Resharding (Host CPU Executed)
-xla::ffi::Error TriggerExecuteReshardingImpl(
-    xla::ffi::AnyBuffer anchor, xla::ffi::AnyBuffer shard_idx_buf,
-    xla::ffi::AnyBuffer src_ips, xla::ffi::AnyBuffer src_ports,
-    xla::ffi::AnyBuffer src_offsets, xla::ffi::AnyBuffer dst_offsets,
-    xla::ffi::AnyBuffer sizes, xla::ffi::AnyBuffer dst_shard_indices,
-    xla::ffi::Result<xla::ffi::AnyBuffer> out) {
-  (void)anchor;
-  (void)out;
 
-  if (shard_idx_buf.untyped_data() == nullptr ||
-      src_ips.untyped_data() == nullptr ||
-      src_ports.untyped_data() == nullptr ||
-      src_offsets.untyped_data() == nullptr ||
-      dst_offsets.untyped_data() == nullptr ||
-      sizes.untyped_data() == nullptr ||
-      dst_shard_indices.untyped_data() == nullptr) {
-    return xla::ffi::Error(
-        xla::ffi::ErrorCode::kInvalidArgument,
-        "One or more metadata/buffer arguments have null untyped data.");
-  }
-
-  int32_t current_device_id =
-      *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
-
-  int64_t num_chunks = src_offsets.element_count();
-  const uint32_t* p_src_ips =
-      reinterpret_cast<const uint32_t*>(src_ips.untyped_data());
-  const int32_t* p_src_ports =
-      reinterpret_cast<const int32_t*>(src_ports.untyped_data());
-  const int32_t* p_src_offsets =
-      reinterpret_cast<const int32_t*>(src_offsets.untyped_data());
-  const int32_t* p_dst_offsets =
-      reinterpret_cast<const int32_t*>(dst_offsets.untyped_data());
-  const int32_t* p_sizes =
-      reinterpret_cast<const int32_t*>(sizes.untyped_data());
-  const int32_t* p_dst_shard_indices =
-      reinterpret_cast<const int32_t*>(dst_shard_indices.untyped_data());
-
-  std::memcpy(out->untyped_data(), anchor.untyped_data(), anchor.size_bytes());
-
-  for (int64_t i = 0; i < num_chunks; ++i) {
-    int32_t dst_device_id = p_dst_shard_indices[i];
-    if (dst_device_id < 0 || dst_device_id >= 32) {
-      return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
-                             "Invalid dst_device_id");
-    }
-    if (dst_device_id != current_device_id) {
-      continue;  // Skip if it's not for this device!
-    }
-
-    if (g_weight_synchronizers[dst_device_id] == nullptr) {
-      continue;
-    }
-
-    const uint8_t* ipv6_bytes =
-        reinterpret_cast<const uint8_t*>(&p_src_ips[i * 4]);
-    char ip_str[INET6_ADDRSTRLEN];
-    inet_ntop(AF_INET6, ipv6_bytes, ip_str, INET6_ADDRSTRLEN);
-    std::string source_addr;
-
-    bool is_mapped = true;
-    for (int j = 0; j < 10; ++j) {
-      if (ipv6_bytes[j] != 0) {
-        is_mapped = false;
-        break;
-      }
-    }
-    if (is_mapped && ipv6_bytes[10] == 0xff && ipv6_bytes[11] == 0xff) {
-      struct in_addr addr;
-      std::memcpy(&addr.s_addr, ipv6_bytes + 12, 4);
-      source_addr = absl::StrCat(inet_ntoa(addr), ":", p_src_ports[i]);
-    } else {
-      source_addr = absl::StrCat("[", ip_str, "]:", p_src_ports[i]);
-    }
-
-    size_t src_offset = p_src_offsets[i];
-    size_t dst_offset = p_dst_offsets[i];
-    size_t size = p_sizes[i];
-
-    // Execute pull
-    size_t scratch_pad_offset =
-        g_weight_synchronizers[dst_device_id]->slice_byte_size();
-    absl::Status s = g_weight_synchronizers[dst_device_id]->PullWeightsChunk(
-        source_addr, 0, src_offset, 0, scratch_pad_offset, size);
-    if (!s.ok()) {
-      return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
-                             "Pull failed: " + std::string(s.message()));
-    }
-
-    const uint8_t* src_host_ptr =
-        g_weight_synchronizers[dst_device_id]->GetHostBufferPtr(0, 0) +
-        scratch_pad_offset;
-
-    // Execute H2D using stream memcpy directly!
-    uint8_t* d_base = reinterpret_cast<uint8_t*>(out->untyped_data());
-    stream_executor::DeviceAddressBase device_dst(d_base + dst_offset, size);
-
-    if (g_streams[dst_device_id] == nullptr) {
-      std::memcpy(d_base + dst_offset, src_host_ptr, size);
-      continue;
-    }
-
-    stream_executor::Stream* stream = g_streams[dst_device_id].get();
-
-    absl::Status status = stream->Memcpy(&device_dst, src_host_ptr, size);
-    if (!status.ok()) {
-      return xla::ffi::Error(
-          xla::ffi::ErrorCode::kInternal,
-          "H2D Memcpy failed: " + std::string(status.message()));
-    }
-
-    absl::Status sync_status = stream->BlockHostUntilDone();
-    if (!sync_status.ok()) {
-      return xla::ffi::Error(
-          xla::ffi::ErrorCode::kInternal,
-          "Stream sync failed: " + std::string(sync_status.message()));
-    }
-  }
-
-  return xla::ffi::Error::Success();
-}
 
 // FFI custom call handler executing asynchronous Host-to-Device (H2D) memory
 // transfers from local staging buffers (`GetHostBufferPtr`) directly onto
@@ -509,20 +388,6 @@ XLA_FFI_DEFINE_HANDLER(
         .Ret<xla::ffi::AnyBuffer>());  // return result buffer
 
 XLA_FFI_DEFINE_HANDLER(
-    kExecuteResharding, TriggerExecuteReshardingImpl,
-    xla::ffi::Ffi::Bind()
-        .Arg<xla::ffi::AnyBuffer>()  // anchor
-        .Arg<xla::ffi::AnyBuffer>()  // shard_idx_buf
-        .Arg<xla::ffi::AnyBuffer>()  // src_ips
-        .Arg<xla::ffi::AnyBuffer>()  // src_ports
-        .Arg<xla::ffi::AnyBuffer>()  // src_offsets
-        .Arg<xla::ffi::AnyBuffer>()  // dst_offsets
-        .Arg<xla::ffi::AnyBuffer>()  // sizes
-        .Arg<xla::ffi::AnyBuffer>()  // dst_shard_indices
-        .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
-);
-
-XLA_FFI_DEFINE_HANDLER(
     kH2D, TriggerH2DImpl,
     xla::ffi::Ffi::Bind()
         .Arg<xla::ffi::AnyBuffer>()  // anchor
@@ -541,11 +406,6 @@ XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
                          "init_weight_synchronizer_and_d2h", "TPU",
                          kWSInitWeightSynchronizerAndD2h);
-
-XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "Host",
-                         kExecuteResharding);
-XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "TPU",
-                         kExecuteResharding);
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "ws_h2d", "Host", kH2D);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "ws_h2d", "TPU", kH2D);

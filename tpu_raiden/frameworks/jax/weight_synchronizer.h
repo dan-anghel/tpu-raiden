@@ -62,17 +62,9 @@ class WeightSynchronizer {
 
   ~WeightSynchronizer();
 
-  // Forwarding methods to isolate RTTI from WeightSynchronizerBase
-  absl::Status PullWeights(absl::string_view source);
   absl::StatusOr<raiden::PjRtCopyFuture> D2h();
   absl::StatusOr<raiden::PjRtCopyFuture> H2d();
-  absl::StatusOr<raiden::PjRtCopyFuture> H2dChunk(size_t shard_idx,
-                                                  size_t host_offset_bytes,
-                                                  size_t device_offset_bytes,
-                                                  size_t size_bytes);
-  absl::Status PullWeightsChunk(absl::string_view source, size_t src_shard_idx,
-                                size_t src_offset_bytes, size_t dst_shard_idx,
-                                size_t dst_offset_bytes, size_t size_bytes);
+
   const uint8_t* GetHostBufferPtr(size_t layer_idx, size_t shard_idx) const;
   std::optional<int> local_port() const;
   std::optional<int> listener_port() const;

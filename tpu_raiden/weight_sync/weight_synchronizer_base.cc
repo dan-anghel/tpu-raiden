@@ -396,64 +396,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
       xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
 }
 
-absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dChunk(
-    size_t shard_idx, size_t host_offset_bytes, size_t device_offset_bytes,
-    size_t size_bytes) {
-  if (buffer_holds_.empty()) {
-    return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
-  }
-  if (shard_idx >= num_shards_) {
-    return absl::InvalidArgumentError("Invalid shard index");
-  }
-  const auto& layer_info = layers_[0];
-  const auto& layer_holds = buffer_holds_[0];
-  const auto& shard_info = layer_info.shards[shard_idx];
-  const auto& shard_hold = layer_holds[shard_idx];
 
-  auto pjrt_layout = shard_hold.buffer->layout();
-  const xla::Layout* xla_layout = nullptr;
-  if (pjrt_layout) {
-    xla_layout = &pjrt_layout->xla_layout();
-  }
-  bool is_tiled = xla_layout && !xla_layout->tiles().empty();
-
-  std::vector<xla::Future<>> shard_futures;
-  if (is_tiled) {
-    auto temp_buffer = std::make_shared<std::vector<uint8_t>>(physical_size_);
-    auto status = TileBuffer(shard_info.host_ptr, temp_buffer->data(),
-                             shard_hold.buffer->on_device_shape(), *xla_layout);
-    if (!status.ok()) {
-      return status;
-    }
-
-    if (host_offset_bytes != 0 || device_offset_bytes != 0 ||
-        size_bytes != physical_size_) {
-      LOG(WARNING) << "H2dChunk called with partial offsets on tiled buffer. "
-                   << "host_offset=" << host_offset_bytes
-                   << ", device_offset=" << device_offset_bytes
-                   << ", size=" << size_bytes
-                   << ", physical_size=" << physical_size_;
-    }
-
-    const uint8_t* src_ptr = temp_buffer->data() + device_offset_bytes;
-
-    xla::Future<> future = shard_hold.CopyRawHostToDevice(
-        const_cast<uint8_t*>(src_ptr), device_offset_bytes, size_bytes);
-    xla::Future<> mapped_future = future.Map([temp_buffer]() {});
-    shard_futures.push_back(std::move(mapped_future));
-  } else {
-    const uint8_t* src_ptr = shard_info.host_ptr + host_offset_bytes;
-    xla::Future<> future = shard_hold.CopyRawHostToDevice(
-        const_cast<uint8_t*>(src_ptr), device_offset_bytes, size_bytes);
-    shard_futures.push_back(std::move(future));
-  }
-
-  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
-  shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-      std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
-  return raiden::PjRtCopyFuture::FromFuture(
-      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
-}
 
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
   if (buffer_holds_.empty()) {
@@ -572,23 +515,6 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
   return absl::OkStatus();
 }
 
-absl::Status WeightSynchronizerBase::PullWeights(absl::string_view source) {
-  if (source.empty()) {
-    return absl::InvalidArgumentError(
-        "Source peer address cannot be empty for weight pull");
-  }
-
-  // 1. Run high-speed parallel sockets H2H read to pull weights from source!
-  std::vector<int> weights_block_id = {0};
-  TF_RETURN_IF_ERROR(H2hReadDirect(source, weights_block_id).status());
-
-  // 2. Automatically copy the received staging weights onto local Device TPU
-  // HBM!
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
-  TF_RETURN_IF_ERROR(h2d_future.Await());
-
-  return absl::OkStatus();
-}
 
 void WeightSynchronizerBase::SetExternalHostBuffer(
     const std::vector<raiden::BufferHoldAndAlias>& buffer_holds) {

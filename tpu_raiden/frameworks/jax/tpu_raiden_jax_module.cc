@@ -288,23 +288,14 @@ NB_MODULE(_tpu_raiden_jax, m) {
   // 2. Bind WeightSynchronizer
   // =========================================================================
   nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
-      .def(nb::init<nb::list, std::optional<int>, int, bool,
-                    std::optional<int>, std::optional<std::string>>(),
+      .def(nb::init<nb::list, std::optional<int>, int, bool, std::optional<int>,
+                    std::optional<std::string>>(),
            nb::arg("jax_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("parallelism") = 1,
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("listener_port") = nb::none(),
            nb::arg("bind_ip") = nb::none())
-      .def(
-          "PullWeights",
-          [](WeightSynchronizer& self, absl::string_view source) {
-            absl::Status s = self.PullWeights(source);
-            if (!s.ok()) {
-              throw std::runtime_error("Weight sync PullWeights failed: " +
-                                       std::string(s.message()));
-            }
-          },
-          nb::arg("source"), nb::call_guard<nb::gil_scoped_release>())
+
       .def(
           "D2h",
           [](WeightSynchronizer& self) {
@@ -338,48 +329,6 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::call_guard<nb::gil_scoped_release>())
 
-      .def(
-          "H2dChunk",
-          [](WeightSynchronizer& self, size_t shard_idx,
-             size_t host_offset_bytes, size_t device_offset_bytes,
-             size_t size_bytes) {
-            auto status_or_future = self.H2dChunk(
-                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
-            );
-            if (!status_or_future.ok()) {
-              throw std::runtime_error(
-                  "Weight sync H2DChunk failed: " +
-                  std::string(status_or_future.status().message()));
-            }
-            absl::Status status = status_or_future.value().Await();
-            if (!status.ok()) {
-              throw std::runtime_error("Weight sync H2DChunk copy failed: " +
-                                       std::string(status.message()));
-            }
-          },
-          nb::arg("shard_idx"), nb::arg("host_offset_bytes"),
-          nb::arg("device_offset_bytes"), nb::arg("size_bytes"),
-          nb::call_guard<nb::gil_scoped_release>())
-      .def(
-          "PullWeightsChunk",
-          [](WeightSynchronizer& self, absl::string_view source,
-             size_t src_shard_idx, size_t src_offset_bytes,
-             size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
-            absl::Status s = self.PullWeightsChunk(
-                source, src_shard_idx, src_offset_bytes, dst_shard_idx,
-                dst_offset_bytes, size_bytes
-            );
-            if (!s.ok()) {
-              throw std::runtime_error(
-                  "Weight sync PullWeightsChunk failed: " +
-                  std::string(s.message())
-              );
-            }
-          },
-          nb::arg("source"), nb::arg("src_shard_idx"),
-          nb::arg("src_offset_bytes"), nb::arg("dst_shard_idx"),
-          nb::arg("dst_offset_bytes"), nb::arg("size_bytes"),
-          nb::call_guard<nb::gil_scoped_release>())
       .def(
           "get_host_buffer",
           [](WeightSynchronizer& self, size_t layer_idx, size_t shard_idx) {

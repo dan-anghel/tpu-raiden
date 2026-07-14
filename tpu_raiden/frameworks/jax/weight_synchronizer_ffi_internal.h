@@ -39,15 +39,6 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
     int32_t num_layers, int32_t listener_port,
     xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
-
-
-xla::ffi::Error TriggerExecuteReshardingImpl(
-    xla::ffi::AnyBuffer anchor, xla::ffi::AnyBuffer shard_idx_buf,
-    xla::ffi::AnyBuffer src_ips, xla::ffi::AnyBuffer src_ports,
-    xla::ffi::AnyBuffer src_offsets, xla::ffi::AnyBuffer dst_offsets,
-    xla::ffi::AnyBuffer sizes, xla::ffi::AnyBuffer dst_shard_indices,
-    xla::ffi::Result<xla::ffi::AnyBuffer> out);
-
 }  // namespace weight_sync
 }  // namespace tpu_raiden
 

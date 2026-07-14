@@ -25,6 +25,7 @@ torch_tpu_common_loader.load_torch_tpu_common()
 
 # pylint: disable=g-import-not-at-top
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _weight_synchronizer
+
 # pylint: enable=g-import-not-at-top
 
 
@@ -57,10 +58,6 @@ class WeightSynchronizer:
   def push_weights(self, peers: List[str]) -> None:
     """Trainer pushing current model weights to peer inference server coordinates E2E."""
     self._impl.PushWeights(peers)
-
-  def pull_weights(self, source: str) -> None:
-    """Inference server pulling current weights from the source peer coordinate E2E."""
-    self._impl.PullWeights(source)
 
   def d2h(self) -> None:
     """Triggers asynchronous Device-to-Host (D2H) copy of current weights to Host buffer."""
