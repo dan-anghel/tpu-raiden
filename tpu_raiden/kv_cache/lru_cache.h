@@ -53,6 +53,9 @@ class LRUCache {
   // Returns the number of elements currently stored in the cache.
   size_t size() const { return map_.size(); }
 
+  // Returns the available space (free + evictable capacity).
+  size_t available_space() const { return capacity_ - pinned_list_.size(); }
+
   // Returns true if the cache is completely empty.
   bool empty() const { return map_.empty(); }
 
@@ -92,9 +95,32 @@ class LRUCache {
     }
 
     // Insert new item at the front of the lru_list_ (MRU)
-    lru_list_.push_front(CacheNode{std::move(key), std::move(value), 0});
-    map_[lru_list_.front().key] = lru_list_.begin();
+    lru_list_.emplace_front(std::move(key), std::move(value), 0);
+    map_.emplace_hint(it, lru_list_.front().key, lru_list_.begin());
     return evicted;
+  }
+
+  // Inserts a key-value pair at the back of the lru_list_ (least recently
+  // used position). If the key already exists, its value is updated and moved
+  // to the back of lru_list_.
+  void PutBack(Key key, Value value) {
+    auto it = map_.find(key);
+    if (it != map_.end()) {
+      it->second->value = std::move(value);
+      if (it->second->pin_count > 0) {
+        pinned_list_.splice(pinned_list_.end(), pinned_list_, it->second);
+      } else {
+        lru_list_.splice(lru_list_.end(), lru_list_, it->second);
+      }
+      return;
+    }
+
+    if (map_.size() >= capacity_) {
+      Evict();
+    }
+
+    lru_list_.emplace_back(std::move(key), std::move(value), 0);
+    map_.emplace_hint(it, lru_list_.back().key, std::prev(lru_list_.end()));
   }
 
   // Retrieves a pointer to the stored value for the given key and promotes
@@ -210,6 +236,9 @@ class LRUCache {
     Key key;
     Value value;
     int pin_count = 0;
+
+    CacheNode(Key k, Value v, int p)
+        : key(std::move(k)), value(std::move(v)), pin_count(p) {}
   };
 
   size_t capacity_;

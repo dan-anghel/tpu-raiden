@@ -29,6 +29,7 @@
 #include "nanobind/stl/vector.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
@@ -36,6 +37,7 @@
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
 #include "tpu_raiden/frameworks/torch/weight_synchronizer.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace nb = nanobind;
 
@@ -58,8 +60,11 @@ std::vector<std::string> ToStdStringVector(
 
 class KVCacheStoreWrapper {
  public:
-  explicit KVCacheStoreWrapper(size_t lru_capacity) {
-    controller_ = std::make_unique<KVCacheStore>(lru_capacity);
+  explicit KVCacheStoreWrapper(size_t lru_capacity,
+                               std::string global_registry_address = "",
+                               RaidenId raiden_id = {}) {
+    controller_ = std::make_unique<KVCacheStore>(
+        lru_capacity, global_registry_address, std::move(raiden_id));
   }
   KVCacheStore* operator->() { return controller_.get(); }
   KVCacheStore& operator*() { return *controller_; }
@@ -128,6 +133,89 @@ NB_MODULE(_tpu_raiden_torch, m) {
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
            nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none())
+      .def(nb::init<size_t, size_t, size_t, int64_t, std::optional<int>,
+                    std::optional<int>, int>(),
+           nb::arg("num_layers"), nb::arg("num_shards"),
+           nb::arg("slice_byte_size"), nb::arg("node_id"),
+           nb::arg("local_port") = nb::none(),
+           nb::arg("host_blocks_to_allocate") = nb::none(),
+           nb::arg("parallelism") = 1)
+      .def("node_id", &KVCacheManager::node_id)
+      .def(
+          "register_active_plan",
+          [](KVCacheManager& self, uint64_t uuid,
+             const std::string& request_bytes, bool is_sender) {
+            tpu_raiden::rpc::StartTransferRequest request;
+            if (!request.ParseFromString(request_bytes)) {
+              throw std::runtime_error(
+                  "KVCacheManager register_active_plan failed: invalid "
+                  "StartTransferRequest bytes");
+            }
+            absl::Status status =
+                self.RegisterActivePlan(uuid, request, is_sender);
+            if (!status.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager register_active_plan failed: " +
+                  std::string(status.message()));
+            }
+          },
+          nb::arg("uuid"), nb::arg("request_bytes"), nb::arg("is_sender"))
+      .def(
+          "unregister_active_plan",
+          [](KVCacheManager& self, uint64_t uuid) {
+            absl::Status status = self.UnregisterActivePlan(uuid);
+            if (!status.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager unregister_active_plan failed: " +
+                  std::string(status.message()));
+            }
+          },
+          nb::arg("uuid"))
+      .def(
+          "push_registered_plan",
+          [](KVCacheManager& self, uint64_t uuid, const std::string& peer,
+             const std::vector<int>& src_block_ids,
+             const std::vector<int>& dst_block_ids, int layer_idx,
+             int parallelism) {
+            absl::Status status =
+                self.PushRegisteredPlan(uuid, peer, src_block_ids,
+                                        dst_block_ids, layer_idx, parallelism);
+            if (!status.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager push_registered_plan failed: " +
+                  std::string(status.message()));
+            }
+          },
+          nb::arg("uuid"), nb::arg("peer"), nb::arg("src_block_ids"),
+          nb::arg("dst_block_ids"), nb::arg("layer_idx") = -1,
+          nb::arg("parallelism") = 1, nb::call_guard<nb::gil_scoped_release>())
+      .def(
+          "read_block_bytes",
+          [](KVCacheManager& self, size_t layer_idx, int block_id) {
+            auto status_or = self.ReadBlockBytes(layer_idx, block_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager read_block_bytes failed: " +
+                  std::string(status_or.status().message()));
+            }
+            const std::string& data = status_or.value();
+            return nb::bytes(data.data(), data.size());
+          },
+          nb::arg("layer_idx"), nb::arg("block_id"))
+      .def(
+          "write_block_bytes",
+          [](KVCacheManager& self, size_t layer_idx, int block_id,
+             const nb::bytes& payload) {
+            std::string payload_str(payload.c_str(), payload.size());
+            absl::Status status =
+                self.WriteBlockBytes(layer_idx, block_id, payload_str);
+            if (!status.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager write_block_bytes failed: " +
+                  std::string(status.message()));
+            }
+          },
+          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"))
       .def(
           "RegisterRecv",
           [](KVCacheManager& self, uint64_t uuid, const std::string& req_id,
@@ -411,28 +499,53 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   nb::class_<tpu_raiden::kv_cache::RaidenId>(m, "RaidenId")
       .def(nb::init<std::string, std::string, std::string, int>(),
-           nb::arg("job_name"), nb::arg("job_replica_id") = "",
-           nb::arg("data_name"), nb::arg("data_replica_idx") = 0)
+           nb::arg("job_name") = "", nb::arg("job_replica_id") = "",
+           nb::arg("data_name") = "", nb::arg("data_replica_idx") = 0)
       .def_rw("job_name", &tpu_raiden::kv_cache::RaidenId::job_name)
       .def_rw("job_replica_id", &tpu_raiden::kv_cache::RaidenId::job_replica_id)
       .def_rw("data_name", &tpu_raiden::kv_cache::RaidenId::data_name)
       .def_rw("data_replica_idx",
               &tpu_raiden::kv_cache::RaidenId::data_replica_idx);
 
+  nb::enum_<tpu_raiden::kv_cache::BlockStatus>(m, "BlockStatus")
+      .value("INIT", tpu_raiden::kv_cache::BlockStatus::INIT)
+      .value("REMOTE", tpu_raiden::kv_cache::BlockStatus::REMOTE)
+      .value("HOST", tpu_raiden::kv_cache::BlockStatus::HOST)
+      .value("HBM", tpu_raiden::kv_cache::BlockStatus::HBM);
+
+  nb::class_<tpu_raiden::kv_cache::RaidenBlockID>(m, "RaidenBlockID")
+      .def(nb::init<tpu_raiden::kv_cache::RaidenId, int,
+                    tpu_raiden::kv_cache::BlockStatus>(),
+           nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId(),
+           nb::arg("host_block_id") = -1,
+           nb::arg("status") = tpu_raiden::kv_cache::BlockStatus::INIT)
+      .def_rw("raiden_id", &tpu_raiden::kv_cache::RaidenBlockID::raiden_id)
+      .def_rw("host_block_id",
+              &tpu_raiden::kv_cache::RaidenBlockID::host_block_id)
+      .def_rw("status", &tpu_raiden::kv_cache::RaidenBlockID::status);
+
   nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
-      .def(nb::init<size_t>(), nb::arg("capacity"))
+      .def(nb::init<size_t, std::string, tpu_raiden::kv_cache::RaidenId>(),
+           nb::arg("capacity"), nb::arg("global_registry_address") = "",
+           nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId())
+      .def_prop_ro(
+          "raiden_id",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+            return (*self).raiden_id();
+          },
+          "Returns the RaidenId associated with this store.")
       .def(
           "lookup",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<nb::bytes>& block_hashes) {
+             const std::vector<nb::bytes>& block_hashes, bool enable_global) {
             auto hashes = ToStdStringVector(block_hashes);
-            auto res = self->Lookup(hashes);
+            auto res = self->Lookup(hashes, enable_global);
             if (!res.ok()) {
-              throw std::runtime_error("KVCacheStore lookup failed: " +
-                                       std::string(res.status().message()));
+              throw std::runtime_error(absl::StrCat(
+                  "KVCacheStore lookup failed: ", res.status().message()));
             }
-            std::vector<std::pair<nb::bytes,
-                                  std::vector<tpu_raiden::kv_cache::RaidenId>>>
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
                 py_res;
             py_res.reserve(res.value().size());
             for (const auto& pair : res.value()) {
@@ -442,20 +555,20 @@ NB_MODULE(_tpu_raiden_torch, m) {
             }
             return py_res;
           },
-          nb::arg("block_hashes"),
+          nb::arg("block_hashes"), nb::arg("enable_global") = false,
           "Checks the LRU directory for cached block hashes. Returns a list of "
           "all matched replica pairs prior to the first miss.")
       .def(
           "insert",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes,
-             const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
-                 slices,
+             const std::vector<
+                 std::vector<tpu_raiden::kv_cache::RaidenBlockID>>& slices,
              bool on_host) {
             auto hashes = ToStdStringVector(block_hashes);
             auto res = self->Insert(hashes, slices, on_host);
-            std::vector<std::pair<nb::bytes,
-                                  std::vector<tpu_raiden::kv_cache::RaidenId>>>
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
                 py_evicted;
             py_evicted.reserve(res.second.size());
             for (const auto& pair : res.second) {
@@ -467,11 +580,64 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(
+          "insert_and_pin",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes,
+             const std::vector<
+                 std::vector<tpu_raiden::kv_cache::RaidenBlockID>>& slices,
+             bool on_host) {
+            auto hashes = ToStdStringVector(block_hashes);
+            auto res = self->InsertAndPin(hashes, slices, on_host);
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
+                py_evicted;
+            py_evicted.reserve(res.second.size());
+            for (const auto& pair : res.second) {
+              py_evicted.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return std::make_pair(res.first, py_evicted);
+          },
+          nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
+      .def(
+          "release_and_delete",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes,
+             const std::vector<std::pair<
+                 nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>&
+                 pending_evict_entries) {
+            auto hashes = ToStdStringVector(block_hashes);
+            std::vector<std::pair<
+                std::string, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
+                evicted;
+            evicted.reserve(pending_evict_entries.size());
+            for (const auto& pair : pending_evict_entries) {
+              evicted.push_back(std::make_pair(
+                  std::string(pair.first.c_str(), pair.first.size()),
+                  pair.second));
+            }
+            auto res = self->ReleaseAndDelete(hashes, evicted);
+            std::vector<std::pair<
+                nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>
+                py_rem_evicted;
+            py_rem_evicted.reserve(res.second.size());
+            for (const auto& pair : res.second) {
+              py_rem_evicted.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return std::make_pair(res.first, py_rem_evicted);
+          },
+          nb::arg("block_hashes"),
+          nb::arg("pending_evict_entries") = std::vector<std::pair<
+              nb::bytes, std::vector<tpu_raiden::kv_cache::RaidenBlockID>>>())
+      .def(
           "delete",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes,
-             const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
-                 slices) {
+             const std::vector<
+                 std::vector<tpu_raiden::kv_cache::RaidenBlockID>>& slices) {
             auto hashes = ToStdStringVector(block_hashes);
             self->Delete(hashes, slices);
           },

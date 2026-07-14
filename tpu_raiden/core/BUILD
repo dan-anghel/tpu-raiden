@@ -199,7 +199,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
-        "@xla//xla/pjrt/c:pjrt_c_api_helpers",
         # buildcleaner: keep
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
         # buildcleaner: keep
@@ -231,6 +230,18 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_manager_holder",
+    hdrs = ["kv_manager_holder.h"],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raw_transfer_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+cc_library(
     name = "kv_cache_manager_with_transfer",
     srcs = [
         "kv_cache_manager_with_transfer.cc",
@@ -254,6 +265,7 @@ cc_library(
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -261,32 +273,6 @@ cc_library(
         "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:errors",
-    ],
-)
-
-cc_library(
-    name = "kv_cache_manager_with_worker_service",
-    srcs = [
-        "kv_cache_manager_with_worker_service.cc",
-    ],
-    hdrs = [
-        "kv_cache_manager_with_worker_service.h",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":host_memory_allocator",
-        ":kv_cache_manager_with_transfer",
-        "//tpu_raiden/core/controller:worker_service_impl",
-        "@com_github_grpc_grpc//:grpc++",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -357,6 +343,7 @@ cc_test(
     deps = [
         ":host_memory_allocator",
         ":tpu_pjrt_manager",
+        "@com_google_absl//absl/strings:str_format",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
@@ -500,6 +487,7 @@ cc_test(
         ":tpu_utils",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/time",
@@ -553,30 +541,6 @@ cc_test(
     deps = [
         ":kv_cache_manager_with_transfer",
         "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
-    name = "kv_cache_manager_with_worker_service_test",
-    srcs = ["kv_cache_manager_with_worker_service_test.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = [
-        "-use_header_modules",
-        "-layering_check",
-    ],
-    deps = [
-        ":kv_cache_manager_with_transfer",
-        ":kv_cache_manager_with_worker_service",
-        "//tpu_raiden/core/controller:worker_service_client",
-        "//tpu_raiden/proto:worker_service_cc_proto",
-        "//tpu_raiden/rpc:raiden_service_cc_proto",
-        "@com_github_grpc_grpc//:grpc++",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-        "@xla//xla/tsl/platform:test",
     ],
 )
 

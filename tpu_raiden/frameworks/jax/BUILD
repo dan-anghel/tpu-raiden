@@ -39,14 +39,18 @@ cc_library(
         ":utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
         "//tpu_raiden/core:utils",
+        "//tpu_raiden/core/controller:controller_client",
+        "//tpu_raiden/core/controller:worker_service_server",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
         "@nanobind",
         "@xla//xla/pjrt:pjrt_client",
@@ -75,7 +79,6 @@ cc_library(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
-        "@xla//xla/tsl/concurrency:ref_count",
     ],
 )
 
@@ -140,6 +143,7 @@ nanobind_extension(
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
@@ -541,51 +545,11 @@ py_library(
     ],
 )
 
-py_library(
-    name = "resharding_engine",
-    srcs = ["resharding_engine.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":resharding_planner",
-        ":weight_synchronizer_ffi_py",
-        "//tpu_raiden/rpc:coordination_helper",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
-py_library(
-    name = "resharding_test_lib",
-    srcs = ["resharding_test_lib.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":resharding_planner",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
 py_test(
     name = "resharding_planner_test",
     srcs = ["resharding_planner_test.py"],
     deps = [
         ":resharding_planner",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
-py_test(
-    name = "resharding_test",
-    srcs = ["resharding_test.py"],
-    tags = [
-        "manual",
-        "notap",
-    ],
-    deps = [
-        ":resharding_engine",
-        ":resharding_test_lib",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
         "@pypi//numpy",
@@ -694,26 +658,35 @@ py_test(
 cc_library(
     name = "kv_cache_manager_core_lib",
     srcs = ["kv_cache_manager.cc"],
-    hdrs = ["kv_cache_manager.h"],
+    hdrs = [
+        "kv_cache_manager.h",
+    ],
     copts = [
-        "-DWITHOUT_PYTHON",
         "-fexceptions",
         "-frtti",
     ],
+    defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
     deps = [
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
         "//tpu_raiden/core:utils",
+        "//tpu_raiden/core/controller:controller_client",
+        "//tpu_raiden/core/controller:worker_service_server",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/python/ifrt",
+        "@xla//xla/python/pjrt_ifrt",
         "@xla//xla/tsl/platform:logging",
     ],
 )
@@ -730,6 +703,14 @@ cc_test(
     deps = [
         ":kv_cache_manager_core_lib",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core/controller:controller_service",
+        "//tpu_raiden/core/controller:raiden_controller",
+        "//tpu_raiden/core/controller:test_util",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
     ],

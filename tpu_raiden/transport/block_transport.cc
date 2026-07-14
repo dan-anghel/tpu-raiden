@@ -26,17 +26,19 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
-#include <future>
+#include <future>  // NOLINT
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
@@ -45,6 +47,7 @@
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/socket_util.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -72,17 +75,40 @@ std::vector<struct iovec> ToIovec(const std::vector<BlockChunk>& chunks) {
 
 absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
                             size_t sh, const std::vector<BlockChunk>& chunks) {
-  uint8_t* base = delegate->GetHostPointer(l, sh);
+  uint8_t* base = delegate->GetBlockArrayHostPointer(l, sh);
+  // Some legacy delegates intentionally expose only scattered per-block
+  // pointers and no flat array base. Preserve that contract; pool-aware
+  // managers always expose their exact pool span here.
   if (base != nullptr) {
-    size_t host_size = delegate->GetHostSize(l, sh);
+    const size_t host_size = delegate->GetBlockArrayHostSize(l, sh);
+    const uintptr_t base_addr = reinterpret_cast<uintptr_t>(base);
     for (const auto& chunk : chunks) {
-      if (chunk.ptr < base || chunk.ptr + chunk.size > base + host_size) {
+      const uintptr_t chunk_addr = reinterpret_cast<uintptr_t>(chunk.ptr);
+      if (chunk_addr < base_addr) {
         return absl::OutOfRangeError(absl::StrCat(
-            "Chunk out of bounds. Chunk ptr: ",
-            reinterpret_cast<uintptr_t>(chunk.ptr), ", size: ", chunk.size,
-            ", Host base: ", reinterpret_cast<uintptr_t>(base),
-            ", Host size: ", host_size));
+            "Chunk out of bounds. Chunk ptr: ", chunk_addr,
+            ", size: ", chunk.size, ", Block array base: ", base_addr,
+            ", Block array size: ", host_size));
       }
+      const size_t offset = chunk_addr - base_addr;
+      if (offset > host_size || chunk.size > host_size - offset) {
+        return absl::OutOfRangeError(absl::StrCat(
+            "Chunk out of bounds. Chunk ptr: ", chunk_addr,
+            ", size: ", chunk.size, ", Block array base: ", base_addr,
+            ", Block array size: ", host_size));
+      }
+    }
+  }
+  const BlockChunkRegionValidationMode region_mode =
+      delegate->block_chunk_region_validation_mode();
+  if (region_mode != BlockChunkRegionValidationMode::kDisabled) {
+    absl::Status status = delegate->ValidateBlockChunksInRegions(l, sh, chunks);
+    if (!status.ok()) {
+      if (region_mode == BlockChunkRegionValidationMode::kFail) {
+        return status;
+      }
+      LOG(WARNING) << "Block chunk region validation warning: "
+                   << status.ToString();
     }
   }
   return absl::OkStatus();
@@ -264,6 +290,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
   ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
   std::vector<int> allocated_ids;
 
+  std::vector<int> src_block_ids;
   if (header.op == 1) {
     ASSIGN_OR_RETURN(allocated_ids, block_delegate_->AllocateBlocks(
                                         header.count_or_size, header.uuid));
@@ -273,13 +300,16 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
     allocated_ids.resize(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
                               header.count_or_size * sizeof(int)));
+    src_block_ids.resize(header.count_or_size, 0);
+    RETURN_IF_ERROR(ReadExact(client_fd, src_block_ids.data(),
+                              header.count_or_size * sizeof(int)));
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   }
 
   std::vector<int> target_layers;
   if (header.local_id == 0xFFFFFFFF) {
-    target_layers.resize(block_delegate_->num_layers());
+    target_layers.resize(block_delegate_->num_block_arrays());
     std::iota(target_layers.begin(), target_layers.end(), 0);
   } else {
     target_layers = {static_cast<int>(header.local_id)};
@@ -295,9 +325,15 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
             ReadExact(client_fd, &sender_size, sizeof(sender_size)));
 
         const int64_t block_id_val = dst_id;
+        int64_t src_bid = -1;
+        if (!src_block_ids.empty()) {
+          ABSL_DCHECK_LT(k, src_block_ids.size());
+          src_bid = src_block_ids[k];
+        }
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
             l, sh, absl::MakeConstSpan(&block_id_val, 1), sender_size,
-            header.uuid, static_cast<int64_t>(header.remote_id));
+            header.uuid, static_cast<int64_t>(header.remote_id),
+            /*peer=*/"", src_bid);
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", dst_id,
@@ -316,8 +352,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
               " bytes for Block ID: ", dst_id));
         }
 
-        RETURN_IF_ERROR(
-            RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
+        RETURN_IF_ERROR(ReadVExact(client_fd, ToIovec(chunks)));
         return absl::OkStatus();
       }));
 
@@ -399,7 +434,7 @@ absl::Status BlockTransport::HandleIncomingPull(int client_fd,
   state->count_or_size = header.count_or_size;
   state->major_order = major_order;
   state->current_step = 0;
-  state->total_steps = block_delegate_->num_layers() *
+  state->total_steps = block_delegate_->num_block_arrays() *
                        block_delegate_->num_shards() * local_blocks;
 
   {
@@ -443,7 +478,7 @@ void BlockTransport::TriggerNextSendStep(
           const int64_t block_id_val = block_id;
           std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
               l, sh, absl::MakeConstSpan(&block_id_val, 1),
-              block_delegate_->bytes_per_block(), state->uuid);
+              block_delegate_->block_bytes(l), state->uuid);
           if (chunks.empty()) {
             LOG(ERROR) << "No transfer chunks found for block " << block_id
                        << " and uuid " << state->uuid;
@@ -473,8 +508,7 @@ void BlockTransport::TriggerNextSendStep(
             active_sends_.erase(state->uuid);
             return;
           }
-          s = RawBufferTransport::WriteVExact(state->client_fd,
-                                              ToIovec(chunks));
+          s = WriteVExact(state->client_fd, ToIovec(chunks));
           if (!s.ok()) {
             LOG(ERROR) << "Write payload failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
@@ -493,7 +527,7 @@ void BlockTransport::TriggerNextSendStep(
 void BlockTransport::ResolveStepCoordinates(
     const std::shared_ptr<SendStreamState>& state, size_t* layer, size_t* shard,
     size_t* block_idx) {
-  size_t L = block_delegate_->num_layers();
+  size_t L = block_delegate_->num_block_arrays();
   size_t Sh = block_delegate_->num_shards();
   size_t K = state->count_or_size / block_delegate_->shard_factor();
   size_t s = state->current_step;
@@ -648,7 +682,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   }
   if (!explicit_dst_ptrs.empty() &&
       explicit_dst_ptrs.size() !=
-          block_delegate_->num_layers() * block_delegate_->num_shards()) {
+          block_delegate_->num_block_arrays() * block_delegate_->num_shards()) {
     return absl::InvalidArgumentError("explicit_dst_ptrs size mismatch");
   }
 
@@ -764,6 +798,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
       statuses[stream_idx] = s;
       return;
     }
+    s = WriteExact(fd, &src_block_ids[block_offset], block_count * sizeof(int));
+    if (!s.ok()) {
+      statuses[stream_idx] = s;
+      return;
+    }
     uint8_t ack = 0;
     s = ReadExact(fd, &ack, 1);
     if (!s.ok() || ack != 1) {
@@ -791,7 +830,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
 
   std::vector<int> target_layers;
   if (layer_idx == -1) {
-    target_layers.resize(block_delegate_->num_layers());
+    target_layers.resize(block_delegate_->num_block_arrays());
     std::iota(target_layers.begin(), target_layers.end(), 0);
   } else {
     target_layers = {layer_idx};
@@ -806,7 +845,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         const int64_t block_id_val = src_id;
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
             l, sh, absl::MakeConstSpan(&block_id_val, 1),
-            block_delegate_->bytes_per_block(), uuid, -1, peer);
+            block_delegate_->block_bytes(l), uuid, -1, peer);
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", src_id,
@@ -820,7 +859,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         }
 
         RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
-        return RawBufferTransport::WriteVExact(fd, ToIovec(chunks));
+        return WriteVExact(fd, ToIovec(chunks));
       });
   if (!s.ok()) {
     statuses[stream_idx] = s;
@@ -948,7 +987,7 @@ void BlockTransport::H2hReadWorker(
       return;
     }
 
-    std::vector<int> target_layers(block_delegate_->num_layers());
+    std::vector<int> target_layers(block_delegate_->num_block_arrays());
     std::iota(target_layers.begin(), target_layers.end(), 0);
     s = ForEachPayload(
         major_order, target_layers, block_delegate_->num_shards(),
@@ -958,7 +997,7 @@ void BlockTransport::H2hReadWorker(
             base_host_ptr =
                 explicit_dst_ptrs[l * block_delegate_->num_shards() + sh];
           } else {
-            base_host_ptr = block_delegate_->GetHostPointer(l, sh);
+            base_host_ptr = block_delegate_->GetBlockArrayHostPointer(l, sh);
           }
           if (base_host_ptr == nullptr) {
             return absl::FailedPreconditionError(
@@ -977,7 +1016,7 @@ void BlockTransport::H2hReadWorker(
           const int64_t block_id_val = dst_id;
           std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
               l, sh, absl::MakeConstSpan(&block_id_val, 1),
-              block_delegate_->bytes_per_block(), uuid);
+              block_delegate_->block_bytes(l), uuid);
           if (chunks.empty()) {
             return absl::NotFoundError(
                 absl::StrCat("No transfer chunks found for block ", dst_id,
@@ -986,7 +1025,13 @@ void BlockTransport::H2hReadWorker(
           RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
 
           if (!explicit_dst_ptrs.empty()) {
-            uint8_t* default_base = block_delegate_->GetHostPointer(l, sh);
+            uint8_t* default_base =
+                block_delegate_->GetBlockArrayHostPointer(l, sh);
+            if (default_base == nullptr) {
+              return absl::FailedPreconditionError(
+                  "explicit destination pointers require a flat block array "
+                  "base");
+            }
             uint8_t* explicit_base = base_host_ptr;
             for (auto& chunk : chunks) {
               size_t offset = chunk.ptr - default_base;
@@ -1009,7 +1054,7 @@ void BlockTransport::H2hReadWorker(
                 " bytes for Block ID: ", dst_id));
           }
 
-          RETURN_IF_ERROR(RawBufferTransport::ReadVExact(fd, ToIovec(chunks)));
+          RETURN_IF_ERROR(ReadVExact(fd, ToIovec(chunks)));
 
           if (on_block_received != nullptr) {
             RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));

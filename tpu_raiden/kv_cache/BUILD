@@ -42,6 +42,42 @@ cc_test(
 )
 
 cc_library(
+    name = "pool_layout",
+    srcs = ["pool_layout.cc"],
+    hdrs = ["pool_layout.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "pool_layout_test",
+    srcs = ["pool_layout_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":pool_layout",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "kv_cache_manager_base",
     srcs = [
         "kv_cache_manager_base.cc",
@@ -57,6 +93,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":logical_block_manager",
+        ":pool_layout",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:numa_thread_pool",
         "//tpu_raiden/core:raiden_manager_base",
@@ -173,8 +210,11 @@ cc_library(
     deps = [
         ":lru_cache",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/synchronization",
@@ -192,7 +232,10 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":kv_cache_store",
-        "//tpu_raiden/core:raw_transfer_core",
+        ":lru_cache",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

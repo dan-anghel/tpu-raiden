@@ -33,6 +33,16 @@ py_library(
     deps = [
         ":torch_tpu_common_loader",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
+    ],
+)
+
+py_library(
+    name = "kv_cache_manager_host_py",
+    srcs = ["kv_cache_manager_host.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
     ],
 )
 
@@ -54,6 +64,17 @@ py_library(
     deps = [
         ":torch_tpu_common_loader",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+        "@torch_tpu//torch_tpu",
+        "@torch_tpu//torch_tpu:_loader",
+    ],
+)
+
+py_test(
+    name = "kv_cache_store_test",
+    srcs = ["kv_cache_store_test.py"],
+    deps = [
+        ":kv_cache_store",
+        "@com_google_absl_py//absl/testing:absltest",
     ],
 )
 

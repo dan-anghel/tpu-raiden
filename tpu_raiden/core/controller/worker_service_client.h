@@ -18,7 +18,7 @@
 #include <memory>
 
 #include "absl/status/statusor.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/proto/worker_service.grpc.pb.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
@@ -38,6 +38,12 @@ class WorkerServiceClient {
   // Deallocates sharded buffers on the remote transfer worker.
   absl::StatusOr<proto::DeleteBuffersResponse> DeleteBuffers(
       const proto::DeleteBuffersRequest& request);
+
+  // Transfers (copies) disjoint memory regions across memory spaces on the
+  // remote transfer worker. The transfer specification applies uniformly across
+  // all buffers, i.e., all shards and major dimensions (layers or blocks).
+  absl::StatusOr<proto::TransferBuffersResponse> TransferBuffers(
+      const proto::TransferBuffersRequest& request);
 
  private:
   std::unique_ptr<proto::WorkerService::Stub> stub_;

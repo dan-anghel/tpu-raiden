@@ -547,8 +547,8 @@ XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "Host",
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "TPU",
                          kExecuteResharding);
 
-XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "Host", kH2D);
-XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "TPU", kH2D);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "ws_h2d", "Host", kH2D);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "ws_h2d", "TPU", kH2D);
 
 extern "C" void ForceLinkWeightSynchronizerFfi() {}
 

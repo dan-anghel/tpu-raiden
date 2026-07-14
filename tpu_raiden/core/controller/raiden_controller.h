@@ -25,7 +25,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
@@ -69,6 +69,16 @@ class RaidenController {
   // Unlocks the specified BufferProtos in the local logical block manager so
   // they can be reused. No gRPC call is made.
   absl::Status Deallocate(absl::Span<const proto::BufferProto> sharded_buffers);
+
+  // Transfers (copies) disjoint memory regions across memory spaces on the
+  // remote transfer worker via WorkerService.
+  // If `copy_sizes` is empty, it defaults to copying 1 block for each
+  // source/destination offset pair.
+  absl::StatusOr<proto::TransferBuffersResponse> TransferBuffers(
+      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+      absl::Span<const int64_t> src_offsets,
+      absl::Span<const int64_t> dst_offsets,
+      absl::Span<const int64_t> copy_sizes = {});
 
   // Accessors for state inspection and testing.
   const rpc::RaidenIdProto& unit() const { return unit_; }

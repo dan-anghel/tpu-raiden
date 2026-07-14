@@ -25,7 +25,7 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
 #include <tuple>
@@ -35,16 +35,20 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"  // IWYU pragma: keep
 #include "absl/types/span.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
+#include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/controller/worker_service_server.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/core/metrics_collector.h"  // IWYU pragma: keep
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
-#include "tpu_raiden/core/utils.h"
+#include "tpu_raiden/core/utils.h"  // IWYU pragma: keep
 #ifndef WITHOUT_PYTHON
 #include "tpu_raiden/frameworks/jax/utils.h"
 
@@ -56,12 +60,12 @@ namespace kv_cache {
 namespace jax {
 
 namespace {
-tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
+::tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
     xla::PjRtClient* client) {
   return [client](size_t size_bytes, const xla::PjRtDevice* device)
-             -> absl::StatusOr<tpu_raiden::HostBufferAllocation> {
+             -> absl::StatusOr<::tpu_raiden::HostBufferAllocation> {
     if (size_bytes == 0) {
-      tpu_raiden::HostBufferAllocation alloc;
+      ::tpu_raiden::HostBufferAllocation alloc;
       alloc.ptr = nullptr;
       alloc.size = 0;
       return alloc;
@@ -80,9 +84,9 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
     // Touch memory to force physical page allocation (NUMA first-touch)
     std::thread touch_thread([ptr, aligned_size, device]() {
       if (device != nullptr) {
-        int node = tpu_raiden::GetPjRtDeviceNumaNode(device);
+        int node = ::tpu_raiden::GetPjRtDeviceNumaNode(device);
         if (node >= 0) {
-          int rc = tpu_raiden::PinCurrentThreadToNumaNode(node);
+          int rc = ::tpu_raiden::PinCurrentThreadToNumaNode(node);
           LOG(INFO) << "touch_thread: Pinned to NUMA node " << node
                     << ", status=" << rc
                     << ", thread_id=" << std::this_thread::get_id();
@@ -122,7 +126,7 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
       }
     }
 
-    tpu_raiden::HostBufferAllocation alloc;
+    ::tpu_raiden::HostBufferAllocation alloc;
     alloc.ptr = static_cast<uint8_t*>(ptr);
     alloc.size = size_bytes;
     alloc.owner = std::shared_ptr<void>(
@@ -141,40 +145,41 @@ tpu_raiden::HostBufferAllocator LocalCreateHostMemoryAllocator(
 #ifndef WITHOUT_PYTHON
 namespace {
 UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
-  auto layer_buffers = tpu_raiden::jax::UnpackJaxArrays(device_arrays);
+  auto layer_buffers = ::tpu_raiden::jax::UnpackJaxArrays(device_arrays);
   return {std::move(layer_buffers), std::move(device_arrays)};
 }
 }  // namespace
 
-KVCacheManager::KVCacheManager(nb::list device_arrays,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManager(UnpackAndMove(std::move(device_arrays)), local_port,
-                     host_blocks_to_allocate, unsafe_skip_buffer_lock,
-                     parallelism) {}
+NumaAwareKVCacheManager::NumaAwareKVCacheManager(
+    nb::list device_arrays, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+    int parallelism)
+    : NumaAwareKVCacheManager(UnpackAndMove(std::move(device_arrays)),
+                              local_port, host_blocks_to_allocate,
+                              unsafe_skip_buffer_lock, parallelism) {}
 
-KVCacheManager::KVCacheManager(UnpackedCache&& cache,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               bool unsafe_skip_buffer_lock, int parallelism)
+NumaAwareKVCacheManager::NumaAwareKVCacheManager(
+    UnpackedCache&& cache, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+    int parallelism)
     : device_arrays_(std::move(cache.device_arrays)) {
   InitSubManagers(cache.layer_buffers, local_port, host_blocks_to_allocate,
                   unsafe_skip_buffer_lock, parallelism, 0, -1, 0, 0, 120.0);
 }
 
-KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
-                               int64_t local_control_port, int64_t max_blocks,
-                               int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManager(UnpackAndMove(std::move(kv_caches)), node_id,
-                     local_control_port, max_blocks, num_slots, timeout_s,
-                     unsafe_skip_buffer_lock, parallelism) {}
+NumaAwareKVCacheManager::NumaAwareKVCacheManager(
+    nanobind::list kv_caches, int64_t node_id, int64_t local_control_port,
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    bool unsafe_skip_buffer_lock, int parallelism)
+    : NumaAwareKVCacheManager(UnpackAndMove(std::move(kv_caches)), node_id,
+                              local_control_port, max_blocks, num_slots,
+                              timeout_s, unsafe_skip_buffer_lock, parallelism) {
+}
 
-KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
-                               int64_t local_control_port, int64_t max_blocks,
-                               int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock, int parallelism)
+NumaAwareKVCacheManager::NumaAwareKVCacheManager(
+    UnpackedCache&& cache, int64_t node_id, int64_t local_control_port,
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    bool unsafe_skip_buffer_lock, int parallelism)
     : device_arrays_(std::move(cache.device_arrays)) {
   const char* enable_metrics_env = std::getenv("ENABLE_RAIDEN_METRICS");
   if (enable_metrics_env != nullptr &&
@@ -187,11 +192,10 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
 }
 #endif
 
-KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
-                               size_t slice_byte_size,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               int parallelism) {
+NumaAwareKVCacheManager::NumaAwareKVCacheManager(
+    size_t num_layers, size_t num_shards, size_t slice_byte_size,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism) {
   auto sub_mgr = std::make_unique<KVCacheManagerWithTransfer>(
       num_layers, num_shards, slice_byte_size, local_port,
       host_blocks_to_allocate, parallelism);
@@ -203,7 +207,7 @@ KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
   }
 }
 
-KVCacheManager::KVCacheManager(
+NumaAwareKVCacheManager::NumaAwareKVCacheManager(
     std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers) {
   sub_managers_ = std::move(sub_managers);
   total_num_shards_ = sub_managers_.size();
@@ -213,9 +217,9 @@ KVCacheManager::KVCacheManager(
   }
 }
 
-KVCacheManager::~KVCacheManager() = default;
+NumaAwareKVCacheManager::~NumaAwareKVCacheManager() = default;
 
-void KVCacheManager::InitSubManagers(
+void NumaAwareKVCacheManager::InitSubManagers(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id,
@@ -315,10 +319,10 @@ void KVCacheManager::InitSubManagers(
           client = sub_buffers[0][0]->device()->client();
         }
       }
-      tpu_raiden::HostBufferAllocator host_alloc;
+      ::tpu_raiden::HostBufferAllocator host_alloc;
       const char* shm_key_env = std::getenv("RAIDEN_SHM_KEY");
       if (shm_key_env != nullptr && std::strlen(shm_key_env) > 0) {
-        host_alloc = tpu_raiden::CreateHostMemoryAllocator(
+        host_alloc = ::tpu_raiden::CreateHostMemoryAllocator(
             client, max_blocks,
             (sub_buffers.empty() || sub_buffers[0].empty() ||
              sub_buffers[0][0] == nullptr)
@@ -368,49 +372,52 @@ void KVCacheManager::InitSubManagers(
   }
 }
 
-size_t KVCacheManager::num_layers() const {
+size_t NumaAwareKVCacheManager::num_layers() const {
   return sub_managers_.empty() ? 0 : sub_managers_[0]->num_layers();
 }
 
-size_t KVCacheManager::num_shards() const { return total_num_shards_; }
+size_t NumaAwareKVCacheManager::num_shards() const { return total_num_shards_; }
 
-size_t KVCacheManager::slice_byte_size() const {
+size_t NumaAwareKVCacheManager::slice_byte_size() const {
   return sub_managers_.empty() ? 0 : sub_managers_[0]->slice_byte_size();
 }
 
-std::optional<int> KVCacheManager::local_port() const {
+std::optional<int> NumaAwareKVCacheManager::local_port() const {
   return sub_managers_.empty() ? std::nullopt : sub_managers_[0]->local_port();
 }
 
-int KVCacheManager::local_control_port() const {
+int NumaAwareKVCacheManager::local_control_port() const {
   return sub_managers_.empty() ? -1 : sub_managers_[0]->local_control_port();
 }
 
-int64_t KVCacheManager::node_id() const {
+int64_t NumaAwareKVCacheManager::node_id() const {
   return sub_managers_.empty() ? 0 : sub_managers_[0]->node_id();
 }
 
-uint8_t* KVCacheManager::GetHostPointer(size_t layer_idx, size_t shard_idx) {
+uint8_t* NumaAwareKVCacheManager::GetHostPointer(size_t layer_idx,
+                                                 size_t shard_idx) {
   if (shard_idx >= global_shard_to_submanager_.size()) return nullptr;
   auto [sub_idx, local_shard] = global_shard_to_submanager_[shard_idx];
   return sub_managers_[sub_idx]->GetHostPointer(layer_idx, local_shard);
 }
 
-const uint8_t* KVCacheManager::GetHostPointer(size_t layer_idx,
-                                              size_t shard_idx) const {
+const uint8_t* NumaAwareKVCacheManager::GetHostPointer(size_t layer_idx,
+                                                       size_t shard_idx) const {
   if (shard_idx >= global_shard_to_submanager_.size()) return nullptr;
   auto [sub_idx, local_shard] = global_shard_to_submanager_[shard_idx];
   return sub_managers_[sub_idx]->GetHostPointer(layer_idx, local_shard);
 }
 
-size_t KVCacheManager::GetHostSize(size_t layer_idx, size_t shard_idx) {
+size_t NumaAwareKVCacheManager::GetHostSize(size_t layer_idx,
+                                            size_t shard_idx) {
   if (shard_idx >= global_shard_to_submanager_.size()) return 0;
   auto [sub_idx, local_shard] = global_shard_to_submanager_[shard_idx];
   return sub_managers_[sub_idx]->GetHostSize(layer_idx, local_shard);
 }
 
-int64_t KVCacheManager::NotifyForRead(const std::string& req_id, uint64_t uuid,
-                                      const std::vector<int64_t>& block_ids) {
+int64_t NumaAwareKVCacheManager::NotifyForRead(
+    const std::string& req_id, uint64_t uuid,
+    const std::vector<int64_t>& block_ids) {
   int64_t res = 0;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     res = sub_managers_[s]->NotifyForRead(req_id, uuid, block_ids);
@@ -418,7 +425,8 @@ int64_t KVCacheManager::NotifyForRead(const std::string& req_id, uint64_t uuid,
   return res;
 }
 
-std::vector<EndpointDescriptor> KVCacheManager::get_local_endpoints() const {
+std::vector<EndpointDescriptor> NumaAwareKVCacheManager::get_local_endpoints()
+    const {
   std::vector<EndpointDescriptor> res;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     auto sub_eps = sub_managers_[s]->get_local_endpoints();
@@ -435,7 +443,7 @@ std::vector<EndpointDescriptor> KVCacheManager::get_local_endpoints() const {
   return res;
 }
 
-void KVCacheManager::StartRead(
+void NumaAwareKVCacheManager::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::vector<EndpointDescriptor>& remote_descriptors,
     const std::vector<int64_t>& remote_block_ids,
@@ -481,7 +489,7 @@ void KVCacheManager::StartRead(
   }
 }
 
-void KVCacheManager::StartRead(
+void NumaAwareKVCacheManager::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
@@ -500,7 +508,7 @@ void KVCacheManager::StartRead(
 
 std::tuple<std::vector<std::string>, std::vector<std::string>,
            std::vector<std::string>>
-KVCacheManager::CompleteReadRaw() {
+NumaAwareKVCacheManager::CompleteReadRaw() {
   std::vector<std::string> done_sending, done_recving, failed_recving;
   int num_subs = static_cast<int>(sub_managers_.size());
   if (num_subs == 0) return {};
@@ -541,7 +549,7 @@ KVCacheManager::CompleteReadRaw() {
           std::move(failed_recving)};
 }
 
-absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
+absl::StatusOr<raiden::PjRtCopyFuture> NumaAwareKVCacheManager::H2d(
     const std::vector<int64_t>& src_offsets,
     const std::vector<int64_t>& dst_offsets,
     const std::vector<int64_t>& copy_sizes, std::optional<int64_t> slot_idx,
@@ -564,7 +572,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
   return raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
 }
 
-absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
+absl::StatusOr<raiden::PjRtCopyFuture> NumaAwareKVCacheManager::D2h(
     const std::vector<int64_t>& src_offsets,
     const std::vector<int64_t>& dst_offsets,
     const std::vector<int64_t>& copy_sizes, std::optional<int64_t> slot_idx,
@@ -587,8 +595,9 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
-KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
-                                const std::vector<int64_t>& copy_sizes) {
+NumaAwareKVCacheManager::D2hAutoAllocate(
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& copy_sizes) {
   if (sub_managers_.empty()) {
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
@@ -611,10 +620,10 @@ KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
-KVCacheManager::H2hWrite(std::string peer,
-                         const std::vector<int>& src_block_ids,
-                         const std::vector<int>& dst_block_ids, uint64_t uuid,
-                         int layer_idx) {
+NumaAwareKVCacheManager::H2hWrite(std::string peer,
+                                  const std::vector<int>& src_block_ids,
+                                  const std::vector<int>& dst_block_ids,
+                                  uint64_t uuid, int layer_idx) {
   if (sub_managers_.empty()) {
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
@@ -652,8 +661,8 @@ KVCacheManager::H2hWrite(std::string peer,
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
-KVCacheManager::H2hRead(std::string peer,
-                        const std::vector<int>& src_block_ids) {
+NumaAwareKVCacheManager::H2hRead(std::string peer,
+                                 const std::vector<int>& src_block_ids) {
   if (sub_managers_.empty()) {
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
@@ -690,7 +699,7 @@ KVCacheManager::H2hRead(std::string peer,
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
-KVCacheManager::H2hWrite(
+NumaAwareKVCacheManager::H2hWrite(
     const std::vector<EndpointDescriptor>& remote_descriptors,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx) {
@@ -734,7 +743,7 @@ KVCacheManager::H2hWrite(
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
-KVCacheManager::H2hRead(
+NumaAwareKVCacheManager::H2hRead(
     const std::vector<EndpointDescriptor>& remote_descriptors,
     const std::vector<int>& src_block_ids) {
   if (sub_managers_.empty()) {
@@ -775,7 +784,8 @@ KVCacheManager::H2hRead(
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
-absl::Status KVCacheManager::UnlockBlocks(const std::vector<int>& block_ids) {
+absl::Status NumaAwareKVCacheManager::UnlockBlocks(
+    const std::vector<int>& block_ids) {
   for (auto& sub : sub_managers_) {
     if (sub->host_block_manager() != nullptr) {
       auto status = sub->host_block_manager()->Unlock(block_ids);
@@ -785,11 +795,113 @@ absl::Status KVCacheManager::UnlockBlocks(const std::vector<int>& block_ids) {
   return absl::OkStatus();
 }
 
-std::string KVCacheManager::DumpMetricsToString() const {
+std::string NumaAwareKVCacheManager::DumpMetricsToString() const {
   if (metrics_collector_) {
     return metrics_collector_->DumpMetricsToString();
   }
   return "[]";
+}
+
+#ifndef WITHOUT_PYTHON
+KVCacheManager::KVCacheManager(nb::list device_arrays,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               bool unsafe_skip_buffer_lock, int parallelism,
+                               int grpc_port,
+                               std::optional<std::string> controller_address,
+                               std::optional<std::string> worker_id)
+    : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
+          std::move(device_arrays), local_port, host_blocks_to_allocate,
+          unsafe_skip_buffer_lock, parallelism)) {
+  StartGrpcServer(grpc_port, controller_address, worker_id);
+}
+
+KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
+                               int64_t local_control_port, int64_t max_blocks,
+                               int64_t num_slots, double timeout_s,
+                               bool unsafe_skip_buffer_lock, int parallelism,
+                               int grpc_port,
+                               std::optional<std::string> controller_address,
+                               std::optional<std::string> worker_id)
+    : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
+          std::move(kv_caches), node_id, local_control_port, max_blocks,
+          num_slots, timeout_s, unsafe_skip_buffer_lock, parallelism)) {
+  StartGrpcServer(grpc_port, controller_address, worker_id);
+}
+#endif
+
+KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
+                               size_t slice_byte_size,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               int parallelism, int grpc_port,
+                               std::optional<std::string> controller_address,
+                               std::optional<std::string> worker_id)
+    : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
+          num_layers, num_shards, slice_byte_size, local_port,
+          host_blocks_to_allocate, parallelism)) {
+  StartGrpcServer(grpc_port, controller_address, worker_id);
+}
+
+KVCacheManager::KVCacheManager(
+    std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
+    int grpc_port, std::optional<std::string> controller_address,
+    std::optional<std::string> worker_id)
+    : numa_manager_(
+          std::make_unique<NumaAwareKVCacheManager>(std::move(sub_managers))) {
+  StartGrpcServer(grpc_port, controller_address, worker_id);
+}
+
+KVCacheManager::~KVCacheManager() = default;
+
+void KVCacheManager::StartGrpcServer(
+    int grpc_port, std::optional<std::string> controller_address,
+    std::optional<std::string> worker_id) {
+  if (!controller_address.has_value() || controller_address->empty()) {
+    return;
+  }
+  absl::Status status =
+      controller::WorkerServiceServer::GetInstance().StartServer(
+          /*host_allocator=*/nullptr, KVManagerHolder(numa_manager_.get()),
+          grpc_port);
+  if (!status.ok()) {
+    throw std::runtime_error(absl::StrCat(
+        "Failed to start gRPC server in KVCacheManager: ", status.message()));
+  }
+
+  if (controller_address.has_value() && !controller_address->empty()) {
+    int bound_port = GetGrpcPort();
+    std::string w_id = worker_id.value_or("worker_0");
+
+    std::string worker_ip = "127.0.0.1";
+    auto ips = GetLocalHostIpAddresses();
+    if (!ips.empty()) {
+      worker_ip = ips[0];
+    }
+    std::string worker_endpoint = absl::StrCat(worker_ip, ":", bound_port);
+
+    std::string transfer_endpoint = "";
+    auto local_eps = numa_manager_->get_local_endpoints();
+    if (!local_eps.empty()) {
+      transfer_endpoint = local_eps[0].endpoint;
+    }
+
+    core::controller::RaidenControllerClient client(*controller_address);
+    status = client.RegisterWorker(w_id, worker_endpoint, transfer_endpoint);
+    if (!status.ok()) {
+      LOG(ERROR) << "Failed to register worker with controller: "
+                 << status.message();
+    } else {
+      LOG(INFO) << "Successfully registered worker " << w_id
+                << " (worker_endpoint=" << worker_endpoint
+                << ", transfer_endpoint=" << transfer_endpoint
+                << ") with controller at " << *controller_address;
+    }
+  }
+}
+
+int KVCacheManager::GetGrpcPort() const {
+  return controller::WorkerServiceServer::GetInstance().GetGrpcPort();
 }
 
 }  // namespace jax

@@ -152,7 +152,7 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
       src_offsets_fixture.AsAnyBuffer(), dst_offsets_fixture.AsAnyBuffer(),
       copy_sizes_fixture.AsAnyBuffer(), shard_idx_fixture.AsAnyBuffer(),
       cache_slice_fixture.AsAnyBuffer(), /*layer_idx=*/0,
-      anchor_fixture.AsAnyBuffer());
+      cache_slice_fixture.AsAnyBuffer());
 
   EXPECT_TRUE(h2d_err.success())
       << "H2D transfer failed: " << h2d_err.message();
@@ -187,7 +187,7 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
       d2h_dst_offsets_fixture.AsAnyBuffer(),
       d2h_copy_sizes_fixture.AsAnyBuffer(), shard_idx_fixture.AsAnyBuffer(),
       cache_slice_fixture.AsAnyBuffer(), /*layer_idx=*/0,
-      anchor_fixture.AsAnyBuffer());
+      cache_slice_fixture.AsAnyBuffer());
 
   EXPECT_TRUE(d2h_err.success())
       << "D2H transfer failed: " << d2h_err.message();
