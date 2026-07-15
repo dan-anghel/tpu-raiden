@@ -70,6 +70,7 @@ class RaidenBlockID:
       raiden_id: RaidenId | None = None,
       host_block_id: int = -1,
       status: BlockStatus = BlockStatus.INIT,
+      device_block_id: int = -1,
       impl: Any = None,
   ):
     if impl is not None:
@@ -80,7 +81,10 @@ class RaidenBlockID:
       # Map Python enum to C++ enum
       status_val = getattr(_impl.BlockStatus, status.name)
       self._impl = _impl.RaidenBlockID(
-          raiden_id._impl, host_block_id, status_val  # pylint: disable=protected-access
+          raiden_id._impl,
+          host_block_id,
+          device_block_id,
+          status_val,  # pylint: disable=protected-access
       )
 
   @property
@@ -90,6 +94,10 @@ class RaidenBlockID:
   @property
   def host_block_id(self) -> int:
     return self._impl.host_block_id
+
+  @property
+  def device_block_id(self) -> int:
+    return self._impl.device_block_id
 
   @property
   def status(self) -> BlockStatus:
@@ -114,7 +122,8 @@ class RaidenBlockID:
   def __repr__(self) -> str:
     return (
         f"RaidenBlockID(raiden_id={self.raiden_id},"
-        f" host_block_id={self.host_block_id}, status={self.status})"
+        f" host_block_id={self.host_block_id},"
+        f" device_block_id={self.device_block_id}, status={self.status})"
     )
 
 
@@ -145,7 +154,7 @@ class KVCacheStore:
       self,
       block_hashes: list[bytes],
       enable_global: bool = False,
-  ) -> list[tuple[bytes, list[RaidenBlockID]]]:
+  ) -> list[tuple[bytes, RaidenBlockID]]:
     """Checks the LRU directory for cached block hashes.
 
     Args:
@@ -153,27 +162,26 @@ class KVCacheStore:
       enable_global: Whether to fallback to global registry on miss.
 
     Returns:
-      A list of tuples containing the block hash and a list of matching
-      RaidenBlockID replicas, halting immediately upon the first cache miss.
+      A list of tuples containing the block hash and the matching
+      RaidenBlockID replica, halting immediately upon the first cache miss.
     """
     raw_res = self._impl.lookup(block_hashes, enable_global)
     final_res = []
-    for hash_val, raw_slices in raw_res:
-      wrapped_slices = [RaidenBlockID(impl=rs) for rs in raw_slices]
-      final_res.append((hash_val, wrapped_slices))
+    for hash_val, raw_slice in raw_res:
+      final_res.append((hash_val, RaidenBlockID(impl=raw_slice)))
     return final_res
 
   def insert(
       self,
       block_hashes: list[bytes],
-      slices: list[list[RaidenBlockID]],
+      slices: list[RaidenBlockID],
       on_host: bool,
-  ) -> tuple[bool, list[tuple[bytes, list[RaidenBlockID]]]]:
+  ) -> tuple[bool, list[tuple[bytes, RaidenBlockID]]]:
     """Caches sharded buffers into host-RAM/HBM backing store.
 
     Args:
       block_hashes: Incoming block hashes to insert.
-      slices: List of sharded buffer metadata corresponding to each block hash.
+      slices: List of RaidenBlockID, one for each block hash.
       on_host: Whether the slices are located in host memory.
 
     Returns:
@@ -183,28 +191,24 @@ class KVCacheStore:
       - list: list of entries evicted from the LRU cache during insertion.
     """
     raw_slices = []
-    for slice_list in slices:
-      converted_list = []
-      for s in slice_list:
-        if isinstance(s, RaidenId):
-          s = RaidenBlockID(raiden_id=s)
-        converted_list.append(s._impl)  # pylint: disable=protected-access
-      raw_slices.append(converted_list)
+    for s in slices:
+      if isinstance(s, RaidenId):
+        s = RaidenBlockID(raiden_id=s)
+      raw_slices.append(s._impl)  # pylint: disable=protected-access
     all_inserted, raw_evicted = self._impl.insert(
         block_hashes, raw_slices, on_host
     )
     wrapped_evicted = []
-    for hash_val, raw_slices in raw_evicted:
-      wrapped_slices = [RaidenBlockID(impl=rs) for rs in raw_slices]
-      wrapped_evicted.append((hash_val, wrapped_slices))
+    for hash_val, raw_slice in raw_evicted:
+      wrapped_evicted.append((hash_val, RaidenBlockID(impl=raw_slice)))
     return all_inserted, wrapped_evicted
 
   def insert_and_pin(
       self,
       block_hashes: list[bytes],
-      slices: list[list[RaidenBlockID]],
+      slices: list[RaidenBlockID],
       on_host: bool,
-  ) -> tuple[bool, list[tuple[bytes, list[RaidenBlockID]]]]:
+  ) -> tuple[bool, list[tuple[bytes, RaidenBlockID]]]:
     """Pins existing block hashes, and inserts/pins new block hashes.
 
     Pins all existing block hashes, and inserts and pins new block hashes if
@@ -212,7 +216,7 @@ class KVCacheStore:
 
     Args:
       block_hashes: Incoming block hashes to insert and pin.
-      slices: List of sharded buffer metadata corresponding to each block hash.
+      slices: List of RaidenBlockID, one for each block hash.
       on_host: Whether the slices are located in host memory.
 
     Returns:
@@ -222,29 +226,23 @@ class KVCacheStore:
       - list: list of entries evicted during insertion.
     """
     raw_slices = []
-    for slice_list in slices:
-      converted_list = []
-      for s in slice_list:
-        if isinstance(s, RaidenId):
-          s = RaidenBlockID(raiden_id=s)
-        converted_list.append(s._impl)  # pylint: disable=protected-access
-      raw_slices.append(converted_list)
+    for s in slices:
+      if isinstance(s, RaidenId):
+        s = RaidenBlockID(raiden_id=s)
+      raw_slices.append(s._impl)  # pylint: disable=protected-access
     all_inserted, raw_evicted = self._impl.insert_and_pin(
         block_hashes, raw_slices, on_host
     )
     wrapped_evicted = []
-    for hash_val, raw_slices in raw_evicted:
-      wrapped_slices = [RaidenBlockID(impl=rs) for rs in raw_slices]
-      wrapped_evicted.append((hash_val, wrapped_slices))
+    for hash_val, raw_slice in raw_evicted:
+      wrapped_evicted.append((hash_val, RaidenBlockID(impl=raw_slice)))
     return all_inserted, wrapped_evicted
 
   def release_and_delete(
       self,
       block_hashes: list[bytes],
-      pending_evict_entries: (
-          list[tuple[bytes, list[RaidenBlockID]]] | None
-      ) = None,
-  ) -> tuple[int, list[tuple[bytes, list[RaidenBlockID]]]]:
+      pending_evict_entries: list[tuple[bytes, RaidenBlockID]] | None = None,
+  ) -> tuple[int, list[tuple[bytes, RaidenBlockID]]]:
     """Reverts an insert_and_pin operation.
 
     Unpins all block_hashes in the LRU cache, deletes any block_hash in REMOTE
@@ -264,35 +262,28 @@ class KVCacheStore:
     if pending_evict_entries is None:
       pending_evict_entries = []
     raw_evicted_in = []
-    for hash_val, slice_list in pending_evict_entries:
-      converted_list = []
-      for s in slice_list:
-        if isinstance(s, RaidenId):
-          s = RaidenBlockID(raiden_id=s)
-        converted_list.append(s._impl)  # pylint: disable=protected-access
-      raw_evicted_in.append((hash_val, converted_list))
+    for hash_val, s in pending_evict_entries:
+      if isinstance(s, RaidenId):
+        s = RaidenBlockID(raiden_id=s)
+      raw_evicted_in.append((hash_val, s._impl))  # pylint: disable=protected-access
     del_count, raw_evicted_out = self._impl.release_and_delete(
         block_hashes, raw_evicted_in
     )
     wrapped_evicted_out = []
-    for hash_val, raw_slices in raw_evicted_out:
-      wrapped_slices = [RaidenBlockID(impl=rs) for rs in raw_slices]
-      wrapped_evicted_out.append((hash_val, wrapped_slices))
+    for hash_val, raw_slice in raw_evicted_out:
+      wrapped_evicted_out.append((hash_val, RaidenBlockID(impl=raw_slice)))
     return del_count, wrapped_evicted_out
 
   def delete(
       self,
       block_hashes: list[bytes],
-      slices: list[list[RaidenBlockID]],
+      slices: list[RaidenBlockID],
   ) -> None:
     raw_slices = []
-    for slice_list in slices:
-      converted_list = []
-      for s in slice_list:
-        if isinstance(s, RaidenId):
-          s = RaidenBlockID(raiden_id=s)
-        converted_list.append(s._impl)  # pylint: disable=protected-access
-      raw_slices.append(converted_list)
+    for s in slices:
+      if isinstance(s, RaidenId):
+        s = RaidenBlockID(raiden_id=s)
+      raw_slices.append(s._impl)  # pylint: disable=protected-access
     self._impl.delete(block_hashes, raw_slices)
 
   def capacity(self) -> int:
