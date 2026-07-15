@@ -430,7 +430,6 @@ cc_test(
         ":raw_transfer_core",
         ":tpu_pjrt_manager",
         ":tpu_utils",
-        "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

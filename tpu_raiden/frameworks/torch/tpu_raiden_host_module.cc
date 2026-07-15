@@ -107,8 +107,8 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
     if (!transport) {
       return absl::FailedPreconditionError("Transport server is not running");
     }
-    auto status_or = transport->Push(
-        peer, src_block_ids, dst_block_ids, parallelism,
+    auto status_or = transport->SyncPush(
+        {peer}, src_block_ids, dst_block_ids, parallelism,
         tpu_raiden::transport::MajorOrder::kLayerMajor, uuid, layer_idx);
     if (!status_or.ok()) {
       return status_or.status();

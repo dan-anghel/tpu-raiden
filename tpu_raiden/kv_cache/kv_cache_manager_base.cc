@@ -27,7 +27,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <thread>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
@@ -713,8 +713,9 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
   }
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      server_->Pull(peer, src_block_ids, local_block_ids, explicit_dst_ptrs,
-                    parallelism, major_order, on_block_received));
+      server_->SyncPull({peer}, src_block_ids, local_block_ids,
+                        explicit_dst_ptrs, parallelism, major_order,
+                        on_block_received, /*uuid=*/0));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 
@@ -1675,8 +1676,8 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
 
       if (src_block_ids.empty()) continue;
 
-      transport_server->Push(
-          peer, src_block_ids, dst_block_ids, /*parallelism=*/1,
+      transport_server->AsyncPush(
+          {peer}, src_block_ids, dst_block_ids, /*parallelism=*/1,
           transport::MajorOrder::kLayerMajor, request.uuid(),
           /*layer_idx=*/-1, [uuid = request.uuid(), peer](auto push_res) {
             if (!push_res.ok()) {

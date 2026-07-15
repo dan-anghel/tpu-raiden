@@ -28,11 +28,13 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_listener.h"
+#include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace torch {
@@ -202,8 +204,8 @@ absl::Status KVCacheManager::PushRegisteredPlan(
   if (!transport) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  auto status_or = transport->Push(
-      peer, src_block_ids, dst_block_ids, parallelism,
+  auto status_or = transport->SyncPush(
+      {peer}, src_block_ids, dst_block_ids, parallelism,
       tpu_raiden::transport::MajorOrder::kLayerMajor, uuid, layer_idx);
   if (!status_or.ok()) {
     return status_or.status();
