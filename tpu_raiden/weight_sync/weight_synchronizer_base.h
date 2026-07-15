@@ -87,9 +87,6 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
   absl::Status PushWeightsResharded(
       const tpu_raiden::rpc::StartTransferRequest& request);
 
-  void SetExternalHostBuffer(
-      const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
-
   const uint8_t* GetHostBufferPtr(size_t layer_idx, size_t shard_idx) const {
     if (layer_idx >= num_layers_ || shard_idx >= num_shards_) {
       return nullptr;

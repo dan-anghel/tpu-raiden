@@ -93,6 +93,7 @@ cc_library(
         ":torch_tpu_structured_log_buffer_headers",
         ":torch_tpu_tensor_to_buffer_headers",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "@com_google_absl//absl/strings",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",

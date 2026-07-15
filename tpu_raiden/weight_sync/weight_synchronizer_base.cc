@@ -515,27 +515,6 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
   return absl::OkStatus();
 }
 
-
-void WeightSynchronizerBase::SetExternalHostBuffer(
-    const std::vector<raiden::BufferHoldAndAlias>& buffer_holds) {
-  size_t idx = 0;
-  for (size_t l = 0; l < num_layers_; ++l) {
-    for (size_t sh = 0; sh < num_shards_; ++sh) {
-      if (idx < buffer_holds.size()) {
-        auto u_ptr_or = buffer_holds[idx].buffer->client()->UnsafeBufferPointer(
-            buffer_holds[idx].buffer);
-        if (u_ptr_or.ok()) {
-          layers_[l].shards[sh].host_ptr =
-              reinterpret_cast<uint8_t*>(u_ptr_or.value());
-          layers_[l].shards[sh].host_size =
-              buffer_holds[idx].buffer->GetOnDeviceSizeInBytes().value();
-        }
-        idx++;
-      }
-    }
-  }
-}
-
 absl::Status WeightSynchronizerBase::OnDataReceived() {
   // Automatically copy all received staging weights from Host onto Device TPU
   // HBM!
