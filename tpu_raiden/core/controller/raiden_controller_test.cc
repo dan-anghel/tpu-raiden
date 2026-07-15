@@ -50,8 +50,10 @@ class RaidenControllerTest : public ::testing::Test {
 TEST_F(RaidenControllerTest, AllocateAndDeallocateSuccess) {
   EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
   {
-    RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/10,
-                                /*num_shards=*/2, /*shard_size_bytes=*/1024);
+    RaidenController controller(
+        unit_, std::vector<std::string>{test_server_->server_address},
+        /*num_blocks=*/10, /*num_shards=*/2,
+        /*shard_size_bytes=*/1024);
 
     // 10 logical blocks * 2 shards = 20 buffer allocations created on worker in
     // constructor.
@@ -85,9 +87,10 @@ TEST_F(RaidenControllerTest, AllocateAndDeallocateSuccess) {
 TEST_F(RaidenControllerTest, ConstructWithServerAddressWorks) {
   EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
   {
-    RaidenController controller(unit_, test_server_->server_address,
-                                /*num_blocks=*/5, /*num_shards=*/2,
-                                /*shard_size_bytes=*/512);
+    RaidenController controller(
+        unit_, std::vector<std::string>{test_server_->server_address},
+        /*num_blocks=*/5, /*num_shards=*/2,
+        /*shard_size_bytes=*/512);
 
     EXPECT_EQ(test_server_->service->GetBufferCount(), 10);
     EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 0);
@@ -104,8 +107,9 @@ TEST_F(RaidenControllerTest, ConstructWithServerAddressWorks) {
 }
 
 TEST_F(RaidenControllerTest, AllocateExceedingCapacityFails) {
-  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
-                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
   auto alloc_or = controller.Allocate(/*num_blocks=*/10);
   EXPECT_FALSE(alloc_or.ok());
@@ -113,8 +117,9 @@ TEST_F(RaidenControllerTest, AllocateExceedingCapacityFails) {
 }
 
 TEST_F(RaidenControllerTest, DeallocateNonExistentBufferFails) {
-  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
-                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
   proto::BufferProto fake_buffer;
   fake_buffer.add_buffer_handles()->set_handle(9999);
@@ -128,15 +133,17 @@ TEST_F(RaidenControllerTest, ConstructorThrowsOnBufferCreationFailure) {
   // buffers.
   EXPECT_THROW(
       {
-        RaidenController controller(unit_, "localhost:1", /*num_blocks=*/5,
-                                    /*num_shards=*/1, /*shard_size_bytes=*/512);
+        RaidenController controller(
+            unit_, std::vector<std::string>{"localhost:1"}, /*num_blocks=*/5,
+            /*num_shards=*/1, /*shard_size_bytes=*/512);
       },
       std::runtime_error);
 }
 
 TEST_F(RaidenControllerTest, TransferBuffersDelegatesToWorkerService) {
-  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
-                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
   std::vector<int64_t> src_offsets = {10};
   std::vector<int64_t> dst_offsets = {20};
@@ -150,8 +157,9 @@ TEST_F(RaidenControllerTest, TransferBuffersDelegatesToWorkerService) {
 }
 
 TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedOffsets) {
-  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
-                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
   std::vector<int64_t> src_offsets = {10, 20};
   std::vector<int64_t> dst_offsets = {20};
@@ -167,8 +175,9 @@ TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedOffsets) {
 }
 
 TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedCopySizes) {
-  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
-                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
   std::vector<int64_t> src_offsets = {10, 20};
   std::vector<int64_t> dst_offsets = {20, 30};
@@ -186,8 +195,9 @@ TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedCopySizes) {
 }
 
 TEST_F(RaidenControllerTest, TransferBuffersValidationEmptyOffsets) {
-  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
-                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
   std::vector<int64_t> src_offsets = {};
   std::vector<int64_t> dst_offsets = {};
@@ -200,6 +210,35 @@ TEST_F(RaidenControllerTest, TransferBuffersValidationEmptyOffsets) {
       resp_or.status().message(),
       HasSubstr(
           "Source and destination offsets must have the same non-zero length"));
+}
+
+TEST_F(RaidenControllerTest, MultiWorkerBroadcastSupport) {
+  auto test_server2 = CreateTestWorkerServer();
+  EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
+  EXPECT_EQ(test_server2->service->GetBufferCount(), 0);
+
+  std::vector<std::string> addresses = {test_server_->server_address,
+                                        test_server2->server_address};
+
+  {
+    RaidenController controller(unit_, addresses, /*num_blocks=*/5,
+                                /*num_shards=*/2, /*shard_size_bytes=*/512);
+
+    // Buffers created on both worker servers.
+    EXPECT_EQ(test_server_->service->GetBufferCount(), 10);
+    EXPECT_EQ(test_server2->service->GetBufferCount(), 10);
+
+    // Broadcast TransferBuffers.
+    std::vector<int64_t> src_offsets = {10};
+    std::vector<int64_t> dst_offsets = {20};
+    auto resp_or = controller.TransferBuffers(
+        rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_offsets, dst_offsets);
+    ASSERT_TRUE(resp_or.ok());
+  }
+
+  // Buffers cleaned up on both worker servers on destructor.
+  EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
+  EXPECT_EQ(test_server2->service->GetBufferCount(), 0);
 }
 
 }  // namespace

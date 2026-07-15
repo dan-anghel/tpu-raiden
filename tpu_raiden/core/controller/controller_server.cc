@@ -34,7 +34,8 @@ ControllerServer& ControllerServer::GetInstance() {
   return *instance;
 }
 
-absl::Status ControllerServer::StartServer(int port) {
+absl::Status ControllerServer::StartServer(
+    std::shared_ptr<WorkerRegistry> worker_registry, int port) {
   if (port < 0) {
     return absl::InvalidArgumentError(
         absl::StrCat("Invalid gRPC port: ", port));
@@ -47,10 +48,14 @@ absl::Status ControllerServer::StartServer(int port) {
           absl::StrCat("Server already started on port ", grpc_port_,
                        ", cannot start on requested port ", port));
     }
+    if (worker_registry && controller_service_) {
+      controller_service_->SetWorkerRegistry(std::move(worker_registry));
+    }
     return absl::OkStatus();
   }
 
-  controller_service_ = std::make_unique<RaidenControllerServiceImpl>();
+  controller_service_ =
+      std::make_unique<RaidenControllerServiceImpl>(std::move(worker_registry));
 
   std::string server_address = absl::StrCat("[::]:", port);
   grpc::ServerBuilder builder;
@@ -71,6 +76,19 @@ absl::Status ControllerServer::StartServer(int port) {
   grpc_port_ = selected_port;
   started_ = true;
   return absl::OkStatus();
+}
+
+void ControllerServer::SetWorkerRegistry(
+    std::shared_ptr<WorkerRegistry> worker_registry) {
+  absl::MutexLock lock(mutex_);
+  if (controller_service_) {
+    controller_service_->SetWorkerRegistry(std::move(worker_registry));
+  }
+}
+
+std::shared_ptr<WorkerRegistry> ControllerServer::GetWorkerRegistry() const {
+  absl::MutexLock lock(mutex_);
+  return controller_service_ ? controller_service_->worker_registry() : nullptr;
 }
 
 int ControllerServer::GetGrpcPort() const {

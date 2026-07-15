@@ -31,6 +31,7 @@
 #include "grpcpp/channel.h"
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
+#include "tpu_raiden/core/controller/controller_server.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
@@ -38,73 +39,124 @@
 
 namespace tpu_raiden {
 namespace controller {
+namespace {
 
-RaidenController::RaidenController(const rpc::RaidenIdProto& unit,
-                                   const std::string& worker_address,
-                                   int num_blocks, int num_shards,
-                                   int64_t shard_size_bytes)
-    : RaidenController(unit,
-                       grpc::CreateChannel(worker_address,
-                                           grpc::InsecureChannelCredentials()),
-                       num_blocks, num_shards, shard_size_bytes) {}
+absl::StatusOr<proto::CreateBuffersResponse> CreateBuffersForWorker(
+    WorkerServiceClient& client, const proto::CreateBuffersRequest& request,
+    absl::string_view worker_id, int num_blocks) {
+  ASSIGN_OR_RETURN(auto response, client.CreateBuffers(request));
+  if (!response.success()) {
+    return absl::InternalError(
+        absl::StrCat("WorkerService CreateBuffers failed on worker ", worker_id,
+                     " in RaidenController constructor: ", response.message()));
+  }
+  if (response.buffers_size() != num_blocks) {
+    return absl::InternalError(absl::StrCat(
+        "WorkerService on worker ", worker_id,
+        " returned unexpected number of buffers: ", response.buffers_size(),
+        " vs expected ", num_blocks));
+  }
+  return response;
+}
+
+absl::StatusOr<std::vector<proto::BufferProto>> CreateBuffersForAllWorkers(
+    core::controller::WorkerRegistry& worker_registry,
+    const rpc::RaidenIdProto& unit, int num_blocks, int num_shards,
+    int64_t shard_size_bytes) {
+  proto::CreateBuffersRequest request;
+  *request.mutable_unit() = unit;
+  for (int block_id = 0; block_id < num_blocks; ++block_id) {
+    auto* spec = request.add_buffers();
+    spec->set_num_shards(num_shards);
+    spec->set_size_bytes(shard_size_bytes);
+  }
+
+  auto registered_workers = worker_registry.GetRegisteredWorkers();
+  if (registered_workers.empty()) {
+    return absl::FailedPreconditionError(
+        "No WorkerServiceClient available in RaidenController constructor");
+  }
+
+  std::vector<proto::BufferProto> created_buffers;
+  created_buffers.reserve(num_blocks);
+  for (const auto& reg : registered_workers) {
+    if (!reg.worker_service_client) continue;
+
+    ASSIGN_OR_RETURN(auto resp,
+                     CreateBuffersForWorker(*reg.worker_service_client, request,
+                                            reg.worker_id, num_blocks));
+
+    if (created_buffers.empty()) {
+      for (int block_id = 0; block_id < num_blocks; ++block_id) {
+        created_buffers.push_back(resp.buffers(block_id));
+      }
+    }
+  }
+
+  if (created_buffers.empty()) {
+    return absl::FailedPreconditionError(
+        "No active WorkerServiceClient available to create buffers");
+  }
+
+  return created_buffers;
+}
+
+}  // namespace
 
 RaidenController::RaidenController(
     const rpc::RaidenIdProto& unit,
-    std::shared_ptr<grpc::Channel> worker_channel, int num_blocks,
+    absl::Span<const std::string> worker_addresses, int num_blocks,
     int num_shards, int64_t shard_size_bytes)
-    : RaidenController(unit,
-                       std::make_unique<WorkerServiceClient>(worker_channel),
-                       num_blocks, num_shards, shard_size_bytes) {}
-
-RaidenController::RaidenController(const rpc::RaidenIdProto& unit,
-                                   std::unique_ptr<WorkerServiceClient> client,
-                                   int num_blocks, int num_shards,
-                                   int64_t shard_size_bytes)
     : unit_(unit),
-      client_(std::move(client)),
       num_shards_(num_shards),
       shard_size_bytes_(shard_size_bytes),
+      worker_registry_(std::make_shared<core::controller::WorkerRegistry>()),
       block_manager_(
           std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
-  proto::CreateBuffersRequest request;
-  *request.mutable_unit() = unit_;
-  all_sharded_buffers_.reserve(num_blocks);
-
-  for (int block_id = 0; block_id < num_blocks; ++block_id) {
-    auto* spec = request.add_buffers();
-    spec->set_num_shards(num_shards_);
-    spec->set_size_bytes(shard_size_bytes_);
+  for (size_t i = 0; i < worker_addresses.size(); ++i) {
+    std::string worker_id = absl::StrCat("worker_", i);
+    absl::Status status = worker_registry_->RegisterWorker(
+        worker_id, worker_addresses[i], /*raiden_transfer_endpoint=*/"");
+    if (!status.ok()) {
+      LOG(WARNING) << "Failed to register worker address "
+                   << worker_addresses[i]
+                   << " in RaidenController: " << status.message();
+    }
   }
 
-  auto resp_or = client_->CreateBuffers(request);
-  if (!resp_or.ok()) {
-    throw std::runtime_error(absl::StrCat(
-        "Failed to create buffers on worker in RaidenController constructor: ",
-        resp_or.status().message()));
-  }
-  if (!resp_or->success()) {
-    throw std::runtime_error(
-        absl::StrCat("WorkerService CreateBuffers failed in RaidenController "
-                     "constructor: ",
-                     resp_or->message()));
-  }
-  if (resp_or->buffers_size() != num_blocks) {
-    throw std::runtime_error(
-        absl::StrCat("WorkerService returned unexpected number of buffers: ",
-                     resp_or->buffers_size(), " vs expected ", num_blocks));
+  InitControlPlaneAndBuffers(num_blocks);
+}
+
+
+
+
+
+void RaidenController::InitControlPlaneAndBuffers(int num_blocks) {
+  absl::Status server_status =
+      core::controller::ControllerServer::GetInstance().StartServer(
+          worker_registry_, /*port=*/0);
+  if (!server_status.ok()) {
+    LOG(WARNING) << "Failed to start ControllerServer in RaidenController: "
+                 << server_status.message();
   }
 
-  for (int block_id = 0; block_id < num_blocks; ++block_id) {
-    const auto& sharded_buf = resp_or->buffers(block_id);
+  auto buffers_or = CreateBuffersForAllWorkers(
+      *worker_registry_, unit_, num_blocks, num_shards_, shard_size_bytes_);
+  if (!buffers_or.ok()) {
+    throw std::runtime_error(std::string(buffers_or.status().message()));
+  }
+
+  all_sharded_buffers_ = std::move(*buffers_or);
+  for (int block_id = 0; block_id < all_sharded_buffers_.size(); ++block_id) {
+    const auto& sharded_buf = all_sharded_buffers_[block_id];
     for (const auto& handle_proto : sharded_buf.buffer_handles()) {
       handle_to_block_id_[handle_proto.handle()] = block_id;
     }
-    all_sharded_buffers_.push_back(sharded_buf);
   }
 }
 
 RaidenController::~RaidenController() {
-  if (!client_ || all_sharded_buffers_.empty()) return;
+  if (all_sharded_buffers_.empty() || !worker_registry_) return;
 
   proto::DeleteBuffersRequest request;
   *request.mutable_unit() = unit_;
@@ -112,13 +164,19 @@ RaidenController::~RaidenController() {
     *request.add_sharded_buffers() = sharded_buf;
   }
 
-  auto resp_or = client_->DeleteBuffers(request);
-  if (!resp_or.ok()) {
-    LOG(ERROR) << "Failed to delete buffers on worker in ~RaidenController: "
-               << resp_or.status().message();
-  } else if (!resp_or->success()) {
-    LOG(ERROR) << "WorkerService DeleteBuffers failed in ~RaidenController: "
-               << resp_or->message();
+  for (const auto& reg : worker_registry_->GetRegisteredWorkers()) {
+    if (reg.worker_service_client) {
+      auto resp_or = reg.worker_service_client->DeleteBuffers(request);
+      if (!resp_or.ok()) {
+        LOG(ERROR)
+            << "Failed to delete buffers on worker in ~RaidenController: "
+            << resp_or.status().message();
+      } else if (!resp_or->success()) {
+        LOG(ERROR)
+            << "WorkerService DeleteBuffers failed in ~RaidenController: "
+            << resp_or->message();
+      }
+    }
   }
 }
 
@@ -184,10 +242,6 @@ RaidenController::TransferBuffers(rpc::MemoryType src_mem_type,
                                   absl::Span<const int64_t> dst_offsets,
                                   absl::Span<const int64_t> copy_sizes,
                                   absl::string_view peer) {
-  if (!client_) {
-    return absl::FailedPreconditionError(
-        "WorkerServiceClient is not initialized");
-  }
   if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
     return absl::InvalidArgumentError(
         "Source and destination offsets must have the same non-zero length");
@@ -196,6 +250,7 @@ RaidenController::TransferBuffers(rpc::MemoryType src_mem_type,
     return absl::InvalidArgumentError(
         "copy_sizes, if provided, must match the length of src_offsets");
   }
+
   proto::TransferBuffersRequest request;
   auto* transfer = request.mutable_transfer();
   transfer->set_src_mem_type(src_mem_type);
@@ -206,7 +261,30 @@ RaidenController::TransferBuffers(rpc::MemoryType src_mem_type,
   if (!peer.empty()) {
     transfer->set_peer(std::string(peer));
   }
-  return client_->TransferBuffers(request);
+
+
+  auto workers = worker_registry_->GetRegisteredWorkers();
+  if (workers.empty()) {
+    return absl::FailedPreconditionError(
+        "No registered workers available for TransferBuffers");
+  }
+
+  proto::TransferBuffersResponse last_response;
+  bool issued_any = false;
+  for (const auto& reg : workers) {
+    if (reg.worker_service_client) {
+      ASSIGN_OR_RETURN(last_response,
+                       reg.worker_service_client->TransferBuffers(request));
+      issued_any = true;
+    }
+  }
+
+  if (!issued_any) {
+    return absl::FailedPreconditionError(
+        "No active WorkerServiceClient available for TransferBuffers");
+  }
+
+  return last_response;
 }
 
 }  // namespace controller

@@ -49,7 +49,8 @@ TEST_F(RaidenControllerTest, RegisterWorkerSuccessfully) {
       "worker_0", "10.0.0.1:9000", transfer_addr);
   EXPECT_OK(status);
 
-  auto workers = test_server_->service->GetRegisteredWorkers();
+  auto workers =
+      test_server_->service->worker_registry()->GetRegisteredWorkers();
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "worker_0");
   EXPECT_EQ(workers[0].raiden_worker_endpoint, "10.0.0.1:9000");
@@ -62,7 +63,8 @@ TEST_F(RaidenControllerTest, RegisterWorkerAliasSnakeCase) {
       "worker_1", "10.0.0.2:9000", transfer_addr);
   EXPECT_OK(status);
 
-  auto worker_or = test_server_->service->GetWorker("worker_1");
+  auto worker_or =
+      test_server_->service->worker_registry()->GetWorker("worker_1");
   ASSERT_OK(worker_or);
   EXPECT_EQ(worker_or->worker_id, "worker_1");
   EXPECT_EQ(worker_or->raiden_worker_endpoint, "10.0.0.2:9000");
@@ -75,7 +77,8 @@ TEST_F(RaidenControllerTest, ConstructWithEndpointString) {
                                               "10.0.0.1:9000", "10.0.0.1:8000");
   EXPECT_OK(status);
 
-  auto workers = test_server_->service->GetRegisteredWorkers();
+  auto workers =
+      test_server_->service->worker_registry()->GetRegisteredWorkers();
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "worker_endpoint_ctor");
 }

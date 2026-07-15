@@ -46,7 +46,7 @@ TEST(ControllerServerTest, StartServerAndGetPortWorks) {
       client.RegisterWorker("worker_0", "localhost:10001", "localhost:10002");
   ABSL_ASSERT_OK(status);
 
-  auto worker_or = server.GetControllerService()->GetWorker("worker_0");
+  auto worker_or = server.GetWorkerRegistry()->GetWorker("worker_0");
   ABSL_ASSERT_OK(worker_or);
   EXPECT_EQ(worker_or->worker_id, "worker_0");
   EXPECT_EQ(worker_or->raiden_worker_endpoint, "localhost:10001");

@@ -349,9 +349,10 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
 
   std::string server_address = absl::StrCat("localhost:", port);
 
-  controller::RaidenController controller(unit, server_address,
-                                          /*num_blocks=*/5, /*num_shards=*/1,
-                                          /*shard_size_bytes=*/512);
+  controller::RaidenController controller(
+      unit, std::vector<std::string>{server_address},
+      /*num_blocks=*/5, /*num_shards=*/1,
+      /*shard_size_bytes=*/512);
 
   std::vector<int64_t> src_offsets = {10, 30};
   std::vector<int64_t> dst_offsets = {20, 40};
@@ -393,7 +394,8 @@ TEST(KVCacheManagerWrapperTest, WorkerSelfRegistrationWithControllerSuccess) {
   KVCacheManager mgr(std::move(subs), /*grpc_port=*/0, controller_address,
                      "test_worker_node");
 
-  auto workers = test_server->service->GetRegisteredWorkers();
+  auto workers =
+      test_server->service->worker_registry()->GetRegisteredWorkers();
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "test_worker_node");
   EXPECT_NE(

@@ -33,57 +33,51 @@ namespace tpu_raiden {
 namespace core {
 namespace controller {
 
+RaidenControllerServiceImpl::RaidenControllerServiceImpl(
+    std::shared_ptr<WorkerRegistry> worker_registry)
+    : worker_registry_(worker_registry ? std::move(worker_registry)
+                                       : std::make_shared<WorkerRegistry>()) {}
+
 grpc::Status RaidenControllerServiceImpl::RegisterWorker(
     grpc::ServerContext* context,
     const ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest* request,
     ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response) {
-  absl::MutexLock lock(mutex_);
-
-  if (request->worker_id().empty()) {
-    response->set_success(false);
-    response->set_error_message("worker_id cannot be empty");
-    return grpc::Status::OK;
-  }
-  if (request->raiden_worker_endpoint().empty() &&
-      request->raiden_transfer_endpoint().empty()) {
-    response->set_success(false);
-    response->set_error_message(
-        "at least one of raiden_worker_endpoint or raiden_transfer_endpoint"
-        " must be provided");
-    return grpc::Status::OK;
-  }
-
   WorkerRegistration reg = {
       .worker_id = request->worker_id(),
       .raiden_worker_endpoint = request->raiden_worker_endpoint(),
       .raiden_transfer_endpoint = request->raiden_transfer_endpoint(),
   };
 
-  workers_[reg.worker_id] = std::move(reg);
+  std::shared_ptr<WorkerRegistry> registry;
+  {
+    absl::MutexLock lock(mutex_);
+    registry = worker_registry_;
+  }
+
+  absl::Status status = registry->RegisterWorker(reg);
+  if (!status.ok()) {
+    response->set_success(false);
+    response->set_error_message(std::string(status.message()));
+    return grpc::Status::OK;
+  }
 
   response->set_success(true);
   return grpc::Status::OK;
 }
 
-std::vector<WorkerRegistration>
-RaidenControllerServiceImpl::GetRegisteredWorkers() const {
-  absl::MutexLock lock(mutex_);
-  std::vector<WorkerRegistration> result;
-  result.reserve(workers_.size());
-  for (const auto& [_, reg] : workers_) {
-    result.push_back(reg);
+
+void RaidenControllerServiceImpl::SetWorkerRegistry(
+    std::shared_ptr<WorkerRegistry> worker_registry) {
+  if (worker_registry) {
+    absl::MutexLock lock(mutex_);
+    worker_registry_ = std::move(worker_registry);
   }
-  return result;
 }
 
-absl::StatusOr<WorkerRegistration> RaidenControllerServiceImpl::GetWorker(
-    absl::string_view worker_id) const {
+std::shared_ptr<WorkerRegistry> RaidenControllerServiceImpl::worker_registry()
+    const {
   absl::MutexLock lock(mutex_);
-  auto it = workers_.find(worker_id);
-  if (it == workers_.end()) {
-    return absl::NotFoundError(absl::StrCat("Worker not found: ", worker_id));
-  }
-  return it->second;
+  return worker_registry_;
 }
 
 }  // namespace controller

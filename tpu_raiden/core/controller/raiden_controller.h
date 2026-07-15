@@ -27,6 +27,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "grpcpp/channel.h"
+#include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
@@ -39,25 +40,10 @@ namespace controller {
 // and synchronizing them with remote transfer workers via WorkerService gRPC.
 class RaidenController {
  public:
-  // Constructs a RaidenController for the given unit by creating an insecure
-  // gRPC channel to worker_address, instantiating a WorkerServiceClient, and
-  // pre-creating all num_blocks buffers on the remote worker in one shot.
+  // Constructs a RaidenController for multiple worker addresses.
   RaidenController(const rpc::RaidenIdProto& unit,
-                   const std::string& worker_address, int num_blocks,
-                   int num_shards, int64_t shard_size_bytes);
-
-  // Constructs a RaidenController for the given unit, communicating over
-  // worker_channel and pre-creating all num_blocks buffers on the remote
-  // worker in one shot.
-  RaidenController(const rpc::RaidenIdProto& unit,
-                   std::shared_ptr<grpc::Channel> worker_channel,
+                   absl::Span<const std::string> worker_addresses,
                    int num_blocks, int num_shards, int64_t shard_size_bytes);
-
-  // Alternative constructor taking an already-instantiated WorkerServiceClient
-  // and pre-creating all num_blocks buffers on the remote worker in one shot.
-  RaidenController(const rpc::RaidenIdProto& unit,
-                   std::unique_ptr<WorkerServiceClient> client, int num_blocks,
-                   int num_shards, int64_t shard_size_bytes);
 
   // Destructor automatically calls DeleteBuffers to clean up all pre-created
   // buffers on the remote worker.
@@ -86,7 +72,6 @@ class RaidenController {
   kv_cache::LogicalBlockManager* block_manager() const {
     return block_manager_.get();
   }
-  WorkerServiceClient* client() const { return client_.get(); }
   int num_shards() const { return num_shards_; }
   int64_t shard_size_bytes() const { return shard_size_bytes_; }
   const std::vector<proto::BufferProto>& all_sharded_buffers() const {
@@ -94,12 +79,14 @@ class RaidenController {
   }
 
  private:
+  void InitControlPlaneAndBuffers(int num_blocks);
+
   rpc::RaidenIdProto unit_;
-  std::unique_ptr<WorkerServiceClient> client_;
   int num_shards_;
   int64_t shard_size_bytes_;
   std::vector<proto::BufferProto> all_sharded_buffers_;
   absl::flat_hash_map<uint64_t, int> handle_to_block_id_;
+  std::shared_ptr<core::controller::WorkerRegistry> worker_registry_;
   mutable absl::Mutex mutex_;
   std::unique_ptr<kv_cache::LogicalBlockManager> block_manager_
       ABSL_GUARDED_BY(mutex_);

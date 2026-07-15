@@ -27,6 +27,7 @@
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
+#include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 
@@ -34,16 +35,11 @@ namespace tpu_raiden {
 namespace core {
 namespace controller {
 
-struct WorkerRegistration {
-  std::string worker_id;
-  std::string raiden_worker_endpoint;
-  std::string raiden_transfer_endpoint;
-};
-
 class RaidenControllerServiceImpl final
     : public ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Service {
  public:
-  RaidenControllerServiceImpl() = default;
+  explicit RaidenControllerServiceImpl(
+      std::shared_ptr<WorkerRegistry> worker_registry = nullptr);
   ~RaidenControllerServiceImpl() override = default;
 
   // Disallow copy and assign
@@ -57,17 +53,16 @@ class RaidenControllerServiceImpl final
       ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response)
       override;
 
-  // Retrieves all registered workers.
-  std::vector<WorkerRegistration> GetRegisteredWorkers() const;
 
-  // Retrieves a specific worker registration by ID.
-  absl::StatusOr<WorkerRegistration> GetWorker(
-      absl::string_view worker_id) const;
+  // Updates the underlying WorkerRegistry.
+  void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
+
+  // Returns the current WorkerRegistry.
+  std::shared_ptr<WorkerRegistry> worker_registry() const;
 
  private:
   mutable absl::Mutex mutex_;
-  absl::flat_hash_map<std::string, WorkerRegistration> workers_
-      ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<WorkerRegistry> worker_registry_ ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace controller
