@@ -24,19 +24,37 @@
 #include <thread>  // NOLINT
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/base/thread_annotations.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
+#include "tpu_raiden/transport/lib/util/util.h"
 
 namespace tpu_raiden::transport::lib::testing {
 namespace {
 
+using ::testing::Each;
+using ::testing::Eq;
+using ::testing::Ne;
+using ::testing::Pointwise;
+
+constexpr int kLocalPort = 0;
+constexpr size_t kBufferId = 0;
+constexpr size_t kSrcShardIdx = 0;
+constexpr size_t kDstShardIdx = 0;
+
+std::string GetIpPort(const RawBufferTransport& transport) {
+  return "localhost:" + std::to_string(transport.local_port());
+}
+
 class RawMockDelegate : public RawBufferTransportDelegate {
  public:
-  explicit RawMockDelegate(size_t buffer_size) {
-    buffer_.resize(buffer_size, 0);
+  explicit RawMockDelegate(size_t buffer_size) : buffer_(buffer_size, 0) {
+    DCHECK(AllZero(buffer_));
   }
 
   uint8_t* GetHostPointer(size_t buffer_id, size_t shard_idx) override {
@@ -54,6 +72,11 @@ class RawMockDelegate : public RawBufferTransportDelegate {
   }
 
   uint8_t* data() { return buffer_.data(); }
+  absl::Span<uint8_t> DataSpan() { return absl::MakeSpan(buffer_); }
+  absl::Span<const uint8_t> DataSpan(size_t offset, size_t length) {
+    return absl::MakeConstSpan(buffer_.data() + offset, length);
+  }
+
   bool on_data_received() const {
     absl::MutexLock lock( mu_ );
     return on_data_received_called_;
@@ -66,102 +89,119 @@ class RawMockDelegate : public RawBufferTransportDelegate {
 };
 
 TEST(RawBufferTransportTest, PullBufferCorrectness) {
-  size_t size = 4096;
-  RawMockDelegate delegate1(size);
-  RawMockDelegate delegate2(size);
+  // Set up src/dst buffers.
+  constexpr size_t size = 64 * 1024;
+  RawMockDelegate src(size);
+  RawMockDelegate dst(size);
+  RandomNonZero(src.DataSpan());
 
-  std::memset(delegate1.data(), 0xEF, size);
-  std::memset(delegate2.data(), 0x00, size);
+  // Pre-condition: all the dst bytes are not equal to the src.
+  ASSERT_THAT(dst.DataSpan(), Pointwise(Ne(), src.DataSpan()));
 
-  RawBufferTransport transport1(&delegate1, 0);
-  RawBufferTransport transport2(&delegate2, 0);
-
+  // Create two transports.
+  RawBufferTransport src_transport(&src, kLocalPort);
+  RawBufferTransport dst_transport(&dst, kLocalPort);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+  // Pull a buffer segment from src to dst.
+  const std::string src_addr = GetIpPort(src_transport);
+  constexpr size_t kLen = 62 * 1024;
+  constexpr size_t kSrcOffset = 512;
+  constexpr size_t kDstOffset = 1024;
+  const auto pull_res =
+      dst_transport.PullBuffer(src_addr, kBufferId, kSrcShardIdx, kSrcOffset,
+                               kDstShardIdx, kDstOffset, kLen);
+  ASSERT_OK(pull_res) << pull_res.message();
 
-  auto pull_res = transport2.PullBuffer(
-      peer1, /*buffer_id=*/0, /*src_shard_idx=*/0, /*src_offset_bytes=*/512,
-      /*dst_shard_idx=*/0, /*dst_offset_bytes=*/1024, /*size_bytes=*/1024);
-  ASSERT_TRUE(pull_res.ok()) << pull_res.message();
-
-  EXPECT_EQ(delegate2.data()[1023], 0x00);
-  EXPECT_EQ(delegate2.data()[1024], 0xEF);
-  EXPECT_EQ(delegate2.data()[2047], 0xEF);
-  EXPECT_EQ(delegate2.data()[2048], 0x00);
+  // Post-condition: only the copied dst bytes are equal to the src.
+  EXPECT_THAT(dst.DataSpan(0, kDstOffset), Each(Eq(0)));
+  EXPECT_THAT(dst.DataSpan(kDstOffset, kLen),
+              Pointwise(Eq(), src.DataSpan(kSrcOffset, kLen)));
+  EXPECT_THAT(dst.DataSpan(kDstOffset + kLen, size - kDstOffset - kLen),
+              Each(Eq(0)));
 }
 
 TEST(RawBufferTransportTest, PushBufferCorrectness) {
-  size_t size = 4096;
-  RawMockDelegate delegate1(size);
-  RawMockDelegate delegate2(size);
+  // Set up src/dst buffers.
+  constexpr size_t size = 64 * 1024;
+  RawMockDelegate src(size);
+  RawMockDelegate dst(size);
+  RandomNonZero(src.DataSpan());
 
-  std::vector<uint8_t> push_payload(1024, 0xAB);
-  std::memset(delegate2.data(), 0x00, size);
+  // Pre-condition: all the dst bytes are not equal to the src.
+  ASSERT_THAT(dst.DataSpan(), Pointwise(Ne(), src.DataSpan()));
 
-  RawBufferTransport transport1(&delegate1, 0);
-  RawBufferTransport transport2(&delegate2, 0);
-
+  // Create two transports.
+  RawBufferTransport src_transport(&src, kLocalPort);
+  RawBufferTransport dst_transport(&dst, kLocalPort);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+  // Push a buffer segment from src to dst.
+  constexpr size_t kLen = 62 * 1024;
+  constexpr size_t kDstOffset = 512;
+  std::vector<uint8_t> push_payload(kLen);
+  RandomNonZero(absl::MakeSpan(push_payload));
+  const std::string dst_addr = GetIpPort(dst_transport);
+  const auto push_res =
+      src_transport.PushBuffer(dst_addr, kBufferId, kDstShardIdx, kDstOffset,
+                               push_payload.data(), push_payload.size());
+  EXPECT_OK(push_res) << push_res.message();
 
-  auto push_res = transport1.PushBuffer(
-      peer2, /*buffer_id=*/0, /*dst_shard_idx=*/0, /*dst_offset_bytes=*/512,
-      push_payload.data(), push_payload.size());
-  ASSERT_TRUE(push_res.ok()) << push_res.message();
-
-  EXPECT_EQ(delegate2.data()[511], 0x00);
-  EXPECT_EQ(delegate2.data()[512], 0xAB);
-  EXPECT_EQ(delegate2.data()[1535], 0xAB);
-  EXPECT_EQ(delegate2.data()[1536], 0x00);
+  // Post-condition: only the copied dst bytes are equal to the src.
+  EXPECT_THAT(dst.DataSpan(0, kDstOffset), Each(Eq(0)));
+  EXPECT_THAT(dst.DataSpan(kDstOffset, kLen),
+              Pointwise(Eq(), absl::MakeConstSpan(push_payload)));
+  EXPECT_THAT(dst.DataSpan(kDstOffset + kLen, size - kDstOffset - kLen),
+              Each(Eq(0)));
 }
 
 TEST(RawBufferTransportTest, PollEINTRIsBenign) {
-  size_t size = 4096;
-  RawMockDelegate delegate1(size);
-  RawMockDelegate delegate2(size);
+  // Set up src/dst buffers.
+  constexpr size_t size = 4096;
+  RawMockDelegate src(size);
+  RawMockDelegate dst(size);
 
-  std::memset(delegate2.data(), 0x00, size);
-
-  RawBufferTransport transport1(&delegate1, 0);
-  RawBufferTransport transport2(&delegate2, 0);
-
+  // Create two transports.
+  RawBufferTransport src_transport(&src, 0);
+  RawBufferTransport dst_transport(&dst, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
-
-  // Register a dummy signal handler
+  // Register a dummy signal handler.
   signal(SIGUSR1, [](int) {});
-
-  // Send a signal to the process, which will interrupt some poll() calls with
-  // EINTR.
+  // Send a signal to the process to interrupt some poll() calls with EINTR.
   kill(getpid(), SIGUSR1);
 
   // Perform a push to verify the connection worker didn't die.
-  std::vector<uint8_t> push_payload(1024, 0xAB);
-  auto push_res = transport1.PushBuffer(
-      peer2, /*buffer_id=*/0, /*dst_shard_idx=*/0, /*dst_offset_bytes=*/512,
-      push_payload.data(), push_payload.size());
-  ASSERT_TRUE(push_res.ok()) << push_res.message();
+  const std::string dst_addr = GetIpPort(dst_transport);
+  const std::vector<uint8_t> push_payload(1024, 0xAB);
+  constexpr size_t kDstOffset = 512;
+  const auto push_res =
+      src_transport.PushBuffer(dst_addr, kBufferId, kDstShardIdx, kDstOffset,
+                               push_payload.data(), push_payload.size());
+  EXPECT_OK(push_res) << push_res.message();
 }
 
 TEST(RawBufferTransportTest, RejectsOutOfBounds) {
-  size_t size = 1024;
-  RawMockDelegate delegate1(size);
-  RawMockDelegate delegate2(size);
+  // Set up src/dst buffers.
+  constexpr size_t size = 1024;
+  RawMockDelegate src(size);
+  RawMockDelegate dst(size);
 
-  RawBufferTransport transport1(&delegate1, 0);
-  RawBufferTransport transport2(&delegate2, 0);
-
+  // Create two transports.
+  RawBufferTransport src_transport(&src, 0);
+  RawBufferTransport dst_transport(&dst, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
-
-  auto pull_res = transport2.PullBuffer(
-      peer1, /*buffer_id=*/0, /*src_shard_idx=*/0, /*src_offset_bytes=*/0,
-      /*dst_shard_idx=*/0, /*dst_offset_bytes=*/512, /*size_bytes=*/1024);
-  EXPECT_FALSE(pull_res.ok());
+  // Pulling an out-of-bounds buffer segment from src to dst should fail.
+  const std::string src_addr = GetIpPort(src_transport);
+  constexpr size_t kSrcOffset = 0;
+  constexpr size_t kDstOffset = size / 2;
+  constexpr size_t kLen = 1024 / 2 + 1;
+  static_assert(kDstOffset + kLen > size);
+  const auto pull_res =
+      dst_transport.PullBuffer(src_addr, kBufferId, kSrcShardIdx, kSrcOffset,
+                               kDstShardIdx, kDstOffset, kLen);
+  EXPECT_FALSE(pull_res.ok()) << pull_res.message();
 }
 
 class TestRawBufferTransport : public RawBufferTransport {
@@ -172,53 +212,53 @@ class TestRawBufferTransport : public RawBufferTransport {
 };
 
 TEST(RawBufferTransportTest, MultiIpPoolingIsolation) {
-  size_t size = 1024;
-  RawMockDelegate delegate1(size);
-  RawMockDelegate delegate2(size);
+  // Set up src/dst buffers.
+  constexpr size_t size = 1024;
+  RawMockDelegate src(size);
+  RawMockDelegate dst(size);
 
-  RawBufferTransport transport1(&delegate1, 0);
-  TestRawBufferTransport transport2(&delegate2, 0);
-
+  // Create two transports.
+  RawBufferTransport src_transport(&src, 0);
+  TestRawBufferTransport dst_transport(&dst, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  std::string peer1 = "127.0.0.1:" + std::to_string(transport1.local_port());
-
   // 1. Acquire connection with local_ip = "127.0.0.1"
-  auto fd1_or = transport2.AcquireConnection(peer1, "127.0.0.1");
-  ASSERT_TRUE(fd1_or.ok()) << fd1_or.status().message();
-  int fd1 = fd1_or.value();
+  const std::string src_addr = GetIpPort(src_transport);
+  const auto fd1_or = dst_transport.AcquireConnection(src_addr, "127.0.0.1");
+  ASSERT_OK(fd1_or) << fd1_or.status().message();
+  const int fd1 = fd1_or.value();
 
   // Release it. It should be pooled under "127.0.0.1->peer1".
-  transport2.ReleaseConnection(peer1, fd1, "127.0.0.1");
+  dst_transport.ReleaseConnection(src_addr, fd1, "127.0.0.1");
 
   // 2. Acquire connection with local_ip = "127.0.0.2"
   // This should NOT reuse fd1 because it's a different local IP.
-  auto fd2_or = transport2.AcquireConnection(peer1, "127.0.0.2");
-  ASSERT_TRUE(fd2_or.ok()) << fd2_or.status().message();
-  int fd2 = fd2_or.value();
+  const auto fd2_or = dst_transport.AcquireConnection(src_addr, "127.0.0.2");
+  ASSERT_OK(fd2_or) << fd2_or.status().message();
+  const int fd2 = fd2_or.value();
 
   EXPECT_NE(fd1, fd2);
 
   // Release it. It should be pooled under "127.0.0.2->peer1".
-  transport2.ReleaseConnection(peer1, fd2, "127.0.0.2");
+  dst_transport.ReleaseConnection(src_addr, fd2, "127.0.0.2");
 
   // 3. Acquire connection with local_ip = "127.0.0.1" again.
   // This SHOULD reuse fd1.
-  auto fd3_or = transport2.AcquireConnection(peer1, "127.0.0.1");
-  ASSERT_TRUE(fd3_or.ok()) << fd3_or.status().message();
-  int fd3 = fd3_or.value();
+  const auto fd3_or = dst_transport.AcquireConnection(src_addr, "127.0.0.1");
+  ASSERT_OK(fd3_or) << fd3_or.status().message();
+  const int fd3 = fd3_or.value();
 
   EXPECT_EQ(fd1, fd3);
-  transport2.ReleaseConnection(peer1, fd3, "127.0.0.1");
+  dst_transport.ReleaseConnection(src_addr, fd3, "127.0.0.1");
 
   // 4. Acquire connection with local_ip = "127.0.0.2" again.
   // This SHOULD reuse fd2.
-  auto fd4_or = transport2.AcquireConnection(peer1, "127.0.0.2");
-  ASSERT_TRUE(fd4_or.ok()) << fd4_or.status().message();
-  int fd4 = fd4_or.value();
+  const auto fd4_or = dst_transport.AcquireConnection(src_addr, "127.0.0.2");
+  ASSERT_OK(fd4_or) << fd4_or.status().message();
+  const int fd4 = fd4_or.value();
 
   EXPECT_EQ(fd2, fd4);
-  transport2.ReleaseConnection(peer1, fd4, "127.0.0.2");
+  dst_transport.ReleaseConnection(src_addr, fd4, "127.0.0.2");
 }
 
 }  // namespace
