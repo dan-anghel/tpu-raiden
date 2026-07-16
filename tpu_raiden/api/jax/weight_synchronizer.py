@@ -51,8 +51,6 @@ class WeightSynchronizer:
         bind_ip,
     )
 
-
-
   def d2h(self) -> None:
     """Triggers asynchronous Device-to-Host (D2H) copy of current weights to Host buffer."""
     self._impl.D2h()
@@ -60,10 +58,6 @@ class WeightSynchronizer:
   def h2d(self) -> None:
     """Triggers asynchronous Host-to-Device (H2D) copy of staged host buffer back to Device memory E2E."""
     self._impl.H2d()
-
-
-
-
 
   def get_host_buffer(self, layer_idx: int = 0, shard_idx: int = 0) -> any:
     """Returns a zero-copy Host-side CPU NumPy ndarray view of the C++ staging buffer.

@@ -21,14 +21,60 @@ from tpu_raiden.api.jax import kv_cache_store
 
 class KVCacheStoreTest(absltest.TestCase):
 
+  def test_raiden_block_id_creation_and_equality(self):
+    id_ = kv_cache_store.RaidenId("test_job", "0", "test_cache", 0)
+    block_1 = kv_cache_store.RaidenBlockID(
+        id_,
+        host_block_id=10,
+        device_block_id=20,
+        status=kv_cache_store.BlockStatus.HBM,
+    )
+    self.assertEqual(block_1.raiden_id.job_name, id_.job_name)
+    self.assertEqual(block_1.raiden_id.job_replica_id, id_.job_replica_id)
+    self.assertEqual(block_1.raiden_id.data_name, id_.data_name)
+    self.assertEqual(block_1.raiden_id.data_replica_idx, id_.data_replica_idx)
+    self.assertEqual(block_1.host_block_id, 10)
+    self.assertEqual(block_1.device_block_id, 20)
+    self.assertEqual(block_1.status, kv_cache_store.BlockStatus.HBM)
+
+    # Test constructor with position arguments (backwards compatibility)
+    block_pos = kv_cache_store.RaidenBlockID(
+        id_, 10, kv_cache_store.BlockStatus.HBM
+    )
+    self.assertEqual(block_pos.raiden_id.job_name, id_.job_name)
+    self.assertEqual(block_pos.raiden_id.job_replica_id, id_.job_replica_id)
+    self.assertEqual(block_pos.raiden_id.data_name, id_.data_name)
+    self.assertEqual(block_pos.raiden_id.data_replica_idx, id_.data_replica_idx)
+    self.assertEqual(block_pos.host_block_id, 10)
+    self.assertEqual(block_pos.device_block_id, -1)
+    self.assertEqual(block_pos.status, kv_cache_store.BlockStatus.HBM)
+
+    block_2 = kv_cache_store.RaidenBlockID(
+        id_,
+        host_block_id=10,
+        device_block_id=20,
+        status=kv_cache_store.BlockStatus.HBM,
+    )
+    self.assertEqual(block_1.host_block_id, block_2.host_block_id)
+    self.assertEqual(block_1.device_block_id, block_2.device_block_id)
+    self.assertEqual(block_1.status, block_2.status)
+
+    block_3 = kv_cache_store.RaidenBlockID(
+        id_,
+        host_block_id=10,
+        device_block_id=21,
+        status=kv_cache_store.BlockStatus.HBM,
+    )
+    self.assertNotEqual(block_1.device_block_id, block_3.device_block_id)
+
   def test_basic_tests(self):
     controller = kv_cache_store.KVCacheStore(capacity=20)
     self.assertEqual(controller.capacity(), 20)
 
     hashes = [b"6001", b"6002"]
     slices = [
-        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
-        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+        kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0),
+        kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0),
     ]
 
     # 1. Insert
@@ -42,9 +88,8 @@ class KVCacheStoreTest(absltest.TestCase):
     lookup_res = controller.lookup(hashes_with_miss)
     self.assertLen(lookup_res, 2)
     self.assertEqual(lookup_res[0][0], b"6001")
-    self.assertLen(lookup_res[0][1], 1)
-    self.assertEqual(lookup_res[0][1][0].job_name, "inference_server")
-    self.assertEqual(lookup_res[0][1][0].job_replica_id, "0")
+    self.assertEqual(lookup_res[0][1].raiden_id.job_name, "inference_server")
+    self.assertEqual(lookup_res[0][1].raiden_id.job_replica_id, "0")
 
     # Lookup with an early miss
     hashes_early_miss = [b"6001", b"6003", b"6002"]
@@ -63,8 +108,8 @@ class KVCacheStoreTest(absltest.TestCase):
 
     hashes = [b"7001", b"7002"]
     slices = [
-        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
-        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+        kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0),
+        kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0),
     ]
 
     self.assertTrue(controller.insert(hashes, slices, True)[0])
@@ -75,9 +120,7 @@ class KVCacheStoreTest(absltest.TestCase):
     # Inserting a third element should fail to evict because both items are
     # pinned.
     hash_3 = [b"7003"]
-    slice_3 = [
-        [kv_cache_store.RaidenId("inference_server", "2", "kv_cache", 0)]
-    ]
+    slice_3 = [kv_cache_store.RaidenId("inference_server", "2", "kv_cache", 0)]
     controller.insert(hash_3, slice_3, True)
 
     # Release 7001
@@ -85,9 +128,7 @@ class KVCacheStoreTest(absltest.TestCase):
 
     # Now inserting a fourth element (7004) should successfully evict 7001
     hash_4 = [b"7004"]
-    slice_4 = [
-        [kv_cache_store.RaidenId("inference_server", "3", "kv_cache", 0)]
-    ]
+    slice_4 = [kv_cache_store.RaidenId("inference_server", "3", "kv_cache", 0)]
     controller.insert(hash_4, slice_4, True)
 
     self.assertEmpty(controller.lookup([b"7001", b"7002"]))
@@ -98,8 +139,8 @@ class KVCacheStoreTest(absltest.TestCase):
 
     hashes = [b"8001", b"8002"]
     slices = [
-        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
-        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+        kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0),
+        kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0),
     ]
     self.assertTrue(controller.insert(hashes, slices, True)[0])
 
@@ -112,16 +153,8 @@ class KVCacheStoreTest(absltest.TestCase):
         controller.insert(
             [b"8004", b"8005"],
             [
-                [
-                    kv_cache_store.RaidenId(
-                        "inference_server", "2", "kv_cache", 0
-                    )
-                ],
-                [
-                    kv_cache_store.RaidenId(
-                        "inference_server", "3", "kv_cache", 0
-                    )
-                ],
+                kv_cache_store.RaidenId("inference_server", "2", "kv_cache", 0),
+                kv_cache_store.RaidenId("inference_server", "3", "kv_cache", 0),
             ],
             True,
         )[0]
@@ -138,8 +171,8 @@ class KVCacheStoreTest(absltest.TestCase):
     long_hash = b"a" * 100
     hashes = [large_hash, long_hash]
     slices = [
-        [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
-        [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
+        kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0),
+        kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0),
     ]
 
     self.assertTrue(controller.insert(hashes, slices, True)[0])
@@ -155,15 +188,15 @@ class KVCacheStoreTest(absltest.TestCase):
     controller = kv_cache_store.KVCacheStore(capacity=20)
     hashes = [b"local_only"]
     slices = [
-        [kv_cache_store.RaidenId("local_job", "0", "kv_cache", 0)],
+        kv_cache_store.RaidenId("local_job", "0", "kv_cache", 0),
     ]
     self.assertTrue(controller.insert(hashes, slices, True)[0])
 
     res = controller.lookup(hashes, enable_global=True)
     self.assertLen(res, 1)
     self.assertEqual(res[0][0], b"local_only")
-    self.assertEqual(res[0][1][0].job_name, "local_job")
-    self.assertEqual(res[0][1][0].data_replica_idx, 0)
+    self.assertEqual(res[0][1].raiden_id.job_name, "local_job")
+    self.assertEqual(res[0][1].raiden_id.data_replica_idx, 0)
 
   def test_global_lookup_case2_and_3_mocked(self):
     # We mock _impl to simulate Case 2 and Case 3 because we don't
@@ -178,13 +211,13 @@ class KVCacheStoreTest(absltest.TestCase):
     local_id = kv_cache_store._impl.RaidenBlockID(
         kv_cache_store._impl.RaidenId("local_job", "0", "kv_cache", 1)
     )
-    mock_impl.lookup.return_value = [(b"shared_hash", [local_id])]
+    mock_impl.lookup.return_value = [(b"shared_hash", local_id)]
 
     res = controller.lookup([b"shared_hash"], enable_global=True)
     self.assertLen(res, 1)
     self.assertEqual(res[0][0], b"shared_hash")
-    self.assertEqual(res[0][1][0].job_name, "local_job")
-    self.assertEqual(res[0][1][0].data_replica_idx, 1)
+    self.assertEqual(res[0][1].raiden_id.job_name, "local_job")
+    self.assertEqual(res[0][1].raiden_id.data_replica_idx, 1)
     mock_impl.lookup.assert_called_with([b"shared_hash"], True)
 
     # Case 3: No local hit, only global hits.
@@ -195,18 +228,18 @@ class KVCacheStoreTest(absltest.TestCase):
         kv_cache_store._impl.RaidenId("10.0.0.2:1234", "0", "kv_cache", 43)
     )
     mock_impl.lookup.return_value = [
-        (b"global_1", [remote_id1]),
-        (b"global_2", [remote_id2]),
+        (b"global_1", remote_id1),
+        (b"global_2", remote_id2),
     ]
 
     res = controller.lookup([b"global_1", b"global_2"], enable_global=True)
     self.assertLen(res, 2)
     self.assertEqual(res[0][0], b"global_1")
-    self.assertEqual(res[0][1][0].job_name, "10.0.0.1:1234")
-    self.assertEqual(res[0][1][0].data_replica_idx, 42)
+    self.assertEqual(res[0][1].raiden_id.job_name, "10.0.0.1:1234")
+    self.assertEqual(res[0][1].raiden_id.data_replica_idx, 42)
     self.assertEqual(res[1][0], b"global_2")
-    self.assertEqual(res[1][1][0].job_name, "10.0.0.2:1234")
-    self.assertEqual(res[1][1][0].data_replica_idx, 43)
+    self.assertEqual(res[1][1].raiden_id.job_name, "10.0.0.2:1234")
+    self.assertEqual(res[1][1].raiden_id.data_replica_idx, 43)
     mock_impl.lookup.assert_called_with([b"global_1", b"global_2"], True)
 
   def test_global_lookup_error_ignored(self):
@@ -223,39 +256,31 @@ class KVCacheStoreTest(absltest.TestCase):
 
     local_hashes = [b"local_1", b"local_2"]
     local_slices = [
-        [
-            kv_cache_store.RaidenBlockID(
-                kv_cache_store.RaidenId("local_job", "0", "kv_cache", 0),
-                -1,
-                kv_cache_store.BlockStatus.HOST,
-            )
-        ],
-        [
-            kv_cache_store.RaidenBlockID(
-                kv_cache_store.RaidenId("local_job", "0", "kv_cache", 1),
-                -1,
-                kv_cache_store.BlockStatus.HOST,
-            )
-        ],
+        kv_cache_store.RaidenBlockID(
+            kv_cache_store.RaidenId("local_job", "0", "kv_cache", 0),
+            -1,
+            kv_cache_store.BlockStatus.HOST,
+        ),
+        kv_cache_store.RaidenBlockID(
+            kv_cache_store.RaidenId("local_job", "0", "kv_cache", 1),
+            -1,
+            kv_cache_store.BlockStatus.HOST,
+        ),
     ]
     self.assertTrue(controller.insert(local_hashes, local_slices, True)[0])
 
     remote_hashes = [b"remote_1", b"remote_2"]
     remote_slices = [
-        [
-            kv_cache_store.RaidenBlockID(
-                kv_cache_store.RaidenId("remote_job", "0", "kv_cache", 0),
-                -1,
-                kv_cache_store.BlockStatus.REMOTE,
-            )
-        ],
-        [
-            kv_cache_store.RaidenBlockID(
-                kv_cache_store.RaidenId("remote_job", "0", "kv_cache", 1),
-                -1,
-                kv_cache_store.BlockStatus.REMOTE,
-            )
-        ],
+        kv_cache_store.RaidenBlockID(
+            kv_cache_store.RaidenId("remote_job", "0", "kv_cache", 0),
+            -1,
+            kv_cache_store.BlockStatus.REMOTE,
+        ),
+        kv_cache_store.RaidenBlockID(
+            kv_cache_store.RaidenId("remote_job", "0", "kv_cache", 1),
+            -1,
+            kv_cache_store.BlockStatus.REMOTE,
+        ),
     ]
     success, evicted = controller.insert_and_pin(
         remote_hashes, remote_slices, True

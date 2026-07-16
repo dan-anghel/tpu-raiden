@@ -26,17 +26,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_test")
-load("//third_party/bazel_rules/rules_python/python:py_binary.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "sources",
+    srcs = glob(["**"]),
+    visibility = ["//:internal"],
+)
 
 py_binary(
     name = "reshard_stage1_e2e",
     srcs = ["reshard_stage1_e2e.py"],
     main = "reshard_stage1_e2e.py",
     deps = [
-        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
+        "//tpu_raiden/experimental:kv_cache_manager_host_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
     ],
 )
@@ -50,7 +55,7 @@ py_test(
         "notap",
     ],
     deps = [
-        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
+        "//tpu_raiden/experimental:kv_cache_manager_host_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
     ],

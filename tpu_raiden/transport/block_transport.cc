@@ -45,7 +45,6 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 #include "tpu_raiden/transport/socket_util.h"
 
@@ -109,46 +108,6 @@ absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
       }
       LOG(WARNING) << "Block chunk region validation warning: "
                    << status.ToString();
-    }
-  }
-  return absl::OkStatus();
-}
-
-absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
-                                size_t layer_idx, size_t shard_idx,
-                                int block_id, size_t num_blocks,
-                                size_t bytes_per_block) {
-  if (block_id < 0) {
-    return absl::InvalidArgumentError("Negative block id");
-  }
-  if (bytes_per_block == 0) {
-    return absl::InvalidArgumentError("bytes_per_block must be positive");
-  }
-  uint8_t* base = delegate->GetHostPointer(layer_idx, shard_idx);
-  if (base != nullptr) {
-    const size_t host_size = delegate->GetHostSize(layer_idx, shard_idx);
-    const size_t first_block = static_cast<size_t>(block_id);
-    if (first_block > std::numeric_limits<size_t>::max() / bytes_per_block) {
-      return absl::OutOfRangeError("Block offset overflows size_t");
-    }
-    const size_t byte_offset = first_block * bytes_per_block;
-    if (num_blocks > std::numeric_limits<size_t>::max() / bytes_per_block) {
-      return absl::OutOfRangeError("Block byte size overflows size_t");
-    }
-    const size_t byte_count = num_blocks * bytes_per_block;
-    if (byte_offset > host_size || byte_count > host_size - byte_offset) {
-      return absl::OutOfRangeError(absl::StrCat(
-          "Block range out of bounds. Block: ", block_id,
-          ", Count: ", num_blocks, ", Bytes per block: ", bytes_per_block,
-          ", Host size: ", host_size));
-    }
-  } else {
-    for (size_t i = 0; i < num_blocks; ++i) {
-      int target_id = block_id + static_cast<int>(i);
-      if (delegate->GetBlockHostPointer(layer_idx, shard_idx, target_id) ==
-          nullptr) {
-        return absl::FailedPreconditionError("Block host pointer is null");
-      }
     }
   }
   return absl::OkStatus();
@@ -552,7 +511,7 @@ uint32_t BlockTransport::GetChunksTotalSize(
   return total;
 }
 
-absl::StatusOr<std::vector<int>> BlockTransport::Push(
+absl::StatusOr<std::vector<int>> BlockTransport::SyncPush(
     const std::vector<std::string>& peers,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
@@ -560,14 +519,14 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   auto promise =
       std::make_shared<std::promise<absl::StatusOr<std::vector<int>>>>();
   auto future = promise->get_future();
-  Push(peers, src_block_ids, dst_block_ids, parallelism, major_order, uuid,
-       layer_idx, [promise](absl::StatusOr<std::vector<int>> res) {
-         promise->set_value(std::move(res));
-       });
+  AsyncPush(peers, src_block_ids, dst_block_ids, parallelism, major_order, uuid,
+            layer_idx, [promise](absl::StatusOr<std::vector<int>> res) {
+              promise->set_value(std::move(res));
+            });
   return future.get();
 }
 
-void BlockTransport::Push(
+void BlockTransport::AsyncPush(
     const std::vector<std::string>& peers,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
@@ -654,7 +613,7 @@ void BlockTransport::Push(
   }
 }
 
-absl::StatusOr<std::vector<int>> BlockTransport::Pull(
+absl::StatusOr<std::vector<int>> BlockTransport::SyncPull(
     const std::vector<std::string>& peers,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& local_block_ids,

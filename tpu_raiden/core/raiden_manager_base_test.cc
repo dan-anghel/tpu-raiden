@@ -37,7 +37,6 @@
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/tpu_pjrt_manager.h"
 #include "tpu_raiden/core/tpu_utils.h"
-#include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace {

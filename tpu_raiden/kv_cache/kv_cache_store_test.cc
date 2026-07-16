@@ -35,14 +35,32 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
+TEST(KVCacheStoreTest, RaidenBlockIDConstructorAndEquality) {
+  RaidenId id{"test_job", "0", "test_cache", 0};
+  RaidenBlockID block_1(id, 10, 20, BlockStatus::HBM);
+  EXPECT_EQ(block_1.raiden_id, id);
+  EXPECT_EQ(block_1.host_block_id, 10);
+  EXPECT_EQ(block_1.device_block_id, 20);
+  EXPECT_EQ(block_1.status, BlockStatus::HBM);
+
+  RaidenBlockID block_2(id, 10, 20, BlockStatus::HBM);
+  EXPECT_EQ(block_1, block_2);
+
+  RaidenBlockID block_3(id, 10, 21, BlockStatus::HBM);
+  EXPECT_NE(block_1, block_3);
+
+  RaidenBlockID block_4(id, 11, 20, BlockStatus::HBM);
+  EXPECT_NE(block_1, block_4);
+}
+
 TEST(KVCacheStoreTest, BasicTests) {
   KVCacheStore controller(50);
   EXPECT_EQ(controller.capacity(), 50);
 
   std::vector<std::string> hashes = {"4001", "4002"};
-  std::vector<std::vector<RaidenBlockID>> slices = {
-      {RaidenId{"inference_server", "0", "kv_cache", 0}},
-      {RaidenId{"inference_server", "1", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> slices = {
+      RaidenId{"inference_server", "0", "kv_cache", 0},
+      RaidenId{"inference_server", "1", "kv_cache", 0}};
 
   // 1. Insert
   EXPECT_TRUE(controller.Insert(hashes, slices, true).first);
@@ -55,7 +73,7 @@ TEST(KVCacheStoreTest, BasicTests) {
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 2);
   EXPECT_EQ((*lookup_res)[0].first, "4001");
-  EXPECT_EQ((*lookup_res)[0].second.size(), 1);
+  EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_replica_id, "0");
 
   // Lookup with an early miss
   std::vector<std::string> hashes_early_miss = {"4001", "4003", "4002"};
@@ -74,9 +92,9 @@ TEST(KVCacheStoreTest, PinAndRelease) {
   KVCacheStore controller(2);
 
   std::vector<std::string> hashes = {"101", "102"};
-  std::vector<std::vector<RaidenBlockID>> slices = {
-      {RaidenId{"inference_server", "0", "kv_cache", 0}},
-      {RaidenId{"inference_server", "1", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> slices = {
+      RaidenId{"inference_server", "0", "kv_cache", 0},
+      RaidenId{"inference_server", "1", "kv_cache", 0}};
 
   EXPECT_TRUE(controller.Insert(hashes, slices, true).first);
 
@@ -88,8 +106,8 @@ TEST(KVCacheStoreTest, PinAndRelease) {
   // Inserting a third element should fail to evict because both existing items
   // are pinned
   std::vector<std::string> hash_3 = {"103"};
-  std::vector<std::vector<RaidenBlockID>> slice_3 = {
-      {RaidenId{"inference_server", "2", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> slice_3 = {
+      RaidenId{"inference_server", "2", "kv_cache", 0}};
   controller.Insert(hash_3, slice_3, true);
 
   // Release 101
@@ -98,8 +116,8 @@ TEST(KVCacheStoreTest, PinAndRelease) {
 
   // Now inserting a fourth element (104) should successfully evict 101
   std::vector<std::string> hash_4 = {"104"};
-  std::vector<std::vector<RaidenBlockID>> slice_4 = {
-      {RaidenId{"inference_server", "3", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> slice_4 = {
+      RaidenId{"inference_server", "3", "kv_cache", 0}};
   controller.Insert(hash_4, slice_4, true);
 
   // Lookup 101 should result in an immediate miss (return size 0 before 102)
@@ -111,9 +129,9 @@ TEST(KVCacheStoreTest, PartialPinRollback) {
   KVCacheStore controller(2);
 
   std::vector<std::string> hashes = {"201", "202"};
-  std::vector<std::vector<RaidenBlockID>> slices = {
-      {RaidenId{"inference_server", "0", "kv_cache", 0}},
-      {RaidenId{"inference_server", "1", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> slices = {
+      RaidenId{"inference_server", "0", "kv_cache", 0},
+      RaidenId{"inference_server", "1", "kv_cache", 0}};
 
   EXPECT_TRUE(controller.Insert(hashes, slices, true).first);
 
@@ -129,9 +147,9 @@ TEST(KVCacheStoreTest, EvictionTracking) {
   KVCacheStore controller(2);
 
   std::vector<std::string> hashes_1_2 = {"101", "102"};
-  std::vector<std::vector<RaidenBlockID>> slices_1_2 = {
-      {RaidenId{"inference_server", "0", "kv_cache", 0}},
-      {RaidenId{"inference_server", "1", "kv_cache", 1}}};
+  std::vector<RaidenBlockID> slices_1_2 = {
+      RaidenId{"inference_server", "0", "kv_cache", 0},
+      RaidenId{"inference_server", "1", "kv_cache", 1}};
 
   // 1. Insert 101 and 102. No evictions should occur.
   auto res_1_2 = controller.Insert(hashes_1_2, slices_1_2, true);
@@ -140,16 +158,15 @@ TEST(KVCacheStoreTest, EvictionTracking) {
 
   // 2. Insert 103. Since capacity is 2, this must evict the LRU block (101).
   std::vector<std::string> hash_3 = {"103"};
-  std::vector<std::vector<RaidenBlockID>> slice_3 = {
-      {RaidenId{"inference_server", "2", "kv_cache", 2}}};
+  std::vector<RaidenBlockID> slice_3 = {
+      RaidenId{"inference_server", "2", "kv_cache", 2}};
 
   auto res_3 = controller.Insert(hash_3, slice_3, true);
   EXPECT_TRUE(res_3.first);
   ASSERT_EQ(res_3.second.size(), 1);
   EXPECT_EQ(res_3.second[0].first, "101");
-  ASSERT_EQ(res_3.second[0].second.size(), 1);
-  EXPECT_EQ(res_3.second[0].second[0].raiden_id.job_name, "inference_server");
-  EXPECT_EQ(res_3.second[0].second[0].raiden_id.data_replica_idx, 0);
+  EXPECT_EQ(res_3.second[0].second.raiden_id.job_name, "inference_server");
+  EXPECT_EQ(res_3.second[0].second.raiden_id.data_replica_idx, 0);
 
   // 3. Verify that lookup for 101 now misses, but 102 and 103 are present.
   EXPECT_EQ(controller.Lookup({"101"})->size(), 0);
@@ -199,9 +216,9 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
 
   // Insert blocks locally
   std::vector<std::string> local_hashes = {"local_only_hash", "shared_hash"};
-  std::vector<std::vector<RaidenBlockID>> local_slices = {
-      {RaidenId{"local_job", "0", "kv_cache", 0}},
-      {RaidenId{"local_job", "0", "kv_cache", 1}}};
+  std::vector<RaidenBlockID> local_slices = {
+      RaidenId{"local_job", "0", "kv_cache", 0},
+      RaidenId{"local_job", "0", "kv_cache", 1}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
   // Case 1: Full local hit, no global hit
@@ -210,8 +227,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 1);
     EXPECT_EQ((*lookup_res)[0].first, "local_only_hash");
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.data_replica_idx, 0);
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.data_replica_idx, 0);
   }
 
   // Case 2: Both local and global has the same hit, but we return local hit
@@ -222,8 +239,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 1);
     EXPECT_EQ((*lookup_res)[0].first, "shared_hash");
     // Should return local info, not remote info from registry
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.data_replica_idx, 1);
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.data_replica_idx, 1);
   }
 
   // Case 3: No local hit, only global hits
@@ -234,12 +251,12 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 2);
 
     EXPECT_EQ((*lookup_res)[0].first, "global_hash_1");
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, host1);
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.data_replica_idx, block1);
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, host1);
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.data_replica_idx, block1);
 
     EXPECT_EQ((*lookup_res)[1].first, "global_hash_2");
-    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.job_name, host2);
-    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.data_replica_idx, block2);
+    EXPECT_EQ((*lookup_res)[1].second.raiden_id.job_name, host2);
+    EXPECT_EQ((*lookup_res)[1].second.raiden_id.data_replica_idx, block2);
   }
 
   // 4. Lookup with enable_global = false
@@ -264,15 +281,15 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 3);
 
     EXPECT_EQ((*lookup_res)[0].first, "local_only_hash");
-    EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
 
     EXPECT_EQ((*lookup_res)[1].first, "global_hash_1");
-    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.job_name, host1);
-    EXPECT_EQ((*lookup_res)[1].second[0].raiden_id.data_replica_idx, block1);
+    EXPECT_EQ((*lookup_res)[1].second.raiden_id.job_name, host1);
+    EXPECT_EQ((*lookup_res)[1].second.raiden_id.data_replica_idx, block1);
 
     EXPECT_EQ((*lookup_res)[2].first, "global_hash_2");
-    EXPECT_EQ((*lookup_res)[2].second[0].raiden_id.job_name, host2);
-    EXPECT_EQ((*lookup_res)[2].second[0].raiden_id.data_replica_idx, block2);
+    EXPECT_EQ((*lookup_res)[2].second.raiden_id.job_name, host2);
+    EXPECT_EQ((*lookup_res)[2].second.raiden_id.data_replica_idx, block2);
   }
 
   // 6. Lookup with enable_global = true, but registry has a miss
@@ -296,8 +313,8 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
 
   // Insert one block locally
   std::vector<std::string> local_hashes = {"local_hash"};
-  std::vector<std::vector<RaidenBlockID>> local_slices = {
-      {RaidenId{"local_job", "0", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> local_slices = {
+      RaidenId{"local_job", "0", "kv_cache", 0}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
   // Lookup with enable_global = true.
@@ -308,16 +325,16 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 1);
   EXPECT_EQ((*lookup_res)[0].first, "local_hash");
-  EXPECT_EQ((*lookup_res)[0].second[0].raiden_id.job_name, "local_job");
+  EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
 }
 
 TEST(KVCacheStoreTest, LookupCapLimit) {
   KVCacheStore store(2);
 
   std::vector<std::string> hashes = {"101", "102"};
-  std::vector<std::vector<RaidenBlockID>> slices = {
-      {RaidenId{"inference_server", "0", "kv_cache", 0}},
-      {RaidenId{"inference_server", "1", "kv_cache", 1}}};
+  std::vector<RaidenBlockID> slices = {
+      RaidenId{"inference_server", "0", "kv_cache", 0},
+      RaidenId{"inference_server", "1", "kv_cache", 1}};
 
   ASSERT_TRUE(store.Insert(hashes, slices, true).first);
 
@@ -412,8 +429,8 @@ TEST(KVCacheStoreTest, LookupCapLimitMixed) {
 
   // Insert 1 block locally
   std::vector<std::string> local_hashes = {"local_hash_1"};
-  std::vector<std::vector<RaidenBlockID>> local_slices = {
-      {RaidenId{"local_job", "0", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> local_slices = {
+      RaidenId{"local_job", "0", "kv_cache", 0}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
   // Lookup 3 hashes, but capacity is 2. It should only return 2 (1 local, 1
@@ -433,10 +450,10 @@ TEST(KVCacheStoreTest, LookupAvailableSpaceLimit) {
   KVCacheStore store(3);
 
   std::vector<std::string> hashes = {"101", "102", "103"};
-  std::vector<std::vector<RaidenBlockID>> slices = {
-      {RaidenId{"inference_server", "0", "kv_cache", 0}},
-      {RaidenId{"inference_server", "1", "kv_cache", 1}},
-      {RaidenId{"inference_server", "2", "kv_cache", 2}}};
+  std::vector<RaidenBlockID> slices = {
+      RaidenId{"inference_server", "0", "kv_cache", 0},
+      RaidenId{"inference_server", "1", "kv_cache", 1},
+      RaidenId{"inference_server", "2", "kv_cache", 2}};
 
   ASSERT_TRUE(store.Insert(hashes, slices, true).first);
 
@@ -458,14 +475,14 @@ TEST(KVCacheStoreTest, InsertAndPin) {
 
   // Insert local block
   std::vector<std::string> local_hashes = {"local_1"};
-  std::vector<std::vector<RaidenBlockID>> local_slices = {
-      {RaidenId{"local_job", "0", "kv_cache", 0}}};
+  std::vector<RaidenBlockID> local_slices = {
+      RaidenId{"local_job", "0", "kv_cache", 0}};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
   // Execute InsertAndPin
-  std::vector<std::vector<RaidenBlockID>> slices = {
-      {RaidenId{"local_job", "0", "kv_cache", 0}},
-      {RaidenId{"remote_job", "0", "kv_cache", 42}}};
+  std::vector<RaidenBlockID> slices = {
+      RaidenId{"local_job", "0", "kv_cache", 0},
+      RaidenId{"remote_job", "0", "kv_cache", 42}};
   auto res = store.InsertAndPin({"local_1", "remote_1"}, slices, true);
   EXPECT_TRUE(res.first);
   EXPECT_TRUE(res.second.empty());
@@ -507,20 +524,20 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
 
   // Insert two local blocks (not remote)
   std::vector<std::string> local_hashes = {"local_1", "local_2"};
-  std::vector<std::vector<RaidenBlockID>> local_slices = {
-      {RaidenBlockID(RaidenId{"local_job", "0", "kv_cache", 0}, -1,
-                     BlockStatus::HOST)},
-      {RaidenBlockID(RaidenId{"local_job", "0", "kv_cache", 1}, -1,
-                     BlockStatus::HOST)}};
+  std::vector<RaidenBlockID> local_slices = {
+      RaidenBlockID(RaidenId{"local_job", "0", "kv_cache", 0}, -1,
+                    BlockStatus::HOST),
+      RaidenBlockID(RaidenId{"local_job", "0", "kv_cache", 1}, -1,
+                    BlockStatus::HOST)};
   ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
 
   // Now InsertAndPin two remote blocks, which will evict local_1 and local_2.
   std::vector<std::string> remote_hashes = {"remote_1", "remote_2"};
-  std::vector<std::vector<RaidenBlockID>> remote_slices = {
-      {RaidenBlockID(RaidenId{"remote_job", "0", "kv_cache", 0}, -1,
-                     BlockStatus::REMOTE)},
-      {RaidenBlockID(RaidenId{"remote_job", "0", "kv_cache", 1}, -1,
-                     BlockStatus::REMOTE)}};
+  std::vector<RaidenBlockID> remote_slices = {
+      RaidenBlockID(RaidenId{"remote_job", "0", "kv_cache", 0}, -1,
+                    BlockStatus::REMOTE),
+      RaidenBlockID(RaidenId{"remote_job", "0", "kv_cache", 1}, -1,
+                    BlockStatus::REMOTE)};
   auto res = store.InsertAndPin(remote_hashes, remote_slices, true);
   ASSERT_TRUE(res.first);
   ASSERT_EQ(res.second.size(), 2);
@@ -567,8 +584,8 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
   store.Delete({"remote_1"}, {remote_slices[0]});
 
   // Test partial restore: 1 deleted remote block with 2 evicted entries
-  BlockSliceList mock_evicted = {{"evict_1", {local_slices[0]}},
-                                 {"evict_2", {local_slices[1]}}};
+  BlockSliceList mock_evicted = {{"evict_1", local_slices[0]},
+                                 {"evict_2", local_slices[1]}};
   store.InsertAndPin({"remote_2"}, {remote_slices[1]}, true);
   auto res_partial = store.ReleaseAndDelete({"remote_2"}, mock_evicted);
   EXPECT_EQ(res_partial.first, 1);

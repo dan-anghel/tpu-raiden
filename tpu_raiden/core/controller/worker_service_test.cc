@@ -38,48 +38,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 
-struct MockTransferManager {
-  int d2h_calls = 0;
-  int h2d_calls = 0;
-  int h2h_calls = 0;
-  std::string last_peer;
-  std::vector<int64_t> last_src_offsets;
-  std::vector<int64_t> last_dst_offsets;
-  std::vector<int64_t> last_copy_sizes;
 
-  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
-      const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
-      const std::vector<int64_t>& copy_sizes) {
-    d2h_calls++;
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
-    last_copy_sizes = copy_sizes;
-    return raiden::PjRtCopyFuture();
-  }
-
-  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
-      const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
-      const std::vector<int64_t>& copy_sizes) {
-    h2d_calls++;
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
-    last_copy_sizes = copy_sizes;
-    return raiden::PjRtCopyFuture();
-  }
-
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
-      std::string peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
-      int layer_idx = -1) {
-    h2h_calls++;
-    last_peer = peer;
-    last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
-    last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
-    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
-  }
-};
 
 class WorkerServiceTest : public ::testing::Test {
  protected:
@@ -104,7 +63,7 @@ TEST_F(WorkerServiceTest, CreateAndDeleteBuffersSuccess) {
   spec2->set_num_shards(2);
   spec2->set_size_bytes(1024);
 
-  auto create_resp_or = test_server_->client->CreateBuffers(create_req);
+  auto create_resp_or = test_server_->client->CreateBuffers(create_req).Await();
   ASSERT_TRUE(create_resp_or.ok());
   EXPECT_TRUE(create_resp_or->success());
   ASSERT_EQ(create_resp_or->buffers_size(), 2);
@@ -129,7 +88,7 @@ TEST_F(WorkerServiceTest, CreateAndDeleteBuffersSuccess) {
   *delete_req.add_sharded_buffers() = buf1;
   *delete_req.add_sharded_buffers() = buf2;
 
-  auto delete_resp_or = test_server_->client->DeleteBuffers(delete_req);
+  auto delete_resp_or = test_server_->client->DeleteBuffers(delete_req).Await();
   ASSERT_TRUE(delete_resp_or.ok());
   EXPECT_TRUE(delete_resp_or->success());
   EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
@@ -142,7 +101,7 @@ TEST_F(WorkerServiceTest, CreateBuffersWithInvalidSpecFails) {
   spec->set_num_shards(0);
   spec->set_size_bytes(512);
 
-  auto create_resp_or = test_server_->client->CreateBuffers(create_req);
+  auto create_resp_or = test_server_->client->CreateBuffers(create_req).Await();
   ASSERT_TRUE(create_resp_or.ok());
   EXPECT_FALSE(create_resp_or->success());
   EXPECT_THAT(create_resp_or->message(), HasSubstr("must be positive"));
@@ -154,7 +113,7 @@ TEST_F(WorkerServiceTest, DeleteNonExistentBufferFails) {
   auto* sharded_buf = delete_req.add_sharded_buffers();
   sharded_buf->add_buffer_handles()->set_handle(9999);
 
-  auto delete_resp_or = test_server_->client->DeleteBuffers(delete_req);
+  auto delete_resp_or = test_server_->client->DeleteBuffers(delete_req).Await();
   ASSERT_TRUE(delete_resp_or.ok());
   EXPECT_FALSE(delete_resp_or->success());
   EXPECT_THAT(delete_resp_or->message(), HasSubstr("not found"));
@@ -172,10 +131,8 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hSuccess) {
   transfer->add_dst_offsets(20);
   transfer->set_peer("localhost:8080");
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_TRUE(transfer_resp_or->success());
-  EXPECT_EQ(transfer_resp_or->message(), "Buffers transferred successfully");
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2h_calls, 1);
@@ -195,11 +152,9 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hMissingPeerFails) {
   transfer->add_src_offsets(10);
   transfer->add_dst_offsets(20);
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_FALSE(transfer_resp_or->success());
-  EXPECT_THAT(transfer_resp_or->message(),
-              HasSubstr("Peer address must be provided"));
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(), HasSubstr("Peer address must be provided"));
 }
 
 TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {
@@ -215,10 +170,9 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {
   transfer->add_copy_sizes(2);
   transfer->set_peer("localhost:8080");
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_FALSE(transfer_resp_or->success());
-  EXPECT_THAT(transfer_resp_or->message(),
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
               HasSubstr("H2H transfers only support copy size of 1"));
 }
 
@@ -234,11 +188,10 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hOverflowFails) {
   transfer->add_dst_offsets(20);
   transfer->set_peer("localhost:8080");
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_FALSE(transfer_resp_or->success());
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
   EXPECT_THAT(
-      transfer_resp_or->message(),
+      status.message(),
       HasSubstr(
           "H2H transfer dispatch failed: Offset 2147483648 overflows int"));
 }
@@ -251,10 +204,9 @@ TEST_F(WorkerServiceTest, TransferBuffersWithoutTransferManagerFails) {
   transfer->add_src_offsets(10);
   transfer->add_dst_offsets(20);
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_FALSE(transfer_resp_or->success());
-  EXPECT_THAT(transfer_resp_or->message(),
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
               HasSubstr("Transfer manager is not configured on WorkerService"));
 }
 
@@ -267,10 +219,9 @@ TEST_F(WorkerServiceTest, TransferBuffersOffsetsMismatchFails) {
   transfer->add_dst_offsets(20);
   transfer->add_dst_offsets(30);
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_FALSE(transfer_resp_or->success());
-  EXPECT_THAT(transfer_resp_or->message(),
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
               HasSubstr("Source and destination offsets must have the same "
                         "non-zero length"));
 }
@@ -285,11 +236,10 @@ TEST_F(WorkerServiceTest, TransferBuffersCopySizesMismatchFails) {
   transfer->add_copy_sizes(1);
   transfer->add_copy_sizes(2);
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_FALSE(transfer_resp_or->success());
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
   EXPECT_THAT(
-      transfer_resp_or->message(),
+      status.message(),
       HasSubstr(
           "copy_sizes, if provided, must match the length of src_offsets"));
 }
@@ -309,10 +259,8 @@ TEST_F(WorkerServiceTest, TransferBuffersD2HSuccess) {
   transfer->add_copy_sizes(1);
   transfer->add_copy_sizes(2);
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_TRUE(transfer_resp_or->success());
-  EXPECT_EQ(transfer_resp_or->message(), "Buffers transferred successfully");
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 1);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10, 30));
@@ -331,10 +279,8 @@ TEST_F(WorkerServiceTest, TransferBuffersH2DSuccess) {
   transfer->add_src_offsets(100);
   transfer->add_dst_offsets(200);
 
-  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
-  ASSERT_TRUE(transfer_resp_or.ok());
-  EXPECT_TRUE(transfer_resp_or->success());
-  EXPECT_EQ(transfer_resp_or->message(), "Buffers transferred successfully");
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 1);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));

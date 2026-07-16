@@ -185,7 +185,9 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
   std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
 
   // Push block 0 from transport1 to transport2
-  auto push_res = transport1.Push(peer2, {0});
+  auto push_res = transport1.SyncPush(
+      {peer2}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{},
+      /*parallelism=*/1, MajorOrder::kLayerMajor, /*uuid=*/0, /*layer_idx=*/-1);
   ASSERT_TRUE(push_res.ok()) << push_res.status().message();
 
   // Verify push parity
@@ -197,7 +199,11 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
 
   // Pull block 0 from transport1 using transport2
   std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
-  auto pull_res = transport2.Pull(peer1, {0});
+  auto pull_res =
+      transport2.SyncPull({peer1}, /*src_block_ids=*/{0},
+                          /*local_block_ids=*/{}, /*explicit_dst_ptrs=*/{},
+                          /*parallelism=*/1, MajorOrder::kLayerMajor,
+                          /*on_block_received=*/{}, /*uuid=*/0);
   ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
 
   // Verify pull parity
@@ -218,7 +224,9 @@ TEST(BlockTransportTest, RegionValidationFailModeRejectsPushChunks) {
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
-  auto push_res = transport1.Push(peer2, {0});
+  auto push_res = transport1.SyncPush(
+      {peer2}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{},
+      /*parallelism=*/1, MajorOrder::kLayerMajor, /*uuid=*/0, /*layer_idx=*/-1);
 
   ASSERT_FALSE(push_res.ok());
   EXPECT_EQ(push_res.status().code(), absl::StatusCode::kFailedPrecondition);
@@ -239,7 +247,9 @@ TEST(BlockTransportTest, RegionValidationWarnModeAllowsPushChunks) {
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
-  auto push_res = transport1.Push(peer2, {0});
+  auto push_res = transport1.SyncPush(
+      {peer2}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{},
+      /*parallelism=*/1, MajorOrder::kLayerMajor, /*uuid=*/0, /*layer_idx=*/-1);
 
   ASSERT_TRUE(push_res.ok()) << push_res.status().message();
   EXPECT_EQ(delegate1.region_validation_calls(), 1);
@@ -265,7 +275,9 @@ TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
   std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
 
   // Push block 0 from transport1 to transport2
-  auto push_res = transport1.Push(peer2, {0});
+  auto push_res = transport1.SyncPush(
+      {peer2}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{},
+      /*parallelism=*/1, MajorOrder::kLayerMajor, /*uuid=*/0, /*layer_idx=*/-1);
   ASSERT_TRUE(push_res.ok()) << push_res.status().message();
 
   // Verify push parity
@@ -277,7 +289,10 @@ TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
 
   // Pull block 0 from transport1 using transport2
   std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
-  auto pull_res = transport2.Pull(peer1, {0});
+  auto pull_res = transport2.SyncPull(
+      {peer1}, /*src_block_ids=*/{0}, /*local_block_ids=*/{},
+      /*explicit_dst_ptrs=*/{}, /*parallelism=*/1, MajorOrder::kLayerMajor,
+      /*on_block_received=*/{}, /*uuid=*/0);
   ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
 
   // Verify pull parity
@@ -309,7 +324,10 @@ TEST(BlockTransportTest, PullNonContiguous) {
 
   // Pull block 0 and 2 (non-contiguous) from transport1 using transport2
   // We expect they will be written to local block 0 and 1 respectively.
-  auto pull_res = transport2.Pull(peer1, {0, 2});
+  auto pull_res = transport2.SyncPull(
+      {peer1}, /*src_block_ids=*/{0, 2},
+      /*local_block_ids=*/{}, /*explicit_dst_ptrs=*/{}, /*parallelism=*/1,
+      MajorOrder::kLayerMajor, /*on_block_received=*/{}, /*uuid=*/0);
   ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
 
   // Verify pull parity
@@ -347,9 +365,10 @@ TEST(BlockTransportTest, PullExplicitDestPtrsMultiLayerUnevenParallelism) {
 
   std::string source_peer =
       "localhost:" + std::to_string(source_transport.local_port());
-  auto pull_res = receiver_transport.Pull(source_peer, {0, 1, 2}, {0, 1, 2},
-                                          explicit_dst_ptrs,
-                                          /*parallelism=*/2);
+  auto pull_res = receiver_transport.SyncPull(
+      {source_peer}, {0, 1, 2}, /*local_block_ids=*/{0, 1, 2},
+      explicit_dst_ptrs, /*parallelism=*/2, MajorOrder::kLayerMajor,
+      /*on_block_received=*/{}, /*uuid=*/0);
   ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
   EXPECT_EQ(*pull_res, std::vector<int>({0, 1, 2}));
 
@@ -374,7 +393,11 @@ TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
 
   std::string source_peer =
       "localhost:" + std::to_string(source_transport.local_port());
-  auto pull_res = receiver_transport.Pull(source_peer, {1}, {0});
+  auto pull_res = receiver_transport.SyncPull(
+      {source_peer}, /*src_block_ids=*/{1},
+      /*local_block_ids=*/{0}, /*explicit_dst_ptrs=*/{},
+      /*parallelism=*/1, MajorOrder::kLayerMajor,
+      /*on_block_received=*/{}, /*uuid=*/0);
   EXPECT_FALSE(pull_res.ok());
 }
 
@@ -399,9 +422,11 @@ TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
 
   std::string source_peer =
       "localhost:" + std::to_string(source_transport.local_port());
-  auto pull_res = receiver_transport.Pull(
-      source_peer, {0, 1}, {0, 1}, {}, /*parallelism=*/1,
-      MajorOrder::kBlockMajor);
+  auto pull_res = receiver_transport.SyncPull(
+      {source_peer}, /*src_block_ids=*/{0, 1},
+      /*local_block_ids=*/{0, 1}, /*explicit_dst_ptrs=*/{},
+      /*parallelism=*/1, MajorOrder::kBlockMajor,
+      /*on_block_received=*/{}, /*uuid=*/0);
   ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
 
   for (int block = 0; block < kNumBlocks; ++block) {
@@ -457,7 +482,9 @@ TEST(BlockTransportTest, RoundRobinDistribution) {
   MockBlockTransport transport(&delegate, 0, local_ips);
 
   std::vector<int> src_blocks = {0, 1, 2, 3, 4, 5};
-  auto res = transport.Push(peers, src_blocks, {}, /*parallelism=*/6);
+  auto res = transport.SyncPush(peers, src_blocks, /*dst_block_ids=*/{},
+                                /*parallelism=*/6, MajorOrder::kLayerMajor,
+                                /*uuid=*/0, /*layer_idx=*/-1);
 
   EXPECT_FALSE(res.ok());
   EXPECT_EQ(res.status().message(), "mock_connection_halt");

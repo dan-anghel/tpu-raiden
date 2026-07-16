@@ -36,18 +36,30 @@ class ControllerServer {
 
   // Starts the gRPC server hosting RaidenControllerServiceImpl on the specified
   // port (pass 0 for an ephemeral port).
-  // If the server is already started, returns OkStatus().
-  absl::Status StartServer(int port = 0);
+  // If the server is already started, updates the worker registry (if
+  // provided) and returns OkStatus().
+  absl::Status StartServer(int port = 0) {
+    return StartServer(/*worker_registry=*/nullptr, port);
+  }
+
+  absl::Status StartServer(std::shared_ptr<WorkerRegistry> worker_registry,
+                           int port = 0);
+
+  void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
+
+  std::shared_ptr<WorkerRegistry> GetWorkerRegistry() const;
 
   // Returns the port the gRPC server is listening on. Returns 0 if the server
   // is not running or failed to start.
   int GetGrpcPort() const;
 
+
+
+ private:
   // Returns a pointer to the hosted RaidenControllerServiceImpl instance, or
   // nullptr if the server has not been started.
   RaidenControllerServiceImpl* GetControllerService() const;
 
- private:
   ControllerServer() = default;
   ~ControllerServer() = default;
   ControllerServer(const ControllerServer&) = delete;
