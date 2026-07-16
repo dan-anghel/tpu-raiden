@@ -24,6 +24,7 @@
 #include "grpcpp/security/server_credentials.h"
 #include "grpcpp/server_builder.h"
 #include "tpu_raiden/core/controller/controller_service.h"
+#include "tpu_raiden/core/controller/worker_registry.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -86,6 +87,14 @@ void ControllerServer::SetWorkerRegistry(
   }
 }
 
+void ControllerServer::SetTransferBuffersCallback(
+    RaidenControllerServiceImpl::TransferBuffersCallback cb) {
+  absl::MutexLock lock(mutex_);
+  if (controller_service_) {
+    controller_service_->SetTransferBuffersCallback(std::move(cb));
+  }
+}
+
 std::shared_ptr<WorkerRegistry> ControllerServer::GetWorkerRegistry() const {
   absl::MutexLock lock(mutex_);
   return controller_service_ ? controller_service_->worker_registry() : nullptr;
@@ -99,7 +108,7 @@ int ControllerServer::GetGrpcPort() const {
 
 
 RaidenControllerServiceImpl* ControllerServer::GetControllerService() const {
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   return controller_service_.get();
 }
 

@@ -47,6 +47,9 @@ class ControllerServer {
 
   void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
 
+  void SetTransferBuffersCallback(
+      RaidenControllerServiceImpl::TransferBuffersCallback cb);
+
   std::shared_ptr<WorkerRegistry> GetWorkerRegistry() const;
 
   // Returns the port the gRPC server is listening on. Returns 0 if the server

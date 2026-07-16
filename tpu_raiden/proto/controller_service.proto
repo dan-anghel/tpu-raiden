@@ -20,6 +20,9 @@ package tpu_raiden.tpu_raiden.proto;
 service RaidenControllerService {
   // Registers a worker daemon / endpoint with the controller.
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse) {  }
+
+  // Requests a remote read from this controller.
+  rpc ReadRemote(ReadRemoteRequest) returns (ReadRemoteResponse) {  }
 }
 
 message RegisterWorkerRequest {
@@ -35,3 +38,13 @@ message RegisterWorkerResponse {
   bool success = 1;
   string error_message = 2;
 }
+
+message ReadRemoteRequest {
+  repeated int32 src_host_block_ids = 1;
+  repeated int32 dest_host_block_ids = 2;
+  // The transfer endpoints of the destination workers.
+  // This list must be sorted by destination worker_id ascending.
+  repeated string dest_worker_endpoints = 3;
+}
+
+message ReadRemoteResponse {}

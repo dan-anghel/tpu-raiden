@@ -42,6 +42,7 @@
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 #ifndef _WIN32
 int ignore_sigpipe = []() {

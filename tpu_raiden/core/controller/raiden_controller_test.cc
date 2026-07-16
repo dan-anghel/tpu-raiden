@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,13 +25,19 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
 #include "grpcpp/security/server_credentials.h"
 #include "grpcpp/server_builder.h"
 #include "grpcpp/server_context.h"
+#include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/raiden_orchestrator.h"
 #include "tpu_raiden/core/controller/test_util.h"
 #include "tpu_raiden/core/kv_manager_holder.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 
@@ -438,6 +445,90 @@ TEST_F(RaidenControllerTest, ControllerServiceRegistrationAndResolution) {
   auto fail_or = controller.ResolvePeerController(fake_peer);
   EXPECT_FALSE(fail_or.ok());
   EXPECT_EQ(fail_or.status().code(), absl::StatusCode::kNotFound);
+}
+
+TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
+  auto test_server2 = CreateTestWorkerServer();
+  auto src_controller_server = core::controller::CreateTestControllerServer();
+
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+
+  kv_cache::RaidenId src_raiden_id;
+  src_raiden_id.job_name = "src_job";
+  src_raiden_id.job_replica_id = "0";
+  src_raiden_id.data_name = "src_data";
+  src_raiden_id.data_replica_idx = 0;
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  dest_unit.set_job_replica_id("0");
+  dest_unit.set_data_name("dest_data");
+  dest_unit.set_data_replica_idx(0);
+
+  OrchestratorServiceClient orchestrator_client(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  auto register_status = orchestrator_client.RegisterController(
+      src_unit, src_controller_server->server_address);
+  ASSERT_TRUE(register_status.ok()) << register_status.message();
+
+  RaidenController dest_controller(dest_unit, /*num_blocks=*/5,
+                                   /*num_shards=*/2, /*shard_size_bytes=*/512,
+                                   /*raiden_controller_port=*/0,
+                                   orchestrator_address_);
+
+  RegisterAndInitWorker(dest_controller, "worker_1",
+                        test_server2->server_address);
+  RegisterAndInitWorker(dest_controller, "worker_0",
+                        test_server_->server_address);
+
+  auto register_src_worker = [&](const std::string& worker_id,
+                                 const std::string& worker_address,
+                                 const std::string& transfer_endpoint) {
+    auto status = src_controller_server->client->RegisterWorker(
+        worker_id, worker_address, transfer_endpoint);
+    ASSERT_TRUE(status.ok()) << status.message();
+  };
+  register_src_worker("worker_0", "src_worker_0_addr", "src_worker_0_transfer");
+  register_src_worker("worker_1", "src_worker_1_addr", "src_worker_1_transfer");
+
+  bool callback_triggered = false;
+  std::vector<std::string> callback_peers;
+  std::vector<int64_t> callback_src_offsets;
+  std::vector<int64_t> callback_dst_offsets;
+
+  src_controller_server->service->SetTransferBuffersCallback(
+      [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+          absl::Span<const int64_t> src_offsets,
+          absl::Span<const int64_t> dst_offsets,
+          absl::Span<const int64_t> copy_sizes,
+          absl::Span<const std::string> peers) {
+        callback_triggered = true;
+        EXPECT_EQ(src_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
+        EXPECT_EQ(dst_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
+        callback_src_offsets.assign(src_offsets.begin(), src_offsets.end());
+        callback_dst_offsets.assign(dst_offsets.begin(), dst_offsets.end());
+        callback_peers.assign(peers.begin(), peers.end());
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  std::vector<int32_t> src_host_block_ids = {10, 11};
+  std::vector<int32_t> dest_host_block_ids = {20, 21};
+
+  auto read_status =
+      dest_controller
+          .ReadRemote(src_raiden_id, src_host_block_ids, dest_host_block_ids)
+          .Await();
+  ASSERT_TRUE(read_status.ok()) << read_status.message();
+
+  EXPECT_TRUE(callback_triggered);
+  EXPECT_THAT(callback_src_offsets, ElementsAre(10, 11));
+  EXPECT_THAT(callback_dst_offsets, ElementsAre(20, 21));
+  EXPECT_THAT(callback_peers, ElementsAre(test_server_->server_address,
+                                          test_server2->server_address));
 }
 
 }  // namespace

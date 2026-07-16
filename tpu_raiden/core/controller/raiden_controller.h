@@ -31,6 +31,8 @@
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
+#include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 
@@ -105,11 +107,17 @@ class RaidenController {
       absl::Span<const int64_t> copy_sizes = {}, absl::string_view peer = "");
 
   // Broadcasts TransferBuffers to all registered workers.
-  tsl::Future<> TransferBuffers(
-      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-      absl::Span<const int64_t> src_offsets,
-      absl::Span<const int64_t> dst_offsets,
-      absl::Span<const int64_t> copy_sizes = {}, absl::string_view peer = "");
+  tsl::Future<> TransferBuffers(rpc::MemoryType src_mem_type,
+                                rpc::MemoryType dst_mem_type,
+                                absl::Span<const int64_t> src_offsets,
+                                absl::Span<const int64_t> dst_offsets,
+                                absl::Span<const int64_t> copy_sizes = {},
+                                absl::Span<const std::string> peers = {});
+
+  // Initiates remote read from source controller.
+  tsl::Future<> ReadRemote(const kv_cache::RaidenId& src_raiden_id,
+                           const std::vector<int32_t>& src_host_block_ids,
+                           const std::vector<int32_t>& dest_host_block_ids);
 
   // Resolves a peer controller's ControllerService address via the
   // orchestrator.
@@ -151,6 +159,13 @@ class RaidenController {
 
   int raiden_controller_port_;
   std::unique_ptr<OrchestratorServiceClient> orchestrator_client_;
+  absl::flat_hash_map<kv_cache::RaidenId, std::string, kv_cache::RaidenIdHash>
+      resolved_controllers_ ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_map<
+      std::string,
+      std::shared_ptr<
+          ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Stub>>
+      stubs_ ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace controller

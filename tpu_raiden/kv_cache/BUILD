@@ -252,6 +252,7 @@ cc_test(
         "//tpu_raiden/core/controller:raiden_controller",
         "//tpu_raiden/core/controller:raiden_orchestrator",
         "//tpu_raiden/core/controller:test_util",
+        "//tpu_raiden/kv_cache:raiden_id",
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
         "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
         "@com_github_grpc_grpc//:grpc++",

@@ -22,14 +22,18 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
+#include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -53,6 +57,24 @@ class RaidenControllerServiceImpl final
       ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response)
       override;
 
+  grpc::Status ReadRemote(
+      grpc::ServerContext* context,
+      const ::tpu_raiden::tpu_raiden::proto::ReadRemoteRequest* request,
+      ::tpu_raiden::tpu_raiden::proto::ReadRemoteResponse* response) override;
+
+  using TransferBuffersCallback = absl::AnyInvocable<tsl::Future<>(
+      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+      absl::Span<const int64_t> src_offsets,
+      absl::Span<const int64_t> dst_offsets,
+      absl::Span<const int64_t> copy_sizes, absl::Span<const std::string> peers)
+                                                         const>;
+
+  void SetTransferBuffersCallback(TransferBuffersCallback cb) {
+    absl::MutexLock lock(&mutex_);
+    transfer_buffers_cb_ =
+        std::make_shared<TransferBuffersCallback>(std::move(cb));
+  }
+
   // Updates the underlying WorkerRegistry.
   void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
 
@@ -62,6 +84,8 @@ class RaidenControllerServiceImpl final
  private:
   mutable absl::Mutex mutex_;
   std::shared_ptr<WorkerRegistry> worker_registry_ ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<const TransferBuffersCallback> transfer_buffers_cb_
+      ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace controller
