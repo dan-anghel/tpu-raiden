@@ -34,9 +34,6 @@ permissions:
   pull-requests: write
 
 
-
-
-
 jobs: 
   run_benchmarks:
     name: Run TPU Raiden H2D D2H Benchmarks
