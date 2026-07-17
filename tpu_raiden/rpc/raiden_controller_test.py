@@ -215,7 +215,7 @@ class RaidenControllerTest(absltest.TestCase):
         port=10004, worker_rpc_client=dummy_client
     )
     src = raiden_controller.RaidenId("trainer", "0", "weights")
-    dst = raiden_controller.RaidenId("sampler", "1", "weights")
+    dst = raiden_controller.RaidenId("sampler", "0", "weights")
 
     controller.register_work_unit(
         src,

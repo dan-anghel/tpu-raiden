@@ -1756,8 +1756,8 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
                                    absl::Span<const int64_t> block_ids,
                                    size_t total_bytes, uint64_t uuid,
                                    int64_t sender_node_id,
-                                   absl::string_view peer,
-                                   int64_t src_block_id) {
+                                   absl::string_view peer, int64_t src_block_id,
+                                   int64_t dst_block_id) {
   RegisteredPlan plan;
   bool has_plan = false;
   {
@@ -1826,6 +1826,9 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
         const auto& schedule = schedule_it->second;
         for (const auto& entry : schedule.entries()) {
           if (!peer.empty() && entry.dst_peer() != peer) {
+            continue;
+          }
+          if (dst_block_id != -1 && entry.dst_block_id() != dst_block_id) {
             continue;
           }
           if (static_cast<size_t>(entry.src_block_id()) == block_id) {

@@ -40,7 +40,7 @@ import time
 import typing
 from typing import Any, Optional, Union
 
-from tpu_raiden.frameworks.jax import resharding_planner
+from tpu_raiden.kv_cache import nd_slice_math
 from tpu_raiden.rpc import controller_service_pb2
 from tpu_raiden.rpc import raiden_service_pb2
 
@@ -832,6 +832,7 @@ class RaidenController:
       dst_mem_type: int,
       expected_block_count: int,
       dst_controller_address: Optional[str],
+      src_controller_address: Optional[str] = None,
   ) -> None:
     """Executes a decentralized, greedy K-ary tree broadcast for a slice of data across destination workers.
 
@@ -1239,7 +1240,7 @@ class RaidenController:
                 phys_shape, phys_mesh = to_physical(
                     global_shape, mesh_shape, layout
                 )
-                slices = resharding_planner.compute_nd_shard_slices(
+                slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
                 computed_slices[unit] = slices
@@ -1260,7 +1261,7 @@ class RaidenController:
                     list(meta.mesh_shape),
                     list(meta.layout),
                 )
-                slices = resharding_planner.compute_nd_shard_slices(
+                slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
                 computed_slices[unit] = slices
