@@ -356,44 +356,48 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
         return absl::OkStatus();
       }));
 
-  bool trigger_on_layer_received = false;
-  const int l =
-      (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
+  std::vector<int> layers_to_trigger;
   const size_t expected_chunks = header.reserved;  // P
   {
     absl::MutexLock lock(progress_mu_);
-    auto& progress = layer_progress_[{header.uuid, l}];
-    progress.completed_chunks++;
-    if (progress.completed_chunks == expected_chunks &&
-        !progress.on_layer_received_called) {
-      progress.on_layer_received_called = true;
-      trigger_on_layer_received = true;
-      bool all_layers_called = true;
-      for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
-        auto it = layer_progress_.find({header.uuid, layer});
-        if (it == layer_progress_.end() ||
-            !it->second.on_layer_received_called) {
-          all_layers_called = false;
-          break;
-        }
+    for (int l : target_layers) {
+      auto& progress = layer_progress_[{header.uuid, l}];
+      progress.completed_chunks++;
+      if (progress.completed_chunks == expected_chunks &&
+          !progress.on_layer_received_called) {
+        progress.on_layer_received_called = true;
+        layers_to_trigger.push_back(l);
       }
-      if (all_layers_called) {
-        for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
-          layer_progress_.erase({header.uuid, layer});
-        }
+    }
+
+    bool all_layers_called = true;
+    for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
+      auto it = layer_progress_.find({header.uuid, layer});
+      if (it == layer_progress_.end() ||
+          !it->second.on_layer_received_called) {
+        all_layers_called = false;
+        break;
+      }
+    }
+    if (all_layers_called) {
+      for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
+        layer_progress_.erase({header.uuid, layer});
       }
     }
   }
 
-  if (trigger_on_layer_received) {
+  for (int l : layers_to_trigger) {
     RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
   }
 
   LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
             << client_fd << ", uuid=" << header.uuid
             << ", numa=" << block_delegate_->node_id();
-  RETURN_IF_ERROR(
-      block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
+
+  for (int l : target_layers) {
+    RETURN_IF_ERROR(
+        block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
+  }
   uint8_t ack = 1;
   RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   return absl::OkStatus();
