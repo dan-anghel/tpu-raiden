@@ -284,6 +284,10 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
         "RegisterRecv not implemented in base class");
   }
 
+  virtual void OnPushComplete(uint64_t uuid, const std::string& req_id) {}
+
+  virtual int64_t node_id() const { return 0; }
+
   // Resolves the host memory pointers (BlockChunks) for the given block_ids.
   // If `src_block_id` is provided (not -1), it is used to filter the active plan
   // to resolve the correct chunk offset, which is necessary when multiple

@@ -933,7 +933,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
     for (auto it = send_entries_.begin(); it != send_entries_.end();) {
       const auto& entry = it->second;
       if (entry->deadline <= now) {
-        done_sending_.insert(entry->req_id);
+        done_sending_.insert(std::to_string(it->first));
         ReleaseEntrySlotLocked(entry);
         it = send_entries_.erase(it);
       } else {
@@ -959,7 +959,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
         if (all_h2d_done) {
           LOG(INFO) << "CompleteReadRaw (polling completion): req_id="
                     << entry.req_id;
-          done_recving_.insert(entry.req_id);
+          done_recving_.insert(std::to_string(it->first));
           ReleaseSlotLocked(entry.slot_idx);
           active_recv_entries_.erase(it++);
           continue;
@@ -967,7 +967,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
       }
 
       if (entry.deadline <= now) {
-        failed_recving_.insert(entry.req_id);
+        failed_recving_.insert(std::to_string(it->first));
         ReleaseSlotLocked(entry.slot_idx);
         active_recv_entries_.erase(it++);
       } else {
@@ -1843,6 +1843,12 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   return absl::OkStatus();
 }
 
+void KVCacheManagerWithTransfer::OnPushComplete(uint64_t uuid,
+                                                const std::string& req_id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  done_sending_.insert(std::to_string(uuid));
+}
+
 absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
                                                          uint64_t uuid) {
   CopySpec h2d_copy;
@@ -1877,7 +1883,7 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
           /*slot_idx=*/std::nullopt, /*layer_idx=*/layer_idx);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
-    failed_recving_.insert(req_id);
+    failed_recving_.insert(std::to_string(uuid));
     ReleaseSlotLocked(recv_slot);
     active_recv_entries_.erase(uuid);
     return future_or.status();
@@ -1905,7 +1911,7 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
         if (metrics_collector) {
           metrics_collector->RecordEnd(uuid);
         }
-        done_recving_.insert(req_id);
+        done_recving_.insert(std::to_string(uuid));
         ReleaseSlotLocked(recv_slot);
         active_recv_entries_.erase(uuid);
       }
@@ -1913,7 +1919,7 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
       LOG(ERROR) << "OnLayerReceived (H2D copy failed) layer " << layer_idx
                  << " for req_id: " << req_id
                  << ", error: " << status_or.status().ToString();
-      failed_recving_.insert(req_id);
+      failed_recving_.insert(std::to_string(uuid));
       ReleaseSlotLocked(recv_slot);
       active_recv_entries_.erase(uuid);
     }

@@ -218,6 +218,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 
+  void OnPushComplete(uint64_t uuid, const std::string& req_id) override;
+
   virtual std::vector<EndpointDescriptor> get_local_endpoints() const;
 
   static bool EncodeIpToIpv6Bytes(const std::string& ip, uint8_t out[16]);
@@ -230,7 +232,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
 
   virtual int local_control_port() const { return local_control_port_; }
-  virtual int64_t node_id() const { return node_id_; }
+  int64_t node_id() const override { return node_id_; }
 
  protected:
   struct SendEntry {

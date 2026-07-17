@@ -1678,7 +1678,7 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
       transport_server->Push(
           peer, src_block_ids, dst_block_ids, /*parallelism=*/1,
           transport::MajorOrder::kLayerMajor, request.uuid(),
-          /*layer_idx=*/-1, [uuid = request.uuid(), peer](auto push_res) {
+          /*layer_idx=*/-1, [uuid = request.uuid(), peer, req_id = request.req_id(), this](auto push_res) {
             if (!push_res.ok()) {
               LOG(ERROR) << "Resharded push to " << peer << " failed for uuid "
                          << uuid << ": " << push_res.status().ToString();
@@ -1686,6 +1686,7 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
               VLOG(1) << "Resharded push to " << peer << " completed for uuid "
                       << uuid;
             }
+            this->OnPushComplete(uuid, req_id);
           });
     }
   });
@@ -1807,7 +1808,6 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
   const auto& request = plan.request;
   const auto& schedules = request.shard_push_schedules();
   auto schedule_it = schedules.find(static_cast<int32_t>(shard_idx));
-
   bool is_sender = plan.is_sender;
 
   std::vector<tpu_raiden::transport::BlockChunk> chunks;
