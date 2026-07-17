@@ -41,7 +41,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/transport/lib/socket_util.h"
+#include "tpu_raiden/transport/lib/socket/util.h"
 
 namespace tpu_raiden::transport::lib {
 
