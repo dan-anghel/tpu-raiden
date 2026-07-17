@@ -46,13 +46,12 @@
 namespace tpu_raiden::transport::lib {
 
 RawBufferTransport::RawBufferTransport(
-    RawBufferTransportDelegate* delegate, int local_port, bool enable_conn_pool,
+    RawBufferTransportDelegate* delegate, int local_port,
     const std::vector<std::string>& local_ips)
     : raw_delegate_(delegate),
       local_port_(local_port),
       bound_ip_(local_ips.empty() ? "127.0.0.1" : local_ips[0]),
-      local_ips_(local_ips),
-      pooling_enabled_(enable_conn_pool) {
+      local_ips_(local_ips) {
   // 1. Setup server_fd_ (Always use IPv6 wildcard to listen on all interfaces)
   server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
@@ -152,10 +151,10 @@ static std::string GetPoolKey(absl::string_view peer,
   return absl::StrCat(local_ip, "->", peer);
 }
 
-absl::StatusOr<int> RawBufferTransport::AcquireConnection(
+absl::StatusOr<int> RawBufferTransport::BorrowConnection(
     absl::string_view peer, absl::string_view local_ip) {
-  if (pooling_enabled_) {
-    absl::MutexLock lock( pool_mu_ );
+  {
+    absl::MutexLock lock(pool_mu_);
     std::string key = GetPoolKey(peer, local_ip);
     if (auto it = conn_pool_.find(key); it != conn_pool_.end()) {
       while (!it->second.empty()) {
@@ -177,11 +176,11 @@ absl::StatusOr<int> RawBufferTransport::AcquireConnection(
   return ConnectToPeer(peer, local_ip);
 }
 
-void RawBufferTransport::ReleaseConnection(absl::string_view peer, int fd,
-                                           absl::string_view local_ip) {
+void RawBufferTransport::ReturnConnection(absl::string_view peer, int fd,
+                                          absl::string_view local_ip) {
   if (fd < 0) return;
   absl::MutexLock lock( pool_mu_ );
-  if (!pooling_enabled_ || stopping_) {
+  if (stopping_) {
     shutdown(fd, SHUT_RDWR);
     close(fd);
     return;
@@ -333,13 +332,13 @@ absl::Status RawBufferTransport::PullBuffer(
         ", Size: ", size_bytes, ", Shard Host Size: ", host_size));
   }
 
-  auto status_or_fd = AcquireConnection(source);
+  auto status_or_fd = BorrowConnection(source);
   if (!status_or_fd.ok()) return status_or_fd.status();
   int fd = status_or_fd.value();
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
-      ReleaseConnection(source, fd);
+      ReturnConnection(source, fd);
     } else {
       shutdown(fd, SHUT_RDWR);
       close(fd);
@@ -371,11 +370,11 @@ absl::Status RawBufferTransport::PushBuffer(
         "Destination peer address cannot be empty");
   }
 
-  ASSIGN_OR_RETURN(const int fd, AcquireConnection(peer));
+  ASSIGN_OR_RETURN(const int fd, BorrowConnection(peer));
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
-      ReleaseConnection(peer, fd);
+      ReturnConnection(peer, fd);
     } else {
       shutdown(fd, SHUT_RDWR);
       close(fd);

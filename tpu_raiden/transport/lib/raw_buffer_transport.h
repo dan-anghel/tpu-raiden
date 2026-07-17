@@ -68,7 +68,6 @@ class RawBufferTransport {
   };
 
   RawBufferTransport(RawBufferTransportDelegate* delegate, int local_port,
-                     bool enable_conn_pool = true,
                      const std::vector<std::string>& local_ips = {});
   virtual ~RawBufferTransport();
 
@@ -89,10 +88,10 @@ class RawBufferTransport {
   const std::string& bound_ip() const { return bound_ip_; }
 
  protected:
-  virtual absl::StatusOr<int> AcquireConnection(
-      absl::string_view peer, absl::string_view local_ip = "");
-  virtual void ReleaseConnection(absl::string_view peer, int fd,
-                                 absl::string_view local_ip = "");
+  virtual absl::StatusOr<int> BorrowConnection(absl::string_view peer,
+                                               absl::string_view local_ip = "");
+  virtual void ReturnConnection(absl::string_view peer, int fd,
+                                absl::string_view local_ip = "");
   void ClosePooledConnections();
 
   virtual absl::Status ProcessSingleRequest(int client_fd);
@@ -115,7 +114,6 @@ class RawBufferTransport {
   absl::Mutex pool_mu_;
   absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
       ABSL_GUARDED_BY(pool_mu_);
-  bool pooling_enabled_ = true;
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;

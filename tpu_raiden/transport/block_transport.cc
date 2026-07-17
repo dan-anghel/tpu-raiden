@@ -161,10 +161,9 @@ absl::Status ForEachPayload(MajorOrder major_order,
 }  // namespace
 
 BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                               bool enable_conn_pool,
                                const std::vector<std::string>& local_ips,
                                int parallelism)
-    : RawBufferTransport(delegate, local_port, enable_conn_pool, local_ips),
+    : RawBufferTransport(delegate, local_port, local_ips),
       block_delegate_(delegate),
       parallelism_(parallelism) {
   socket_workers_.reserve(parallelism_);
@@ -717,7 +716,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
                                     std::vector<absl::Status>& statuses,
                                     MajorOrder major_order, uint64_t uuid,
                                     int layer_idx, int parallelism) {
-  auto status_or_fd = AcquireConnection(peer, local_ip);
+  auto status_or_fd = BorrowConnection(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
     return;
@@ -727,7 +726,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
-      ReleaseConnection(peer, fd, local_ip);
+      ReturnConnection(peer, fd, local_ip);
     } else {
       shutdown(fd, SHUT_RDWR);
       close(fd);
@@ -849,7 +848,7 @@ void BlockTransport::H2hReadWorker(
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
     BlockReceivedCallback on_block_received, uint64_t uuid) {
-  auto status_or_fd = AcquireConnection(peer, local_ip);
+  auto status_or_fd = BorrowConnection(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
     return;
@@ -859,7 +858,7 @@ void BlockTransport::H2hReadWorker(
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
-      ReleaseConnection(peer, fd, local_ip);
+      ReturnConnection(peer, fd, local_ip);
     } else {
       shutdown(fd, SHUT_RDWR);
       close(fd);
