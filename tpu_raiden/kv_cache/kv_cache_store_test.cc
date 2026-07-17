@@ -14,6 +14,7 @@
 
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 
+#include <atomic>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -1617,7 +1618,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
   register_src_worker("worker_0", "src_worker_0_addr", "src_worker_0_transfer");
 
   // Setup src controller's transfer callback to simulate successful H2H
-  bool callback_triggered = false;
+  std::atomic<bool> callback_triggered = false;
   src_controller_server->service->SetTransferBuffersCallback(
       [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
           absl::Span<const int64_t> src_offsets,
@@ -2025,7 +2026,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
                   .ok());
 
   // Setup callbacks with promises to control completion
-  bool callback_1_triggered = false;
+  std::atomic<bool> callback_1_triggered = false;
   auto promise_and_future_1 = tsl::MakePromise();
   auto& promise1 = promise_and_future_1.first;
   src_controller_server_1->service->SetTransferBuffersCallback(
@@ -2040,7 +2041,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
         return f;
       });
 
-  bool callback_2_triggered = false;
+  std::atomic<bool> callback_2_triggered = false;
   auto promise_and_future_2 = tsl::MakePromise();
   auto& promise2 = promise_and_future_2.first;
   src_controller_server_2->service->SetTransferBuffersCallback(
