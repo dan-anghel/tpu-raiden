@@ -52,6 +52,11 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
     LOG(WARNING) << "setsockopt SO_REUSEADDR failed";
   }
 
+  int v6only = 0;
+  if (setsockopt(server_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only))) {
+    LOG(WARNING) << "setsockopt IPV6_V6ONLY=0 failed: " << std::strerror(errno);
+  }
+
   sockaddr_in6 address{
       .sin6_family = AF_INET6,
       .sin6_port = htons(listener_port_),
