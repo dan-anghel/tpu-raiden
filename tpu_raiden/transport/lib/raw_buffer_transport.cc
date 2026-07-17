@@ -40,7 +40,6 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/transport/lib/socket_util.h"
 
@@ -372,7 +371,7 @@ absl::Status RawBufferTransport::PushBuffer(
         "Destination peer address cannot be empty");
   }
 
-  TF_ASSIGN_OR_RETURN(const int fd, AcquireConnection(peer));
+  ASSIGN_OR_RETURN(const int fd, AcquireConnection(peer));
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {

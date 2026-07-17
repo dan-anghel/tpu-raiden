@@ -196,7 +196,7 @@ TEST(RawBufferTransportTest, RejectsOutOfBounds) {
   const std::string src_addr = GetIpPort(src_transport);
   constexpr size_t kSrcOffset = 0;
   constexpr size_t kDstOffset = size / 2;
-  constexpr size_t kLen = 1024 / 2 + 1;
+  constexpr size_t kLen = size / 2 + 1;
   static_assert(kDstOffset + kLen > size);
   const auto pull_res =
       dst_transport.PullBuffer(src_addr, kBufferId, kSrcShardIdx, kSrcOffset,
