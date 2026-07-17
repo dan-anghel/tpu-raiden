@@ -98,6 +98,7 @@ if [[ "${WITH_TORCH}" == "1" ]]; then
   if [[ -f /torch_tpu/pyproject.toml ]]; then
     TORCH_VERSION=$(sed -n -E 's/.*["'\''`]torch[[:space:]]*([>=<~=]+[0-9.a-zA-Z+-]+)["'\''`].*/\1/p' /torch_tpu/pyproject.toml 2>/dev/null | head -1 || true)
   fi
+  TORCH_VERSION="==2.11.0"
   if [[ -z "${TORCH_VERSION}" ]]; then
     echo "WARNING: Could not parse torch version from /torch_tpu/pyproject.toml (or file missing). Installing latest." >&2
     pip install -q torch --index-url https://download.pytorch.org/whl/cpu
