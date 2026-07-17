@@ -166,6 +166,8 @@ void RaidenManagerBase::InitTransportServer() {
 
   server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(
       this, local_port_cfg_, true, local_ips_, parallelism_);
+  std::cerr << "JETS_DEBUG: InitTransportServer: server bound to port "
+            << (server_ ? std::to_string(server_->local_port()) : "NULL") << std::endl;
 }
 
 std::optional<int> RaidenManagerBase::local_port() const {

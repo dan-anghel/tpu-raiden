@@ -270,7 +270,10 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
     }
     if (ret == 0) continue;
 
-    if (!ProcessSingleRequest(client_fd).ok()) {
+    absl::Status status = ProcessSingleRequest(client_fd);
+    if (!status.ok()) {
+      LOG(ERROR) << "JETS_DEBUG: ProcessSingleRequest failed for client_fd="
+                 << client_fd << ": " << status.ToString();
       break;
     }
   }
@@ -284,6 +287,7 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
 }
 
 void RawBufferTransport::ListenerLoop() {
+  std::cerr << "JETS_DEBUG: RawBufferTransport::ListenerLoop started on port " << local_port_ << std::endl;
   while (!stopping_) {
     struct pollfd pfd;
     pfd.fd = server_fd_;
@@ -291,6 +295,7 @@ void RawBufferTransport::ListenerLoop() {
     int ret = poll(&pfd, 1, 50);
     if (ret < 0) {
       if (stopping_) break;
+      std::cerr << "JETS_DEBUG: RawBufferTransport::ListenerLoop poll failed: " << std::strerror(errno) << std::endl;
       continue;
     }
     if (ret == 0) continue;
@@ -301,8 +306,10 @@ void RawBufferTransport::ListenerLoop() {
         server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
     if (client_fd < 0) {
       if (stopping_) break;
+      std::cerr << "JETS_DEBUG: RawBufferTransport::ListenerLoop accept failed: " << std::strerror(errno) << std::endl;
       continue;
     }
+    std::cerr << "JETS_DEBUG: RawBufferTransport::ListenerLoop accepted connection, client_fd=" << client_fd << std::endl;
 
     int opt = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));

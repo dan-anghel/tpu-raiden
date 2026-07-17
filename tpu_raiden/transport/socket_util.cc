@@ -244,6 +244,8 @@ absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
       }
     }
 
+    std::cerr << "JETS_DEBUG: ConnectToPeer: connecting to " << host << ":" << port_str
+              << " (family=" << rp->ai_family << ")" << std::endl;
     if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
       break; /* Success */
     }
