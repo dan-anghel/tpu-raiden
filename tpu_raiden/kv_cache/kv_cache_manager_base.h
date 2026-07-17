@@ -336,6 +336,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // actual physical_size when available (device-backed path); falls back
   // to the uniform slice_byte_size_ (CPU-only / test path).
   int64_t layer_block_byte_size(size_t layer_idx) const {
+    if (explicit_pools_ && layer_idx < pools_.size()) {
+      return pools_[layer_idx].block_stride_bytes;
+    }
     const auto& info = buffer_holds_[layer_idx];
     return info.physical_size > 0
                ? static_cast<int64_t>(info.physical_size) / major_dim_size_
