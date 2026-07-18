@@ -98,6 +98,109 @@ class RaidenId:
 NDSlice = list[tuple[int, int]]
 
 
+def _get_global_indices(
+    unit: RaidenId,
+    shards: list[str],
+    logical_mesh_shape: list[int],
+    layout: list[int],
+    num_physical_hosts: int,
+) -> list[tuple[int, int]]:
+  """Maps local shard indices to global slice indices, handling replication."""
+  num_shards = len(shards)
+  if num_shards == 0:
+    return []
+
+  try:
+    replica_id = int(unit.job_replica_id)
+  except ValueError:
+    replica_id = 0
+
+  if not logical_mesh_shape:
+    return [(i, i) for i in range(num_shards)]
+
+  major_to_minor = list(reversed(layout))
+  phys_mesh = [logical_mesh_shape[d] for d in major_to_minor]
+
+  # Find the host axis in logical mesh.
+  # We assume it is the axis that matches num_physical_hosts.
+  host_axis_logical = None
+  for d, size in enumerate(logical_mesh_shape):
+    if size == num_physical_hosts:
+      host_axis_logical = d
+      break
+
+  if host_axis_logical is not None:
+    try:
+      host_axis_physical = major_to_minor.index(host_axis_logical)
+    except ValueError:
+      host_axis_physical = None
+  else:
+    host_axis_physical = None
+
+  indices = []
+
+  # Log details for debugging
+  logging.info(
+      "_get_global_indices unit=%s, shards=%s, logical_mesh=%s, layout=%s,"
+      " phys_mesh=%s, host_axis_logical=%s, host_axis_physical=%s",
+      unit,
+      shards,
+      logical_mesh_shape,
+      layout,
+      phys_mesh,
+      host_axis_logical,
+      host_axis_physical,
+  )
+
+  if host_axis_physical is not None:
+    logical_H = phys_mesh[
+        host_axis_physical
+    ]  # should be equal to num_physical_hosts
+    non_host_axes = [
+        ax for ax in range(len(phys_mesh)) if ax != host_axis_physical
+    ]
+
+    # We need to decompose local shard index 'j' into coordinates for non-host axes.
+    for j in range(num_shards):
+      coords = [0] * len(phys_mesh)
+      coords[host_axis_physical] = replica_id % logical_H
+
+      temp = j
+      # Decompose j into non-host coordinates (right-to-left)
+      for ax in reversed(non_host_axes):
+        size = phys_mesh[ax]
+        coords[ax] = temp % size
+        temp = temp // size
+
+      # Convert coordinates to flat global index (row-major)
+      global_idx = 0
+      stride = 1
+      for val, size in zip(reversed(coords), reversed(phys_mesh)):
+        global_idx += val * stride
+        stride *= size
+      indices.append((j, global_idx))
+  else:
+    # Replication case (no host axis found, map all replica IDs to same logical hosts).
+    # Decompose j into all physical mesh dimensions.
+    for j in range(num_shards):
+      coords = [0] * len(phys_mesh)
+      temp = j
+      for ax in reversed(range(len(phys_mesh))):
+        size = phys_mesh[ax]
+        coords[ax] = temp % size
+        temp = temp // size
+
+      global_idx = 0
+      stride = 1
+      for val, size in zip(reversed(coords), reversed(phys_mesh)):
+        global_idx += val * stride
+        stride *= size
+      indices.append((j, global_idx))
+
+  logging.info("_get_global_indices computed indices: %s", indices)
+  return indices
+
+
 @dataclasses.dataclass
 class TransferPlan:
   """A detailed plan for data transfer with resharding if needed."""
@@ -511,11 +614,29 @@ class RaidenFuture:
   def __init__(self, session_id: int = 0, transfer_task=None):
     self.session_id = session_id
     self._transfer_task = transfer_task
+    self._completed_event = threading.Event()
     self._completed = False
     self._exception = None
+    self._lock = threading.Lock()
+    self._started = False
+
+  def try_start(self) -> bool:
+    """Attempts to mark the future as started.
+
+    Returns True if this call successfully started it (first time).
+    Returns False if it was already started.
+    """
+    with self._lock:
+      if self._started:
+        return False
+      self._started = True
+      return True
 
   async def wait(self) -> None:
     """Waits asynchronously for the transfer operation to complete."""
+    with self._lock:
+      if not self._started:
+        self._started = True
     if self._transfer_task:
       try:
         await self._transfer_task
@@ -524,8 +645,16 @@ class RaidenFuture:
         raise e
       finally:
         self._completed = True
+        self._completed_event.set()
     else:
       self._completed = True
+      self._completed_event.set()
+
+  def wait_threadsafe(self, timeout=None) -> None:
+    """Blocks the calling thread until the transfer is complete."""
+    self._completed_event.wait(timeout)
+    if self._exception:
+      raise self._exception
 
   def done(self) -> bool:
     """Returns True if the transfer operation has completed."""
@@ -703,7 +832,8 @@ class RaidenController:
     self._registered_layouts: dict[RaidenId, list[int]] = {}
     self._registered_global_shapes: dict[RaidenId, list[int]] = {}
     self._registered_itemsizes: dict[RaidenId, int] = {}
-    self._lock = threading.Lock()
+    self._computed_phys_meshes: dict[RaidenId, list[int]] = {}
+    self._lock = threading.RLock()
     self.worker_rpc_client = worker_rpc_client or WorkerRpcClient()
 
   def register_work_unit(
@@ -911,6 +1041,8 @@ class RaidenController:
           )
 
           sub_schedule = {s: {shard_idx if s == src_unit else 0: [entry]}}
+          hop_uuid = random.randint(1, 2**63 - 1)
+          hop_req_id = f"{req_id}_{hop_uuid}"
           sub_plan = TransferPlan(
               src_units=[s],
               dst_units=[dst_unit],
@@ -918,12 +1050,12 @@ class RaidenController:
               shard_push_schedules=sub_schedule,
               worker_rpc_addresses=dict(final_plan.worker_rpc_addresses),
               worker_data_addresses=dict(final_plan.worker_data_addresses),
-              uuid=uuid,
+              uuid=hop_uuid,
               dst_mem_type=dst_mem_type,
               use_block_chunks=True,
               is_sender=True,
-              expected_block_count=expected_block_count,
-              req_id=req_id,
+              expected_block_count=1,
+              req_id=hop_req_id,
           )
 
           async def _run_single_transfer(s_node, d_node, plan):
@@ -938,11 +1070,11 @@ class RaidenController:
                   dst_facade.register_transfer_schedule,
                   [s_node],
                   [d_node],
-                  req_id,
+                  plan.req_id,
                   True,
                   False,
-                  expected_block_count,
-                  uuid,
+                  plan.expected_block_count,
+                  plan.uuid,
                   dst_controller_address,
                   src_controller_address,
                   plan.shard_push_schedules,
@@ -955,7 +1087,8 @@ class RaidenController:
             else:
               await self.worker_rpc_client.start_transfer(d_node, plan)
 
-            await self.worker_rpc_client.start_transfer(s_node, plan)
+            if s_node in self._registered_shards:
+              await self.worker_rpc_client.start_transfer(s_node, plan)
 
           task = asyncio.create_task(
               _run_single_transfer(s, dst_unit, sub_plan)
@@ -980,6 +1113,13 @@ class RaidenController:
 
         # 3. Promotion step
         for fut in done:
+          if fut.exception():
+            logging.error(
+                "Slice transfer failed in broadcast tree: %s", fut.exception()
+            )
+            for info in transfers_in_progress.values():
+              info[5].cancel()
+            raise fut.exception()
           t = futures_to_targets[fut]
           s, dst_unit, dst_block_id, dst_block_offset, dst_stride, _ = (
               transfers_in_progress.pop(t)
@@ -1044,6 +1184,15 @@ class RaidenController:
       raise NotImplementedError("src_block_ids are not supported yet.")
     if dst_device_block_ids:
       raise NotImplementedError("dst_device_block_ids are not supported yet.")
+
+    with self._lock:
+      if req_id and req_id in self._active_tasks:
+        logging.info(
+            "start_transfer req_id %s already exists, returning existing"
+            " future.",
+            req_id,
+        )
+        return self._active_tasks[req_id]
 
     # Select only one source unit for now.
     with self._lock:
@@ -1240,6 +1389,7 @@ class RaidenController:
                 phys_shape, phys_mesh = to_physical(
                     global_shape, mesh_shape, layout
                 )
+                self._computed_phys_meshes[unit] = phys_mesh
                 slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
@@ -1261,6 +1411,7 @@ class RaidenController:
                     list(meta.mesh_shape),
                     list(meta.layout),
                 )
+                self._computed_phys_meshes[unit] = phys_mesh
                 slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
@@ -1284,20 +1435,26 @@ class RaidenController:
               src_shards = self._resolve_shards(src_unit)
               unit_schedules = {}
 
-              if len(src_shards) == 1:
-                try:
-                  src_indices = [(0, int(src_unit.job_replica_id))]
-                except ValueError:
-                  src_indices = [(0, 0)]
-              else:
-                try:
-                  replica_id = int(src_unit.job_replica_id)
-                  src_indices = [
-                      (i, replica_id * len(src_shards) + i)
-                      for i in range(len(src_shards))
-                  ]
-                except ValueError:
-                  src_indices = [(i, i) for i in range(len(src_slices))]
+              with self._lock:
+                src_job_replicas = {
+                    u.job_replica_id
+                    for u in self._registered_shards
+                    if u.job_name == src_unit.job_name
+                }
+              num_src_physical_hosts = max(1, len(src_job_replicas))
+              with self._lock:
+                src_logical_mesh = self._registered_mesh_shapes.get(
+                    src_unit, []
+                )
+                src_layout = self._registered_layouts.get(src_unit, [])
+
+              src_indices = _get_global_indices(
+                  src_unit,
+                  src_shards,
+                  src_logical_mesh,
+                  src_layout,
+                  num_src_physical_hosts,
+              )
 
               for local_src_idx, global_src_idx in src_indices:
                 if global_src_idx >= len(src_slices):
@@ -1318,6 +1475,8 @@ class RaidenController:
                     continue
 
                   dst_shards = []
+                  dst_logical_mesh = []
+                  dst_layout = []
                   for meta in dst_metadata:
                     meta_unit = RaidenId(
                         meta.unit.job_name,
@@ -1326,24 +1485,27 @@ class RaidenController:
                     )
                     if meta_unit == dst_unit:
                       dst_shards = list(meta.shards)
+                      dst_logical_mesh = list(meta.mesh_shape)
+                      dst_layout = list(meta.layout)
                       break
                   if not dst_shards:
                     dst_shards = ["127.0.0.1:8000"]  # fallback
 
-                  if len(dst_shards) == 1:
-                    try:
-                      dst_indices = [(0, int(dst_unit.job_replica_id))]
-                    except ValueError:
-                      dst_indices = [(0, 0)]
-                  else:
-                    try:
-                      replica_id = int(dst_unit.job_replica_id)
-                      dst_indices = [
-                          (j, replica_id * len(dst_shards) + j)
-                          for j in range(len(dst_shards))
-                      ]
-                    except ValueError:
-                      dst_indices = [(j, j) for j in range(len(d_slices))]
+                  dst_job_replicas = {
+                      m.unit.job_replica_id
+                      for m in dst_metadata
+                      if m.unit.job_name == dst_unit.job_name
+                  }
+
+                  num_dst_physical_hosts = max(1, len(dst_job_replicas))
+
+                  dst_indices = _get_global_indices(
+                      dst_unit,
+                      dst_shards,
+                      dst_logical_mesh,
+                      dst_layout,
+                      num_dst_physical_hosts,
+                  )
 
                   for local_dst_idx, global_dst_idx in dst_indices:
                     if global_dst_idx >= len(d_slices):
@@ -1539,15 +1701,16 @@ class RaidenController:
                 # TODO(b/12345678): Optimize early stages with topology-aware
                 # branching based on IP/subnet closeness to minimize
                 # inter-switch DCN traffic.
+                slice_uuid = random.randint(1, 2**63 - 1)
                 task = self._execute_slice_broadcast(
                     key=key,
                     targets=targets,
                     final_plan=final_plan,
                     fanout_k=self.broadcast_k,
                     req_id=req_id,
-                    uuid=uuid,
+                    uuid=slice_uuid,
                     dst_mem_type=dst_mem_type,
-                    expected_block_count=expected_block_count,
+                    expected_block_count=1,
                     dst_controller_address=dst_controller_address,
                     src_controller_address=src_controller_address,
                 )
@@ -1627,6 +1790,39 @@ class RaidenController:
                 ])
 
             if tree_broadcast_tasks:
+              if dst_controller_address:
+                logging.info(
+                    "Registering top-level req_id %s on destination"
+                    " controller %s",
+                    req_id,
+                    dst_controller_address,
+                )
+                dst_facade = RaidenControllerClientFacade(
+                    dst_controller_address,
+                    name_resolver=self.worker_rpc_client._name_resolver,
+                )
+                loop = asyncio.get_running_loop()
+                success = await loop.run_in_executor(
+                    None,
+                    dst_facade.register_transfer_schedule,
+                    src_units,
+                    dst_units,
+                    req_id,
+                    True,
+                    False,
+                    0,  # expected_block_count = 0 to complete immediately
+                    uuid,
+                    dst_controller_address,
+                    src_controller_address,
+                    None,
+                    dst_mem_type,
+                )
+                if not success:
+                  logging.warning(
+                      "Failed to register top-level req_id %s on destination"
+                      " controller",
+                      req_id,
+                  )
               await asyncio.gather(*tree_broadcast_tasks)
 
       else:
@@ -1724,10 +1920,6 @@ class RaidenControllerServer:
 
   def _server_loop(self) -> None:
     """Internal socket server connection acceptance coroutine loop."""
-    loop = asyncio.new_event_loop()
-
-    asyncio.set_event_loop(loop)
-
     while not self._stopped:
       try:
         conn, _ = self._sock.accept()
@@ -1735,22 +1927,19 @@ class RaidenControllerServer:
           conn.close()
           break
         threading.Thread(
-            target=self._handle_conn, args=(conn, loop), daemon=True
+            target=self._handle_conn, args=(conn,), daemon=True
         ).start()
       except OSError:
         break
 
-    loop.close()
-
-  def _handle_conn(
-      self, conn: socket.socket, loop: asyncio.AbstractEventLoop
-  ) -> None:
+  def _handle_conn(self, conn: socket.socket) -> None:
     """Internal connection processing handler executing deserialized ControllerRequest Protobuf RPC payloads.
 
     Args:
       conn: Accepted incoming TCP socket client handle.
-      loop: Target asyncio coroutine loop.
     """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
 
       len_bytes = b""
@@ -1816,7 +2005,10 @@ class RaidenControllerServer:
                 expected_block_count=coord_req.expected_block_count,
                 shard_push_schedules=None,
             )
-            loop.run_until_complete(future.wait())
+            if future.try_start():
+              loop.run_until_complete(future.wait())
+            else:
+              future.wait_threadsafe()
             resp.success = True
         except Exception as e:
           resp.message = str(e)
@@ -1962,7 +2154,10 @@ class RaidenControllerServer:
                 expected_block_count=start_req.expected_block_count,
                 shard_push_schedules=shard_push_schedules,
             )
-            loop.run_until_complete(future.wait())
+            if future.try_start():
+              loop.run_until_complete(future.wait())
+            else:
+              future.wait_threadsafe()
             raiden_resp.success = True
           elif (
               raiden_req.command
@@ -1982,6 +2177,7 @@ class RaidenControllerServer:
       pass
 
     finally:
+      loop.close()
       conn.close()
 
 

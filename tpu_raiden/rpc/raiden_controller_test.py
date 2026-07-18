@@ -327,6 +327,79 @@ class RaidenControllerTest(absltest.TestCase):
     self.assertTrue(future.done())
     self.assertGreater(len(recorded_calls), 0)
 
+  def test_greedy_tree_broadcast_exception_propagation(self):
+    class MockFailureWorkerClient(raiden_controller.WorkerRpcClient):
+
+      async def start_transfer(self, target_id, transfer_plan) -> None:
+        if target_id.job_replica_id == "1":
+          raise RuntimeError("Simulated start_transfer failure")
+
+    mock_client = MockFailureWorkerClient()
+    controller = raiden_controller.RaidenController(
+        port=10005, worker_rpc_client=mock_client
+    )
+    controller.broadcast_k = 2
+
+    src = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="weights"
+    )
+    target_0 = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="0", data_name="weights"
+    )
+    target_1 = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="1", data_name="weights"
+    )
+    target_2 = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="2", data_name="weights"
+    )
+
+    controller.register_work_unit(
+        src,
+        ["10.0.0.1:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.1:9000",
+    )
+    controller.register_work_unit(
+        target_0,
+        ["10.0.0.2:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.2:9000",
+    )
+    controller.register_work_unit(
+        target_1,
+        ["10.0.0.3:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.3:9000",
+    )
+    controller.register_work_unit(
+        target_2,
+        ["10.0.0.4:8000"],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        global_shape=[128, 128],
+        itemsize=4,
+        control_plane_rpc_address="10.0.0.4:9000",
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[target_0, target_1, target_2],
+        use_block_chunks=True,
+    )
+    with self.assertRaisesRegex(
+        RuntimeError, "Simulated start_transfer failure"
+    ):
+      asyncio.run(future.wait())
+
 
 if __name__ == "__main__":
   absltest.main()
