@@ -241,6 +241,22 @@ cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/raiden_service_pb2.py" "${WORKS
 cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/coordination_pb2.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
 cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/coordination_pb2_grpc.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
 
+echo "=== Linking C++ control-plane service binaries into source tree ==="
+# The KVCacheStore tests (kv_cache_store_test.py / kv_cache_store_e2e_test.py)
+# launch these binaries from their SOURCE-tree path, but Bazel emits them under
+# bazel-bin/. Symlink them so a fresh checkout can run the tests without extra
+# steps.
+link_service_binary() {
+  local rel="$1"
+  local src="${WORKSPACE_DIR}/bazel-bin/${rel}"
+  local dst="${WORKSPACE_DIR}/${rel}"
+  if [ -e "${src}" ]; then
+    ln -sf "${src}" "${dst}"
+  fi
+}
+link_service_binary "tpu_raiden/core/controller/raiden_orchestrator_main"
+link_service_binary "tpu_raiden/kv_cache/global_registry/global_registry_server"
+
 echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then
   echo "Copying JAX artifacts..."
