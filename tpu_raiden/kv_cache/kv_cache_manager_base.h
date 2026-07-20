@@ -135,6 +135,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("D2hWrite is not implemented");
+  }
+
   // Auto-allocating offloads E2E
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
