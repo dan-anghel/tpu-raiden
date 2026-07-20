@@ -283,6 +283,7 @@ cc_library(
         ":status_macros",
         ":tpu_utils",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/kv_cache:pool_layout",
         "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
@@ -290,7 +291,9 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:errors",
     ],
@@ -574,6 +577,27 @@ cc_test(
     ],
     deps = [
         ":kv_cache_manager_with_transfer",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_manager_with_transfer_pool_reshard_test",
+    srcs = ["kv_cache_manager_with_transfer_pool_reshard_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    deps = [
+        ":kv_cache_manager_with_transfer",
+        "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest_main",
     ],
 )
