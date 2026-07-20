@@ -52,7 +52,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":raw_buffer_transport",
-        "//tpu_raiden/transport/lib/util",
+        "//tpu_raiden/transport/peregrine/src/util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",

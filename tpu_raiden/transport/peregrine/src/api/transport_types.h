@@ -12,24 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/lib/util/util.h"
+#ifndef THIRD_PARTY_PEREGRINE_SRC_API_TRANSPORT_TYPES_H_
+#define THIRD_PARTY_PEREGRINE_SRC_API_TRANSPORT_TYPES_H_
 
-#include <gtest/gtest.h>
-#include "absl/random/random.h"
+#include <cstdint>
 
-namespace tpu_raiden::transport::lib::testing {
-namespace {
+namespace peregrine {
 
-TEST(UtilTest, Random) {
-  absl::BitGen gen;
-  for (int i = 0; i < 100; ++i) {
-    EXPECT_EQ(Random(gen, 0, 0), 0);
-    EXPECT_EQ(Random(gen, 1, 1), 1);
-    const int n = Random(gen, 1, 10);
-    EXPECT_LE(1, n);
-    EXPECT_LE(n, 10);
-  }
-}
+// `Byte` is an 8-bit unit of data.
+using Byte = uint8_t;
 
-}  // namespace
-}  // namespace tpu_raiden::transport::lib::testing
+}  // namespace peregrine
+
+#endif  // THIRD_PARTY_PEREGRINE_SRC_API_TRANSPORT_TYPES_H_

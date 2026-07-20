@@ -12,26 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/lib/util/util.h"
+#include "tpu_raiden/transport/peregrine/src/api/socket_util.h"
+
+#include <sys/uio.h>
 
 #include "absl/log/check.h"
-#include "absl/random/bit_gen_ref.h"
-#include "absl/random/random.h"
+#include "absl/status/status.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/transport/lib/base/types.h"
 
-namespace tpu_raiden::transport::lib {
+namespace peregrine {
 
-void RandomNonZero(absl::Span<Byte> data) {
-  absl::BitGen bitgen;
-  RandomNonZero(bitgen, data);
-}
-
-void RandomNonZero(absl::BitGenRef bitgen, absl::Span<Byte> data) {
-  for (int i = 0; i < data.size(); ++i) {
-    data[i] = Random<Byte>(bitgen, 0x01, 0xff);
-    DCHECK_NE(data[i], 0);
+absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iovs) {
+  for (const auto& iov : iovs) {
+    const absl::Status s = WriteExact(fd, iov.iov_base, iov.iov_len);
+    if (!s.ok()) return s;
   }
+  return absl::OkStatus();
 }
 
-}  // namespace tpu_raiden::transport::lib
+absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iovs) {
+  for (const auto& iov : iovs) {
+    const absl::Status s = ReadExact(fd, iov.iov_base, iov.iov_len);
+    if (!s.ok()) return s;
+  }
+  return absl::OkStatus();
+}
+
+}  // namespace peregrine

@@ -12,19 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_LIB_UTIL_UTIL_H_
-#define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_LIB_UTIL_UTIL_H_
+#ifndef THIRD_PARTY_PEREGRINE_SRC_UTIL_UTIL_H_
+#define THIRD_PARTY_PEREGRINE_SRC_UTIL_UTIL_H_
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <type_traits>
 
 #include "absl/log/check.h"
 #include "absl/random/bit_gen_ref.h"
-#include "absl/random/distributions.h"
+#include "absl/random/random.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/transport/lib/base/types.h"
+#include "third_party/xxhash/xxhash.h"
 
-namespace tpu_raiden::transport::lib {
+namespace peregrine::util {
+
+// `Byte` is an 8-bit unit of data.
+using Byte = uint8_t;
 
 // Returns true iff all the `data` bytes are zero.
 inline bool AllZero(absl::Span<const Byte> data) {
@@ -41,12 +46,28 @@ T Random(absl::BitGenRef gen, T min = std::numeric_limits<T>::min(),
   return absl::Uniform<T>(absl::IntervalClosedClosed, gen, min, max);
 }
 
+// Generates a random boolean value.
+inline bool Toss(absl::BitGenRef bitgen) {
+  return Random<uint8_t>(bitgen, 0, 1) == 0;
+}
+
 // Generates random non-zero bytes.
 void RandomNonZero(absl::Span<Byte> data);
 
 // Generates random non-zero bytes.
 void RandomNonZero(absl::BitGenRef bitgen, absl::Span<Byte> data);
 
-}  // namespace tpu_raiden::transport::lib
+// Calculates the XXH3 hash for the data.
+inline uint64_t Xx3Hash(absl::Span<const Byte> data) {
+  return XXH3_64bits(data.data(), data.size());
+}
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_LIB_UTIL_UTIL_H_
+// Finds an unused port in the range [10,000, 65,535], inclusively. Returns
+// the port number if successful, or 0 otherwise.
+// Note: there is no guarantee that the found port is still available when
+// the caller actually uses it.
+uint16_t FindFreePort(int family, bool tcp);
+
+}  // namespace peregrine::util
+
+#endif  // THIRD_PARTY_PEREGRINE_SRC_UTIL_UTIL_H_

@@ -12,11 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+# Only for internal implementations.
+
+package_group(
+    name = "public_api",
+    packages = ["//tpu_raiden/transport/peregrine/src/api/..."],
+)
+
+package_group(
+    name = "internal_impl",
+    includes = [":public_api"],
+    packages = ["//tpu_raiden/transport/peregrine/src/internal/..."],
+)
 
 package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "types",
-    hdrs = ["types.h"],
-)

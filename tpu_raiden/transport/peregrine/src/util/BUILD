@@ -12,20 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Utility functions for dev/testing.
+
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "macro",
+    hdrs = ["macro.h"],
+)
 
 cc_library(
     name = "util",
     srcs = ["util.cc"],
     hdrs = ["util.h"],
     deps = [
-        "//tpu_raiden/transport/lib/base:types",
+        "//third_party/xxhash",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/random",
         "@com_google_absl//absl/random:bit_gen_ref",
-        "@com_google_absl//absl/random:distributions",
         "@com_google_absl//absl/types:span",
     ],
 )

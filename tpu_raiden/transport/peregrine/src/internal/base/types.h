@@ -12,15 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_LIB_BASE_TYPES_H_
-#define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_LIB_BASE_TYPES_H_
+#ifndef THIRD_PARTY_PEREGRINE_SRC_INTERNAL_BASE_TYPES_H_
+#define THIRD_PARTY_PEREGRINE_SRC_INTERNAL_BASE_TYPES_H_
+
+#include <sys/uio.h>
 
 #include <cstdint>
 
-namespace tpu_raiden::transport::lib {
+#include "third_party/gloop/util/intops/strong_int.h"
 
+namespace peregrine::internal {
+
+// `Byte` is an 8-bit unit of data.
 using Byte = uint8_t;
 
-}  // namespace tpu_raiden::transport::lib
+// tcp/udp port
+using port_t = uint16_t;
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_LIB_BASE_TYPES_H_
+// hash value
+using HashValue = uint64_t;
+
+// io vector
+using IoVec = ::iovec;
+
+// Socket file descriptor.
+DEFINE_STRONG_INT_TYPE(fd_t, int);
+
+}  // namespace peregrine::internal
+
+#endif  // THIRD_PARTY_PEREGRINE_SRC_INTERNAL_BASE_TYPES_H_
