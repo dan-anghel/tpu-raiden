@@ -251,6 +251,7 @@ cc_library(
     deps = [
         ":lru_cache",
         ":raiden_id",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:numa_thread_pool",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core/controller:raiden_controller",

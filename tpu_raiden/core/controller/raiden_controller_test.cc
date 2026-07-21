@@ -681,7 +681,7 @@ TEST_F(RaidenControllerTest, TransferBuffersBufferProtoSuccess) {
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(0, 1));
 }
 
-TEST_F(RaidenControllerTest, LegacyTransferBuffersTargetedSuccess) {
+TEST_F(RaidenControllerTest, TransferBuffersBroadcastSuccess) {
   MockTransferManager mock_mgr;
   test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
@@ -689,39 +689,10 @@ TEST_F(RaidenControllerTest, LegacyTransferBuffersTargetedSuccess) {
                               /*shard_size_bytes=*/512);
   RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
 
-  std::vector<int64_t> src_offsets = {10, 30};
-  std::vector<int64_t> dst_offsets = {20, 40};
-  std::vector<int64_t> copy_sizes = {1, 2};
+  Buffer src_buf(100, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
+  Buffer dst_buf(200, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
 
-  auto status = controller
-                    .TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
-                                     rpc::MEMORY_TYPE_DRAM, src_offsets,
-                                     dst_offsets, copy_sizes, "")
-                    .Await();
-  ASSERT_TRUE(status.ok());
-  EXPECT_EQ(mock_mgr.d2h_calls, 1);
-  EXPECT_EQ(mock_mgr.h2d_calls, 0);
-  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10, 30));
-  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20, 40));
-  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1, 2));
-}
-
-TEST_F(RaidenControllerTest, LegacyTransferBuffersBroadcastSuccess) {
-  MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
-
-  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
-                              /*shard_size_bytes=*/512);
-  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
-
-  std::vector<int64_t> src_offsets = {100};
-  std::vector<int64_t> dst_offsets = {200};
-
-  auto status =
-      controller
-          .TransferBuffers(rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM,
-                           src_offsets, dst_offsets, {}, {})
-          .Await();
+  auto status = controller.TransferBuffers({src_buf}, {dst_buf}).Await();
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 1);
@@ -729,7 +700,7 @@ TEST_F(RaidenControllerTest, LegacyTransferBuffersBroadcastSuccess) {
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
 }
 
-TEST_F(RaidenControllerTest, LegacyTransferBuffersH2HSuccess) {
+TEST_F(RaidenControllerTest, TransferBuffersBroadcastH2HSuccess) {
   MockTransferManager mock_mgr;
   test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
@@ -737,15 +708,10 @@ TEST_F(RaidenControllerTest, LegacyTransferBuffersH2HSuccess) {
                               /*shard_size_bytes=*/512);
   RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
 
-  std::vector<int64_t> src_offsets = {5};
-  std::vector<int64_t> dst_offsets = {6};
+  Buffer src_buf(5, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
+  Buffer dst_buf(6, {}, "localhost:8080", rpc::MEMORY_TYPE_DRAM);
 
-  auto status =
-      controller
-          .TransferBuffers(rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_DRAM,
-                           src_offsets, dst_offsets, {},
-                           std::vector<std::string>{"localhost:8080"})
-          .Await();
+  auto status = controller.TransferBuffers({src_buf}, {dst_buf}).Await();
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
   EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");

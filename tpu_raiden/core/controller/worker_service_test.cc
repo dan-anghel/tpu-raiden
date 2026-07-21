@@ -129,7 +129,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hSuccess) {
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
   transfer->add_src_offsets(10);
   transfer->add_dst_offsets(20);
-  transfer->set_peer("localhost:8080");
+  transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   ASSERT_TRUE(status.ok());
@@ -170,7 +170,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {
   transfer->add_src_offsets(10);
   transfer->add_dst_offsets(20);
   transfer->add_copy_sizes(2);
-  transfer->set_peer("localhost:8080");
+  transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   EXPECT_FALSE(status.ok());
@@ -188,7 +188,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hOverflowFails) {
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
   transfer->add_src_offsets(2147483648L);
   transfer->add_dst_offsets(20);
-  transfer->set_peer("localhost:8080");
+  transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   EXPECT_FALSE(status.ok());
@@ -280,7 +280,7 @@ TEST_F(WorkerServiceTest, TransferBuffersRemoteD2hWithPeerSuccess) {
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
   transfer->add_src_offsets(100);
   transfer->add_dst_offsets(200);
-  transfer->set_peer("remote_host:1234");
+  transfer->add_dst_buffers()->set_remote_address("remote_host:1234");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   ASSERT_TRUE(status.ok());
@@ -398,7 +398,7 @@ TEST_F(WorkerServiceTest, TransferBuffersRemoteH2dWithPeerSuccess) {
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
   transfer->add_src_offsets(100);
   transfer->add_dst_offsets(200);
-  transfer->set_peer("remote_host:1234");
+  transfer->add_dst_buffers()->set_remote_address("remote_host:1234");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   ASSERT_TRUE(status.ok());

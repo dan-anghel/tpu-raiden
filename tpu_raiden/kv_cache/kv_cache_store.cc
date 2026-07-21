@@ -21,7 +21,7 @@
 #include <limits>
 #include <optional>
 #include <string>
-#include <thread>
+#include <thread>  // NOLINT(build/c++11)
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -41,6 +41,7 @@
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/raiden_controller.h"
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
@@ -408,13 +409,23 @@ absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
     return host_blocks_or.status();
   }
   const auto& host_block_ids = host_blocks_or.value();
-  std::vector<int64_t> host_block_ids_64(host_block_ids.begin(),
-                                         host_block_ids.end());
+
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(src_device_block_ids.size());
+  for (int64_t id : src_device_block_ids) {
+    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_HBM);
+  }
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(host_block_ids.size());
+  for (int id : host_block_ids) {
+    dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_DRAM);
+  }
 
   // Trigger transfer
-  tsl::Future<> future = raiden_controller_->TransferBuffers(
-      rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_device_block_ids,
-      host_block_ids_64);
+  tsl::Future<> future =
+      raiden_controller_->TransferBuffers(src_buffers, dst_buffers);
 
   {
     absl::MutexLock lock(mutex_);
@@ -473,13 +484,22 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
     }
   }
 
-  std::vector<int64_t> dst_device_block_ids(device_block_ids.begin(),
-                                            device_block_ids.end());
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(src_host_block_ids.size());
+  for (int64_t id : src_host_block_ids) {
+    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_DRAM);
+  }
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(device_block_ids.size());
+  for (int id : device_block_ids) {
+    dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_HBM);
+  }
 
   // Trigger transfer
-  tsl::Future<> future = raiden_controller_->TransferBuffers(
-      rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM, src_host_block_ids,
-      dst_device_block_ids);
+  tsl::Future<> future =
+      raiden_controller_->TransferBuffers(src_buffers, dst_buffers);
 
   {
     absl::MutexLock lock(mutex_);

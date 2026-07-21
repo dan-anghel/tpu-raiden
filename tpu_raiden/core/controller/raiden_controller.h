@@ -127,22 +127,7 @@ class RaidenController {
                                 absl::Span<const Buffer> dst_buffers,
                                 absl::Span<const int64_t> copy_sizes = {});
 
-  // Legacy targeted worker transfer using raw block offsets
-  tsl::Future<> TransferBuffers(absl::string_view worker_id,
-                                rpc::MemoryType src_mem_type,
-                                rpc::MemoryType dst_mem_type,
-                                absl::Span<const int64_t> src_offsets,
-                                absl::Span<const int64_t> dst_offsets,
-                                absl::Span<const int64_t> copy_sizes = {},
-                                absl::string_view peer = "");
 
-  // Legacy broadcast transfer using raw block offsets
-  tsl::Future<> TransferBuffers(rpc::MemoryType src_mem_type,
-                                rpc::MemoryType dst_mem_type,
-                                absl::Span<const int64_t> src_offsets,
-                                absl::Span<const int64_t> dst_offsets,
-                                absl::Span<const int64_t> copy_sizes = {},
-                                absl::Span<const std::string> peers = {});
 
   // Initiates remote read from source controller.
   tsl::Future<> ReadRemote(const kv_cache::RaidenId& src_raiden_id,
@@ -176,16 +161,12 @@ class RaidenController {
       absl::Span<const Buffer> dst_buffers,
       absl::Span<const int64_t> copy_sizes);
 
-  absl::StatusOr<proto::TransferBuffersRequest> BuildRawTransferBuffersRequest(
-      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-      absl::Span<const int64_t> src_offsets,
-      absl::Span<const int64_t> dst_offsets,
-      absl::Span<const int64_t> copy_sizes, absl::string_view peer);
 
   void Init(absl::Span<const std::string> worker_addresses,
             absl::string_view raiden_orchestrator_address);
 
-  absl::Status InitializeWorkerBuffers(core::controller::WorkerRegistration& reg);
+  absl::Status InitializeWorkerBuffers(
+      core::controller::WorkerRegistration& reg);
   rpc::RaidenIdProto unit_;
 
   int num_shards_;
