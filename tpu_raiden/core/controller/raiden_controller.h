@@ -110,6 +110,12 @@ class RaidenController {
   // No RPC is performed.
   absl::Status DeallocateBlockIds(absl::Span<const int> block_ids);
 
+  // New API (Logical/Block ID Mode):
+  // Marks the given logical block IDs as allocated and locked in the block
+  // manager, restoring allocator state after an owner restart. No RPC is
+  // performed.
+  absl::Status RestoreAllocatedBlockIds(absl::Span<const int> block_ids);
+
   // Targeted worker transfer
   tsl::Future<> TransferBuffers(absl::string_view worker_id,
                                 absl::Span<const Buffer> src_buffers,

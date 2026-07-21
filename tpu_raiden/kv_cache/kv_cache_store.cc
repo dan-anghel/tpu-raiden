@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -671,6 +672,92 @@ KVCacheStore::PollLoadStatus() {
   }
 
   return {std::move(done), std::move(failed), std::move(pending)};
+}
+
+absl::StatusOr<size_t> KVCacheStore::RecoverFromRegistry() {
+  if (!registry_client_) {
+    return absl::FailedPreconditionError(
+        "RecoverFromRegistry requires a global registry connection");
+  }
+  if (!raiden_controller_) {
+    return absl::FailedPreconditionError(
+        "RecoverFromRegistry requires a raiden controller");
+  }
+
+  auto pulled_or = registry_client_->PullOwned(raiden_id_);
+  if (!pulled_or.ok()) {
+    return pulled_or.status();
+  }
+  std::vector<global_registry::GlobalRegistryClient::PulledEntry> pulled =
+      *std::move(pulled_or);
+  if (pulled.empty()) {
+    return 0;
+  }
+
+  // Sort so that entries closest to expiry come first: they are inserted
+  // first and therefore evicted first. 0 means "never expires" and sorts as
+  // the most recent.
+  auto effective_ttl =
+      [](const global_registry::GlobalRegistryClient::PulledEntry& entry) {
+        return entry.remaining_ttl_seconds == 0
+                   ? std::numeric_limits<int64_t>::max()
+                   : entry.remaining_ttl_seconds;
+      };
+  std::sort(pulled.begin(), pulled.end(),
+            [&effective_ttl](const auto& a, const auto& b) {
+              return effective_ttl(a) < effective_ttl(b);
+            });
+
+  absl::MutexLock lock(mutex_);
+
+  // Skip hashes already present, then keep only the most recently registered
+  // entries that fit in the remaining directory capacity. The skip is
+  // defensive: the directory is normally empty here, but it keeps a re-pull
+  // after a partial recovery (or a call on a live store) from double-inserting.
+  std::vector<const global_registry::GlobalRegistryClient::PulledEntry*>
+      eligible;
+  eligible.reserve(pulled.size());
+  for (const auto& entry : pulled) {
+    if (lru_cache_.PeekIncludingCandidates(entry.prefix_hash) == nullptr) {
+      eligible.push_back(&entry);
+    }
+  }
+  size_t available = lru_cache_.capacity() > lru_cache_.active_size()
+                         ? lru_cache_.capacity() - lru_cache_.active_size()
+                         : 0;
+  if (eligible.size() > available) {
+    LOG(WARNING) << "RecoverFromRegistry: " << eligible.size()
+                 << " recoverable entries exceed remaining capacity "
+                 << available << "; skipping the oldest ones";
+    eligible.erase(eligible.begin(), eligible.end() - available);
+  }
+  if (eligible.empty()) {
+    return 0;
+  }
+
+  std::vector<int> block_ids;
+  block_ids.reserve(eligible.size());
+  for (const auto* entry : eligible) {
+    block_ids.push_back(entry->block_id);
+  }
+  auto restore_status =
+      raiden_controller_->RestoreAllocatedBlockIds(block_ids);
+  if (!restore_status.ok()) {
+    return restore_status;
+  }
+
+  for (const auto* entry : eligible) {
+    auto evicted = lru_cache_.Put(
+        entry->prefix_hash,
+        RaidenBlockID(raiden_id_, entry->block_id, BlockStatus::HOST));
+    if (evicted.has_value()) {
+      // Not expected: inserts are capped to the remaining capacity above.
+      LOG(WARNING) << "RecoverFromRegistry: unexpected eviction of "
+                   << evicted->first;
+      DeallocateBlockIds({evicted->second.host_block_id});
+    }
+  }
+  return eligible.size();
 }
 
 absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlockIds(int needed) {

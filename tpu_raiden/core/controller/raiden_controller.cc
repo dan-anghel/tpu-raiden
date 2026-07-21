@@ -341,6 +341,12 @@ absl::Status RaidenController::DeallocateBlockIds(
   return block_manager_->Unlock(block_ids);
 }
 
+absl::Status RaidenController::RestoreAllocatedBlockIds(
+    absl::Span<const int> block_ids) {
+  absl::MutexLock lock(mutex_);
+  return block_manager_->RestoreAllocated(block_ids);
+}
+
 absl::Status RaidenController::DeallocateBuffers(
     absl::Span<const Buffer> buffers) {
   std::vector<proto::BufferProto> protos;

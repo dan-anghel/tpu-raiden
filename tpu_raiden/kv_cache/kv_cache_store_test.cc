@@ -2128,6 +2128,178 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   registry_server->Shutdown();
 }
 
+
+// In-process registry plus client, for RecoverFromRegistry tests.
+struct RecoveryRegistrySetup {
+  RecoveryRegistrySetup() {
+    service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+    grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("localhost:0", grpc::InsecureServerCredentials(),
+                             &port);
+    builder.RegisterService(service.get());
+    server = builder.BuildAndStart();
+    address = absl::StrCat("localhost:", port);
+    client = std::make_unique<global_registry::GlobalRegistryClient>(
+        grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
+  }
+  ~RecoveryRegistrySetup() { server->Shutdown(); }
+
+  std::unique_ptr<global_registry::GlobalRegistryServiceImpl> service;
+  std::unique_ptr<grpc::Server> server;
+  std::string address;
+  std::unique_ptr<global_registry::GlobalRegistryClient> client;
+};
+
+// Worker-less controller: sufficient for recovery, which only touches the
+// logical block manager.
+std::unique_ptr<::tpu_raiden::controller::RaidenController>
+MakeRecoveryController(const RaidenId& rid, int num_blocks) {
+  rpc::RaidenIdProto unit;
+  unit.set_job_name(rid.job_name);
+  unit.set_job_replica_id(rid.job_replica_id);
+  unit.set_data_name(rid.data_name);
+  unit.set_data_replica_idx(rid.data_replica_idx);
+  return std::make_unique<::tpu_raiden::controller::RaidenController>(
+      unit, num_blocks, /*num_shards=*/1, /*shard_size_bytes=*/512,
+      /*raiden_controller_port=*/0, /*raiden_orchestrator_address=*/"");
+}
+
+TEST(KVCacheStoreTest, RecoverFromRegistryRebuildsDirectory) {
+  RecoveryRegistrySetup registry;
+  RaidenId rid{"recover_job", "0", "kv_cache", 0};
+
+  // Entries left behind by the previous incarnation of this owner, plus one
+  // foreign entry that must not be recovered.
+  ASSERT_TRUE(registry.client
+                  ->Register({{"rh1", rid, 5, absl::Seconds(60)},
+                              {"rh2", rid, 7, absl::Seconds(600)},
+                              {"rh3", rid, 9, absl::Seconds(6000)}})
+                  .ok());
+  RaidenId other{"other_job", "0", "kv_cache", 0};
+  ASSERT_TRUE(
+      registry.client->Register({{"oh", other, 3, absl::Seconds(600)}}).ok());
+
+  auto controller = MakeRecoveryController(rid, 10);
+  auto* controller_ptr = controller.get();
+  KVCacheStore store(10, std::move(controller), registry.address, rid);
+
+  auto recovered_or = store.RecoverFromRegistry();
+  ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
+  EXPECT_EQ(*recovered_or, 3);
+
+  auto lookup = store.Lookup({"rh1", "rh2", "rh3"});
+  ASSERT_TRUE(lookup.ok());
+  ASSERT_EQ(lookup->size(), 3);
+  EXPECT_EQ((*lookup)[0].second.status, BlockStatus::HOST);
+  EXPECT_EQ((*lookup)[0].second.host_block_id, 5);
+  EXPECT_EQ((*lookup)[1].second.host_block_id, 7);
+  EXPECT_EQ((*lookup)[2].second.host_block_id, 9);
+  EXPECT_EQ(store.Lookup({"oh"})->size(), 0);
+
+  // Recovered blocks are allocated and locked; new allocations avoid them.
+  auto* block_manager = controller_ptr->block_manager();
+  for (int id : {5, 7, 9}) {
+    EXPECT_TRUE(block_manager->IsAllocated(id));
+    EXPECT_TRUE(block_manager->IsLocked(id));
+  }
+  auto alloc_or = controller_ptr->AllocateBlockIds(7);
+  ASSERT_TRUE(alloc_or.ok());
+  for (int id : *alloc_or) {
+    EXPECT_NE(id, 5);
+    EXPECT_NE(id, 7);
+    EXPECT_NE(id, 9);
+  }
+}
+
+TEST(KVCacheStoreTest, RecoverFromRegistryPrefersLargestRemainingTtl) {
+  RecoveryRegistrySetup registry;
+  RaidenId rid{"recover_job_ttl", "0", "kv_cache", 0};
+  ASSERT_TRUE(registry.client
+                  ->Register({{"rh1", rid, 1, absl::Seconds(30)},
+                              {"rh2", rid, 2, absl::Seconds(300)},
+                              {"rh3", rid, 3, absl::Seconds(3000)}})
+                  .ok());
+
+  // Directory capacity 2 < 3 pulled entries: only the two entries with the
+  // largest remaining TTL are recovered.
+  KVCacheStore store(2, MakeRecoveryController(rid, 10), registry.address,
+                     rid);
+  auto recovered_or = store.RecoverFromRegistry();
+  ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
+  EXPECT_EQ(*recovered_or, 2);
+  EXPECT_EQ(store.Lookup({"rh1"})->size(), 0);
+  EXPECT_EQ(store.Lookup({"rh2"})->size(), 1);
+  EXPECT_EQ(store.Lookup({"rh3"})->size(), 1);
+}
+
+TEST(KVCacheStoreTest, RecoverFromRegistrySkipsExistingHashes) {
+  RecoveryRegistrySetup registry;
+  RaidenId rid{"recover_job_skip", "0", "kv_cache", 0};
+  ASSERT_TRUE(registry.client
+                  ->Register({{"rh1", rid, 5, absl::Seconds(600)},
+                              {"rh2", rid, 7, absl::Seconds(600)}})
+                  .ok());
+
+  auto controller = MakeRecoveryController(rid, 10);
+  auto* controller_ptr = controller.get();
+  KVCacheStore store(10, std::move(controller), registry.address, rid);
+
+  // rh1 is already tracked locally (e.g. freshly computed): recovery must not
+  // overwrite it, and must not restore its stale registry block ID.
+  ASSERT_TRUE(store
+                  .Insert({"rh1"}, {RaidenBlockID(rid, -1, 0, BlockStatus::HBM)},
+                          /*on_host=*/false)
+                  .first);
+
+  auto recovered_or = store.RecoverFromRegistry();
+  ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
+  EXPECT_EQ(*recovered_or, 1);
+
+  auto lookup = store.Lookup({"rh1"});
+  ASSERT_EQ(lookup->size(), 1);
+  EXPECT_EQ((*lookup)[0].second.status, BlockStatus::HBM);
+  EXPECT_EQ((*lookup)[0].second.host_block_id, -1);
+  EXPECT_FALSE(controller_ptr->block_manager()->IsAllocated(5));
+}
+
+// Only reachable through misuse: recovery must run on a fresh store, so a
+// conflicting allocation means someone allocated before (or instead of)
+// recovering. Verifies the failure is clean — error out, directory untouched.
+TEST(KVCacheStoreTest, RecoverFromRegistryFailsOnAllocatorConflict) {
+  RecoveryRegistrySetup registry;
+  RaidenId rid{"recover_job_conflict", "0", "kv_cache", 0};
+
+  auto controller = MakeRecoveryController(rid, 10);
+  auto* controller_ptr = controller.get();
+  // Block 0 is already taken locally before recovery runs.
+  ASSERT_TRUE(controller_ptr->AllocateBlockIds(1).ok());
+  ASSERT_TRUE(
+      registry.client->Register({{"rh1", rid, 0, absl::Seconds(600)}}).ok());
+
+  KVCacheStore store(10, std::move(controller), registry.address, rid);
+  auto recovered_or = store.RecoverFromRegistry();
+  EXPECT_EQ(recovered_or.status().code(),
+            absl::StatusCode::kFailedPrecondition);
+  EXPECT_EQ(store.Lookup({"rh1"})->size(), 0);
+}
+
+TEST(KVCacheStoreTest, RecoverFromRegistryPreconditions) {
+  RaidenId rid{"recover_job_pre", "0", "kv_cache", 0};
+  // No registry connection.
+  KVCacheStore store_no_registry(10, MakeRecoveryController(rid, 10), "", rid);
+  EXPECT_EQ(store_no_registry.RecoverFromRegistry().status().code(),
+            absl::StatusCode::kFailedPrecondition);
+
+  // Registry reachable but empty: recovery succeeds with zero blocks.
+  RecoveryRegistrySetup registry;
+  KVCacheStore store_empty(10, MakeRecoveryController(rid, 10),
+                           registry.address, rid);
+  auto recovered_or = store_empty.RecoverFromRegistry();
+  ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
+  EXPECT_EQ(*recovered_or, 0);
+}
+
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden

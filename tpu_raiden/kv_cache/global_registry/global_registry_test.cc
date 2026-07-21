@@ -380,6 +380,36 @@ TEST_F(GlobalRegistryTest, PullOwnedRemainingTtlForExpiringEntry) {
   EXPECT_LE(entries[0].remaining_ttl_seconds(), 300);
 }
 
+TEST_F(GlobalRegistryTest, ClientPullOwnedReturnsEntries) {
+  RaidenId owner = {"jobW", "r1", "d1", 0};
+  ASSERT_TRUE(client_
+                  ->Register({{"h1", owner, 7, absl::Seconds(300)},
+                              {"h2", owner, 8, absl::Seconds(300)}})
+                  .ok());
+
+  auto pulled_or = client_->PullOwned(owner);
+  ASSERT_TRUE(pulled_or.ok()) << pulled_or.status().ToString();
+  ASSERT_EQ(pulled_or->size(), 2);
+  std::map<std::string, GlobalRegistryClient::PulledEntry> by_hash;
+  for (const auto& entry : *pulled_or) {
+    by_hash[entry.prefix_hash] = entry;
+  }
+  EXPECT_EQ(by_hash.at("h1").block_id, 7);
+  EXPECT_EQ(by_hash.at("h2").block_id, 8);
+  EXPECT_GT(by_hash.at("h1").remaining_ttl_seconds, 0);
+}
+
+TEST_F(GlobalRegistryTest, ClientPullOwnedEmptyForUnknownOwner) {
+  auto pulled_or = client_->PullOwned({"nobody", "r1", "d1", 0});
+  ASSERT_TRUE(pulled_or.ok()) << pulled_or.status().ToString();
+  EXPECT_TRUE(pulled_or->empty());
+}
+
+TEST_F(GlobalRegistryTest, ClientPullOwnedRejectsEmptyRaidenId) {
+  auto pulled_or = client_->PullOwned(RaidenId{});
+  EXPECT_FALSE(pulled_or.ok());
+}
+
 TEST_F(GlobalRegistryTest, PullOwnedRemainingTtlZeroForInfiniteTtl) {
   GlobalRegistryServiceImpl service(
       /*default_ttl=*/absl::InfiniteDuration(),
