@@ -30,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <utility>

@@ -23,7 +23,6 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -279,9 +278,7 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
   close(client_fd);
   {
     absl::MutexLock _( mu_ );
-    active_client_fds_.erase(std::remove(active_client_fds_.begin(),
-                                         active_client_fds_.end(), client_fd),
-                             active_client_fds_.end());
+    active_client_fds_.erase(client_fd);
   }
 }
 
@@ -314,7 +311,7 @@ void RawBufferTransport::ListenerLoop() {
 
     {
       absl::MutexLock _( mu_ );
-      active_client_fds_.push_back(client_fd);
+      active_client_fds_.insert(client_fd);
     }
 
     worker_threads_.push_back(

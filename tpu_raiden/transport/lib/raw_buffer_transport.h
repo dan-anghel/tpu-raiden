@@ -26,6 +26,7 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -109,7 +110,7 @@ class RawBufferTransport {
   std::atomic<bool> stopping_{false};
 
   absl::Mutex mu_;
-  std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_set<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
 
   absl::Mutex pool_mu_;
   absl::flat_hash_map<std::string, std::vector<int>> conn_pool_

@@ -15,10 +15,12 @@
 #include "tpu_raiden/transport/block_transport.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>  // NOLINT
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <tuple>
@@ -31,6 +33,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 
 namespace tpu_raiden {
 namespace transport {
