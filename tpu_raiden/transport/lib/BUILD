@@ -31,6 +31,7 @@ cc_library(
     deps = [
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/transport/lib/socket:util",
+        "//tpu_raiden/transport/peregrine/src/api:socket_util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",

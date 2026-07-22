@@ -42,8 +42,12 @@
 #include "absl/synchronization/mutex.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/transport/lib/socket/util.h"
+#include "tpu_raiden/transport/peregrine/src/api/socket_util.h"
 
 namespace tpu_raiden::transport::lib {
+
+using ::peregrine::ReadExact;
+using ::peregrine::WriteExact;
 
 RawBufferTransport::RawBufferTransport(
     RawBufferTransportDelegate* delegate, int local_port,

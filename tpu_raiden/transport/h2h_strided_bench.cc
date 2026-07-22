@@ -76,13 +76,13 @@
 
 #include "absl/status/status.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/transport/lib/socket/util.h"
+#include "tpu_raiden/transport/peregrine/src/api/socket_util.h"
 
 namespace {
 
-using tpu_raiden::transport::lib::ReadExact;
-using tpu_raiden::transport::lib::WriteExact;
-using tpu_raiden::transport::lib::WriteVExact;
+using ::peregrine::ReadExact;
+using ::peregrine::WriteExact;
+using ::peregrine::WriteVExact;
 
 // ---------------------------------------------------------------------------
 // Qwen3.5-397B-A17B geometry (fp8 KV, hybrid unified block pool).

@@ -47,17 +47,17 @@
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/transport/lib/raw_buffer_transport.h"
-#include "tpu_raiden/transport/lib/socket/util.h"
+#include "tpu_raiden/transport/peregrine/src/api/socket_util.h"
 
 namespace tpu_raiden {
 namespace transport {
 
 namespace {
 
-using lib::ReadExact;
-using lib::ReadVExact;
-using lib::WriteExact;
-using lib::WriteVExact;
+using ::peregrine::ReadExact;
+using ::peregrine::ReadVExact;
+using ::peregrine::WriteExact;
+using ::peregrine::WriteVExact;
 
 constexpr uint8_t kUseBlockChunksFlag = 0x80;
 

@@ -15,7 +15,6 @@
 #include "tpu_raiden/transport/lib/socket/util.h"
 
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -24,14 +23,12 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
 #include <string>
 #include <vector>
 
-#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -39,133 +36,8 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/span.h"
 
 namespace tpu_raiden::transport::lib {
-
-namespace {
-inline bool IsValidSocket(int fd) { return fcntl(fd, F_GETFD) >= 0; }
-}  // namespace
-
-absl::Status WriteExact(int fd, const void* buffer, size_t length) {
-  DCHECK(IsValidSocket(fd));
-  struct iovec iov = {.iov_base = const_cast<void*>(buffer), .iov_len = length};
-  return WriteVExact(fd, {&iov, 1});
-}
-
-absl::Status ReadExact(int fd, void* buffer, size_t length) {
-  DCHECK(IsValidSocket(fd));
-  struct iovec iov = {.iov_base = buffer, .iov_len = length};
-  return ReadVExact(fd, {&iov, 1});
-}
-
-absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov) {
-  DCHECK(IsValidSocket(fd));
-  std::vector<struct iovec> local_iov(iov.begin(), iov.end());
-  size_t iov_idx = 0;
-  while (iov_idx < local_iov.size()) {
-    size_t batch_size =
-        std::min(local_iov.size() - iov_idx, static_cast<size_t>(IOV_MAX));
-
-    size_t batch_remaining = batch_size;
-    while (batch_remaining > 0) {
-      ssize_t written = writev(fd, &local_iov[iov_idx], batch_remaining);
-      if (written < 0) {
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          struct pollfd pfd;
-          pfd.fd = fd;
-          pfd.events = POLLOUT;
-          int poll_ret = poll(&pfd, 1, 120000);  // 120s timeout
-          if (poll_ret < 0) {
-            if (errno == EINTR) continue;
-            return absl::InternalError(absl::StrCat(
-                "Poll failed during WriteVExact: ", std::strerror(errno)));
-          }
-          if (poll_ret == 0) {
-            return absl::DeadlineExceededError(
-                "Timeout waiting for socket writability during WriteVExact");
-          }
-          continue;
-        }
-        return absl::InternalError(
-            absl::StrCat("Socket writev failed: ", std::strerror(errno)));
-      }
-      if (written == 0) {
-        return absl::InternalError("Socket closed unexpectedly during writev");
-      }
-
-      size_t remaining = written;
-      while (remaining > 0 && batch_remaining > 0) {
-        if (remaining >= local_iov[iov_idx].iov_len) {
-          remaining -= local_iov[iov_idx].iov_len;
-          iov_idx++;
-          batch_remaining--;
-        } else {
-          local_iov[iov_idx].iov_base =
-              static_cast<char*>(local_iov[iov_idx].iov_base) + remaining;
-          local_iov[iov_idx].iov_len -= remaining;
-          remaining = 0;
-        }
-      }
-    }
-  }
-  return absl::OkStatus();
-}
-
-absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov) {
-  DCHECK(IsValidSocket(fd));
-  std::vector<struct iovec> local_iov(iov.begin(), iov.end());
-  size_t iov_idx = 0;
-  while (iov_idx < local_iov.size()) {
-    size_t batch_size =
-        std::min(local_iov.size() - iov_idx, static_cast<size_t>(IOV_MAX));
-
-    size_t batch_remaining = batch_size;
-    while (batch_remaining > 0) {
-      ssize_t bytes_read = readv(fd, &local_iov[iov_idx], batch_remaining);
-      if (bytes_read < 0) {
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          struct pollfd pfd;
-          pfd.fd = fd;
-          pfd.events = POLLIN;
-          int poll_ret = poll(&pfd, 1, 120000);  // 120s timeout
-          if (poll_ret < 0) {
-            if (errno == EINTR) continue;
-            return absl::InternalError(absl::StrCat(
-                "Poll failed during ReadVExact: ", std::strerror(errno)));
-          }
-          if (poll_ret == 0) {
-            return absl::DeadlineExceededError(
-                "Timeout waiting for socket readability during ReadVExact");
-          }
-          continue;
-        }
-        return absl::InternalError(
-            absl::StrCat("Socket readv failed: ", std::strerror(errno)));
-      }
-      if (bytes_read == 0) {
-        return absl::InternalError("Socket closed unexpectedly during readv");
-      }
-
-      size_t remaining = bytes_read;
-      while (remaining > 0 && batch_remaining > 0) {
-        if (remaining >= local_iov[iov_idx].iov_len) {
-          remaining -= local_iov[iov_idx].iov_len;
-          iov_idx++;
-          batch_remaining--;
-        } else {
-          local_iov[iov_idx].iov_base =
-              static_cast<char*>(local_iov[iov_idx].iov_base) + remaining;
-          local_iov[iov_idx].iov_len -= remaining;
-          remaining = 0;
-        }
-      }
-    }
-  }
-  return absl::OkStatus();
-}
 
 absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
                                   absl::string_view local_ip) {
