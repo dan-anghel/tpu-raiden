@@ -1807,7 +1807,8 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
 
   const auto& request = plan.request;
   const auto& schedules = request.shard_push_schedules();
-  auto schedule_it = schedules.find(static_cast<int32_t>(shard_idx));
+  size_t global_shard_idx = this->node_id() + shard_idx;
+  auto schedule_it = schedules.find(static_cast<int32_t>(global_shard_idx));
   bool is_sender = plan.is_sender;
 
   std::vector<tpu_raiden::transport::BlockChunk> chunks;
@@ -1852,7 +1853,7 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
         // If src_block_id is -1, we fall back to matching only on dst_block_id.
         for (const auto& [src_shard, src_schedule] : schedules) {
           for (const auto& entry : src_schedule.entries()) {
-            if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
+            if (static_cast<size_t>(entry.dst_shard_idx()) == global_shard_idx &&
                 static_cast<size_t>(entry.dst_block_id()) == block_id &&
                 (src_block_id == -1 ||
                  static_cast<size_t>(entry.src_block_id()) == src_block_id)) {
@@ -1869,7 +1870,7 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
         if (schedule_found_it != schedules.end()) {
           const auto& schedule = schedule_found_it->second;
           for (const auto& entry : schedule.entries()) {
-            if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
+            if (static_cast<size_t>(entry.dst_shard_idx()) == global_shard_idx &&
                 static_cast<size_t>(entry.dst_block_id()) == block_id &&
                 (src_block_id == -1 ||
                  static_cast<size_t>(entry.src_block_id()) == src_block_id)) {
